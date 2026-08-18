@@ -24,6 +24,7 @@ const CORDIS_BINDINGS = Object.freeze({
 })
 const CORDIS_NATIVE_NAMES = new Set(Object.values(CORDIS_BINDINGS))
 const CORDIS_NATIVE_PREFIX = 'cordis_'
+const CORDIS_REPLAY_MEMBERS = new Set(['inspectSelf', 'define', 'run', 'stop', 'undefine'])
 const RUN_CODE_TOOL_DESCRIPTION = 'Evaluate the next TypeScript cell in this session-bound persistent REPL. Earlier top-level bindings remain available, so this call extends the current environment instead of creating a fresh one. Use `code` for the async-function body and `description` for its short UI summary. Only printed or returned values are output. Successful image-bearing subtool results are attached after the cell.'
 const RUN_CODE_CODE_DESCRIPTION = 'Code for the next REPL cell, parsed as the body of an async TypeScript function.'
 const RUN_CODE_DESCRIPTION_DESCRIPTION = 'Short active-voice summary of what this cell does, 5-10 words (shown in the UI).'
@@ -53,6 +54,166 @@ function isRecord(value) {
 
 function isCordisNativeName(value) {
   return typeof value === 'string' && value.startsWith(CORDIS_NATIVE_PREFIX)
+}
+
+function isCordisReplayMember(global, member) {
+  return global === 'cordis' && CORDIS_REPLAY_MEMBERS.has(member)
+}
+
+const CORDIS_ID_FIELDS = new Set(['pluginId', 'packageId', 'pluginRunId', 'currentPackageId', 'nextPackageId'])
+function cordisMapKey(field, value) {
+  return `${field}:${value}`
+}
+
+function rewriteCordisIds(value, mapping) {
+  if (Array.isArray(value)) return value.map(item => rewriteCordisIds(item, mapping))
+  if (value === null || typeof value !== 'object') return value
+  const result = {}
+  for (const [key, item] of Object.entries(value)) {
+    result[key] = CORDIS_ID_FIELDS.has(key) && typeof item === 'string' && mapping.has(cordisMapKey(key, item))
+      ? mapping.get(cordisMapKey(key, item))
+      : rewriteCordisIds(item, mapping)
+  }
+  return result
+}
+
+function bindCordisIdentity(state, field, logical, runtime, path) {
+  const knownRuntime = state.logicalToRuntime.get(cordisMapKey(field, logical))
+  const knownLogical = state.runtimeToLogical.get(cordisMapKey(field, runtime))
+  if ((knownRuntime !== undefined && knownRuntime !== runtime)
+    || (knownLogical !== undefined && knownLogical !== logical)) {
+    throw new Error(`Cordis replay identity diverged at ${path}`)
+  }
+  state.logicalToRuntime.set(cordisMapKey(field, logical), runtime)
+  state.runtimeToLogical.set(cordisMapKey(field, runtime), logical)
+}
+
+function seedCordisIdentities(logical, runtime, state, path = '$') {
+  if (Array.isArray(logical) && Array.isArray(runtime)) {
+    for (let index = 0; index < Math.min(logical.length, runtime.length); index += 1) {
+      seedCordisIdentities(logical[index], runtime[index], state, `${path}[${index}]`)
+    }
+    return
+  }
+  if (logical === null || runtime === null || typeof logical !== 'object' || typeof runtime !== 'object') return
+  for (const key of Object.keys(logical)) {
+    const left = logical[key]
+    const right = runtime[key]
+    if (CORDIS_ID_FIELDS.has(key) && typeof left === 'string' && typeof right === 'string') {
+      bindCordisIdentity(state, key, left, right, `${path}.${key}`)
+    } else {
+      seedCordisIdentities(left, right, state, `${path}.${key}`)
+    }
+  }
+}
+
+function alignCordisValue(logical, runtime, state, path = '$') {
+  if (Array.isArray(logical) || Array.isArray(runtime)) {
+    if (!Array.isArray(logical) || !Array.isArray(runtime) || logical.length !== runtime.length) {
+      throw new Error(`Cordis replay result diverged at ${path}`)
+    }
+    return logical.map((item, index) => alignCordisValue(item, runtime[index], state, `${path}[${index}]`))
+  }
+  if (logical !== null && typeof logical === 'object' && runtime !== null && typeof runtime === 'object') {
+    const logicalKeys = Object.keys(logical).sort()
+    const runtimeKeys = Object.keys(runtime).sort()
+    if (logicalKeys.length !== runtimeKeys.length || logicalKeys.some((key, index) => key !== runtimeKeys[index])) {
+      throw new Error(`Cordis replay result diverged at ${path}`)
+    }
+    const result = {}
+    for (const key of logicalKeys) {
+      const left = logical[key]
+      const right = runtime[key]
+      if (CORDIS_ID_FIELDS.has(key) && typeof left === 'string' && typeof right === 'string') {
+        bindCordisIdentity(state, key, left, right, `${path}.${key}`)
+        result[key] = left
+      } else {
+        result[key] = alignCordisValue(left, right, state, `${path}.${key}`)
+      }
+    }
+    return result
+  }
+  if (!Object.is(logical, runtime)) throw new Error(`Cordis replay result diverged at ${path}`)
+  return logical
+}
+
+function trackCordisReplay(state, member, args, result) {
+  const livePlugins = state.livePlugins ??= new Set()
+  const creationOrder = state.creationOrder ??= []
+  if (member === 'define' && args?.target?.kind === 'new' && typeof result?.pluginId === 'string') {
+    if (!livePlugins.has(result.pluginId)) creationOrder.push(result.pluginId)
+    livePlugins.add(result.pluginId)
+  } else if (member === 'undefine' && typeof args?.pluginId === 'string') {
+    livePlugins.delete(args.pluginId)
+  }
+}
+
+async function rollbackCordisReplay({ state, request }) {
+  const cordisState = state?.cordis
+  if (cordisState?.livePlugins?.size === 0 || cordisState?.livePlugins === undefined) return
+  const cordis = request.bindings.find(namespace => namespace.global === 'cordis')?.functions
+  if (typeof cordis?.undefine !== 'function') throw new Error('Cordis undefine binding is unavailable')
+  for (const pluginId of [...cordisState.creationOrder].reverse()) {
+    if (!cordisState.livePlugins.has(pluginId)) continue
+    await cordis.undefine({ pluginId })
+    cordisState.livePlugins.delete(pluginId)
+  }
+}
+
+function cordisReplayBinding({ global, member, args, recorded, binding, state, request, replayRecord, callIndex, valueLimits }) {
+  if (global === 'code' && member === 'run') {
+    const effects = replayRecord?.cordisEffects?.filter(effect => effect.parent === callIndex) ?? []
+    if (effects.length === 0) return undefined
+    const cordisNamespace = request.bindings.find(namespace => namespace.global === 'cordis')
+    if (cordisNamespace?.functions === undefined) throw new Error('Cordis replay requires the typed capability profile')
+    const cordisState = state.cordis ??= {
+      logicalToRuntime: new Map(),
+      runtimeToLogical: new Map(),
+    }
+    return (async () => {
+      for (const effect of effects) {
+        const effectBinding = cordisNamespace.functions[effect.member]
+        if (typeof effectBinding !== 'function') throw new Error(`Cordis replay binding ${effect.member} is unavailable`)
+        if (effect.ok !== true) throw new Error(`Cordis replay cannot restore failed ${effect.member} effect`)
+        const logicalArgs = decodeValue(effect.args, valueLimits)
+        const actual = await effectBinding(rewriteCordisIds(logicalArgs, cordisState.logicalToRuntime))
+        const logical = decodeValue(effect.value, valueLimits)
+        seedCordisIdentities(logical, actual, cordisState)
+        if (effect.member === 'define') trackCordisReplay(cordisState, effect.member, logicalArgs, logical)
+        alignCordisValue(logical, actual, cordisState)
+        if (effect.member !== 'define') trackCordisReplay(cordisState, effect.member, logicalArgs, logical)
+      }
+      return { ok: true, value: decodeValue(recorded.value, valueLimits) }
+    })()
+  }
+  if (!isCordisReplayMember(global, member)) return undefined
+  const cordisState = state.cordis ??= {
+    logicalToRuntime: new Map(),
+    runtimeToLogical: new Map(),
+  }
+  const mappedArgs = rewriteCordisIds(args, cordisState.logicalToRuntime)
+  return (async () => {
+    let actual
+    try {
+      actual = await binding(mappedArgs)
+    } catch (error) {
+      if (recorded.ok !== false) throw error
+      const actualMessage = error?.message === undefined ? String(error) : String(error.message)
+      if (actualMessage !== recorded.error) {
+        throw new Error(`Cordis replay failure diverged: expected ${JSON.stringify(recorded.error)}, got ${JSON.stringify(actualMessage)}`)
+      }
+      return { ok: false, error: recorded.error }
+    }
+    if (recorded.ok !== true) {
+      throw new Error(`Cordis replay succeeded where ${JSON.stringify(recorded.error)} was recorded`)
+    }
+    const logical = decodeValue(recorded.value, valueLimits)
+    seedCordisIdentities(logical, actual, cordisState)
+    if (member === 'define') trackCordisReplay(cordisState, member, args, logical)
+    const aligned = alignCordisValue(logical, actual, cordisState)
+    if (member !== 'define') trackCordisReplay(cordisState, member, args, aligned)
+    return { ok: true, value: aligned }
+  })()
 }
 
 function supportsCordisProfile(names) {
@@ -348,7 +509,7 @@ function capabilitySdk(names) {
   const available = new Set(names)
   const hasCordis = supportsCordisProfile(available)
   const compatibility = [...available]
-    .filter(name => !['read', RUN_CODE].includes(name) && !isCordisNativeName(name))
+    .filter(name => name !== RUN_CODE && !(hasCordis && isCordisNativeName(name)))
     .sort()
   const hostNames = compatibility.length === 0 ? 'never' : compatibility.map(JSON.stringify).join(' | ')
   const workspace = available.has('read')
@@ -414,7 +575,11 @@ export function apply(ctx, config = {}) {
   const { maxNestedRunCodeDepth: _nestedDepth, ...sessionConfig } = config
   const looseTopLevelRedeclarations = config.looseTopLevelRedeclarations ?? true
   const scope = new AsyncLocalStorage()
-  const sessions = new SessionRuntime(sessionConfig)
+  const sessions = new SessionRuntime({
+    ...sessionConfig,
+    replayBinding: cordisReplayBinding,
+    rollbackReplay: rollbackCordisReplay,
+  })
   const cordisValueLimits = {
     maxNodes: sessions.config.maxValueNodes,
     maxEdges: sessions.config.maxValueEdges,
@@ -476,10 +641,38 @@ export function apply(ctx, config = {}) {
     const hasCordis = supportsCordisProfile(functionNames)
       && [...CORDIS_NATIVE_NAMES].every(name => typeof functions[name] === 'function')
     if (hasCordis) {
-      const mutate = async (member, nativeArgs, project) => {
-        if (executionToken !== undefined) sessions.markVolatile(executionToken, `cordis.${member}`)
-        const value = await functions[CORDIS_BINDINGS[member]](nativeArgs)
-        return project(value)
+      const mutate = async (member, programArgs, nativeArgs, project) => {
+        if (executionToken !== undefined) sessions.markPendingVolatile(executionToken, `cordis.${member}`)
+        let settled = false
+        try {
+          const runtimeArgs = rewriteCordisIds(
+            nativeArgs,
+            sessions.cordisIdentityMap(executionToken) ?? new Map(),
+          )
+          const value = await functions[CORDIS_BINDINGS[member]](runtimeArgs)
+          settled = true
+          const result = project(value)
+          const logicalResult = rewriteCordisIds(
+            result,
+            sessions.cordisIdentityMap(executionToken, 'runtimeToLogical') ?? new Map(),
+          )
+          const effectRecorded = sessions.recordCordisEffect(
+            executionToken,
+            { member, args: programArgs, value: logicalResult },
+          )
+          if (executionToken !== undefined && !effectRecorded) {
+            sessions.markVolatile(executionToken, `cordis.${member}`)
+          }
+          if (member === 'run' && (!isRecord(logicalResult) || logicalResult.status !== 'running')) {
+            if (executionToken !== undefined) sessions.markVolatile(executionToken, `cordis.${member}`)
+          }
+          return logicalResult
+        } catch (error) {
+          if (executionToken !== undefined && (settled || member !== 'define')) {
+            sessions.markVolatile(executionToken, `cordis.${member}`)
+          }
+          throw error
+        }
       }
       projected.push(namespace('cordis', {
         inspectList: async value => {
@@ -494,32 +687,40 @@ export function apply(ctx, config = {}) {
         },
         inspectSelf: async value => {
           ensureLease()
-          return cordisJsonResult(
-            await functions.cordis_inspect_self(cordisInspectSelfArguments(value)),
+          const nativeArgs = cordisInspectSelfArguments(value)
+          const runtimeArgs = rewriteCordisIds(
+            nativeArgs,
+            sessions.cordisIdentityMap(executionToken) ?? new Map(),
+          )
+          const result = cordisJsonResult(
+            await functions.cordis_inspect_self(runtimeArgs),
             'cordis.inspectSelf host result',
             cordisValueLimits,
           )
+          return rewriteCordisIds(result, sessions.cordisIdentityMap(executionToken, 'runtimeToLogical') ?? new Map())
         },
         define: value => {
           ensureLease()
-          return mutate('define', cordisDefineArguments(value), cordisDefineResult)
+          return mutate('define', value, cordisDefineArguments(value), cordisDefineResult)
         },
         run: value => {
           ensureLease()
           return mutate(
             'run',
+            value,
             cordisRunArguments(value),
             result => cordisJsonResult(result, 'cordis.run host result', cordisValueLimits),
           )
         },
         stop: value => {
           ensureLease()
-          return mutate('stop', cordisPluginArguments(value, 'stop'), result => cordisPluginResult(result, 'stop'))
+          return mutate('stop', value, cordisPluginArguments(value, 'stop'), result => cordisPluginResult(result, 'stop'))
         },
         undefine: value => {
           ensureLease()
           return mutate(
             'undefine',
+            value,
             cordisPluginArguments(value, 'undefine'),
             result => cordisPluginResult(result, 'undefine', true),
           )
@@ -529,7 +730,7 @@ export function apply(ctx, config = {}) {
     projected.push(namespace('code', { run: runCode }, 'CodeExecutionError', 'operation'))
     const compatible = new Map()
     for (const key of Reflect.ownKeys(functions)) {
-      if (typeof key !== 'string' || ['read', RUN_CODE].includes(key) || isCordisNativeName(key)
+      if (typeof key !== 'string' || key === RUN_CODE || (hasCordis && isCordisNativeName(key))
         || typeof functions[key] !== 'function') continue
       compatible.set(key, functions[key])
     }
@@ -539,6 +740,9 @@ export function apply(ctx, config = {}) {
         const call = hostInvokeArguments(value)
         const binding = compatible.get(call.name)
         if (binding === undefined) throw new RangeError(`host capability ${JSON.stringify(call.name)} is unavailable`)
+        if (executionToken !== undefined && isCordisNativeName(call.name)) {
+          sessions.markVolatile(executionToken, `host.invoke(${call.name})`)
+        }
         return binding(call.args)
       },
     }, 'HostCapabilityError', 'operation'))

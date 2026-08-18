@@ -43,14 +43,27 @@ test('normalizes complete journal values and detaches nested value wires', () =>
   const value = journal({
     bindingMode: 'strict',
     calls: [
-      { global: 'tools', member: 'read', args: encodeValue({ path: 'a' }), ok: false, error: 'missing', settle: 1 },
-      { global: 'tools', member: 'write', args: encodeValue({ path: 'b' }), ok: true, value: encodeValue(undefined), settle: 0 },
+      { global: 'code', member: 'run', args: encodeValue({ code: 'child-a' }), ok: false, error: 'missing', settle: 1 },
+      { global: 'code', member: 'run', args: encodeValue({ code: 'child-b' }), ok: true, value: encodeValue(undefined), settle: 0 },
     ],
     operations: [
       { action: 'save', name: 'point.one' },
       { action: 'restore' },
       { action: 'delete', name: 'point.one' },
     ],
+    cordisEffects: [{
+      parent: 0,
+      member: 'define',
+      args: encodeValue({ target: { kind: 'new', prefix: 'demo' } }),
+      ok: true,
+      value: encodeValue({ pluginId: 'demo-1', packageId: 'pkg-1' }),
+    }, {
+      parent: 1,
+      member: 'stop',
+      args: encodeValue({ pluginId: 'demo-1' }),
+      ok: false,
+      error: 'not running',
+    }],
     confirms: ['prior-call'],
     diagnostics: [{
       code: 'PTC-T001', severity: 'note', phase: 'replay', message: 'replayed', stateEffect: 'unchanged',
@@ -61,6 +74,7 @@ test('normalizes complete journal values and detaches nested value wires', () =>
   assert.ok(Object.isFrozen(normalized))
   assert.ok(Object.isFrozen(normalized.calls))
   assert.ok(Object.isFrozen(normalized.operations))
+  assert.ok(Object.isFrozen(normalized.cordisEffects))
   assert.ok(Object.isFrozen(normalized.confirms))
   assert.ok(Object.isFrozen(normalized.diagnostics))
   assert.deepEqual(normalized.operations, value.operations)
@@ -95,6 +109,14 @@ test('rejects malformed journal schemas exhaustively', () => {
     [journal({ operations: [{}] }), /journal operation at index 0/],
     [journal({ operations: [{ action: 'save' }] }), /journal operation at index 0/],
     [journal({ operations: [{ action: 'restore', name: '' }] }), /journal operation at index 0/],
+    [journal({ cordisEffects: null }), /journal Cordis effects/],
+    [journal({ cordisEffects: [{}] }), /Cordis effect at index 0/],
+    [journal({ cordisEffects: [{ parent: 0, member: 'future', args: encodeValue({}), ok: true, value: encodeValue(null) }] }), /Cordis effect at index 0/],
+    [journal({ cordisEffects: [{ parent: 0, member: 'define', args: encodeValue({}), ok: true }] }), /missing its value/],
+    [journal({ cordisEffects: [{ parent: 0, member: 'define', args: encodeValue({}), ok: false }] }), /missing its error/],
+    [journal({ cordisEffects: [{ parent: 0, member: 'define', args: encodeValue({}), ok: false, error: 1 }] }), /missing its error/],
+    [journal({ cordisEffects: [{ parent: 1, member: 'define', args: encodeValue({}), ok: true, value: encodeValue(null) }] }), /missing parent call/],
+    [journal({ calls: [{ global: 'tools', member: 'read', args: encodeValue({}), ok: true, value: encodeValue(null), settle: 0 }], cordisEffects: [{ parent: 0, member: 'define', args: encodeValue({}), ok: true, value: encodeValue(null) }] }), /parent must be code\.run/],
     [journal({ completion: undefined }), /journal completion/],
     [journal({ completion: null }), /journal completion/],
     [journal({ completion: { kind: 'return', hasValue: 'yes', value: encodeValue(1) } }), /journal return value/],

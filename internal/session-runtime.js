@@ -3,6 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { Worker } from 'node:worker_threads'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { parse } from 'acorn'
 import {
   decodeValue,
@@ -714,6 +715,7 @@ class SessionKernel {
     this.terminations = new Set()
     this.tentatives = new WeakMap()
     this.scratchReady = undefined
+    this.bindingScope = new AsyncLocalStorage()
     this.disposed = false
   }
 
@@ -736,11 +738,43 @@ class SessionKernel {
 
   markActiveVolatile(executionToken, reason) {
     const active = this.active
+    if (active?.replay !== undefined) return false
     if (active?.request.executionToken !== executionToken) return false
     active.effectiveDurability = 'volatile'
     active.volatileReason ??= reason
     active.externalVolatileReason ??= reason
     this.externalVolatileReason ??= reason
+    return true
+  }
+
+  markPendingVolatile(executionToken, reason) {
+    const active = this.active
+    if (active?.replay !== undefined) return false
+    if (active?.request.executionToken !== executionToken) return false
+    active.pendingExternalVolatileReason ??= reason
+    return true
+  }
+
+  recordCordisEffect(executionToken, effect) {
+    const active = this.active
+    const parent = this.bindingScope.getStore()
+    if (active?.replay !== undefined || active?.journal === undefined
+      || active.request.executionToken !== executionToken
+      || !Number.isSafeInteger(parent) || parent < 0) return false
+    if (typeof effect?.member !== 'string' || effect.args === undefined) return false
+    const parentCall = active.journal.calls[parent]
+    if (parentCall?.global === 'cordis' && parentCall.member === effect.member) return true
+    if (parentCall?.global !== 'code' || parentCall.member !== 'run') return false
+    const entry = {
+      parent,
+      member: effect.member,
+      args: encodeValue(effect.args, this.valueLimits()),
+      ok: effect.ok !== false,
+      ...(effect.ok === false
+        ? { error: typeof effect.error === 'string' ? effect.error : 'Cordis operation failed' }
+        : { value: encodeValue(effect.value, this.valueLimits()) }),
+    }
+    ;(active.journal.cordisEffects ??= []).push(entry)
     return true
   }
 
@@ -777,25 +811,37 @@ class SessionKernel {
   async replayHistory(request) {
     this.knownBindings = new Set()
     this.lastDeclarations = new Set()
+    this.replayState = {}
     const path = pathToHead({ ...this.history, head: this.durableHead })
-    for (const node of path) {
-      const result = await this.executeCell({ ...request, program: node.code, journal: undefined }, node.journal)
-      const completion = node.journal.completion
-      if (result.error !== undefined && !['exception', 'invalid-output'].includes(result.error.kind)) {
-        throw new Error(`cell replay infrastructure failed (${result.error.kind}): ${result.error.message}`)
+    try {
+      for (const node of path) {
+        const result = await this.executeCell({ ...request, program: node.code, journal: undefined }, node.journal)
+        const completion = node.journal.completion
+        if (result.error !== undefined && !['exception', 'invalid-output'].includes(result.error.kind)) {
+          throw new Error(`cell replay infrastructure failed (${result.error.kind}): ${result.error.message}`)
+        }
+        if (completion.kind === 'return' && result.error !== undefined) {
+          throw new Error(`cell replay failed: ${result.error.message}`)
+        }
+        if (completion.kind === 'throw') {
+          if (result.error === undefined) throw new Error('cell replay succeeded where the recorded cell failed')
+          if (result.error.kind !== completion.error.kind || result.error.message !== completion.error.message) {
+            throw new Error('cell replay produced a different semantic failure')
+          }
+        }
+        const prepared = prepareProgram(node.code, this.knownBindings, node.journal.bindingMode === 'loose')
+        for (const name of prepared.declared) this.knownBindings.add(name)
+        this.lastDeclarations = new Set(prepared.declared)
       }
-      if (completion.kind === 'return' && result.error !== undefined) {
-        throw new Error(`cell replay failed: ${result.error.message}`)
-      }
-      if (completion.kind === 'throw') {
-        if (result.error === undefined) throw new Error('cell replay succeeded where the recorded cell failed')
-        if (result.error.kind !== completion.error.kind || result.error.message !== completion.error.message) {
-          throw new Error('cell replay produced a different semantic failure')
+    } catch (error) {
+      if (typeof this.config.rollbackReplay === 'function') {
+        try {
+          await this.config.rollbackReplay({ state: this.replayState, request })
+        } catch (rollbackError) {
+          throw new Error(`${messageOf(error)}; Cordis replay rollback failed: ${messageOf(rollbackError)}`)
         }
       }
-      const prepared = prepareProgram(node.code, this.knownBindings, node.journal.bindingMode === 'loose')
-      for (const name of prepared.declared) this.knownBindings.add(name)
-      this.lastDeclarations = new Set(prepared.declared)
+      throw error
     }
     this.volatile = this.externalVolatileReason !== undefined
     this.volatileReason = this.externalVolatileReason
@@ -819,6 +865,7 @@ class SessionKernel {
     if (status === 'discarded' || status === 'noop') {
       journal.calls.length = 0
       journal.operations.length = 0
+      if (Array.isArray(journal.cordisEffects)) journal.cordisEffects.length = 0
     }
   }
 
@@ -922,12 +969,17 @@ class SessionKernel {
       const settle = (result, terminate = false) => {
         /* c8 ignore next */
         if (this.active?.id !== id) return
-        const active = this.active
+      const active = this.active
         clearInterval(active.computeTimer)
         clearTimeout(active.wallTimer)
         request.signal?.removeEventListener('abort', active.onAbort)
         if (journal !== undefined && replayRecord === undefined) {
           if (terminate) {
+            const pendingReason = active.externalVolatileReason ?? active.pendingExternalVolatileReason
+            if (pendingReason !== undefined) {
+              active.externalVolatileReason ??= pendingReason
+              this.externalVolatileReason ??= pendingReason
+            }
             this.completeJournal(journal, 'discarded', result, active.externalVolatileReason, active.diagnostics)
             this.rollbackToDurable()
           } else {
@@ -981,6 +1033,8 @@ class SessionKernel {
         replayIndex: 0,
         replayNextSettle: 0,
         replayPending: new Map(),
+        replayState: this.replayState,
+        replayFailure: undefined,
         settlementSequence: 0,
         diagnostics: [...leadingDiagnostics],
         leadingDiagnostics,
@@ -993,6 +1047,7 @@ class SessionKernel {
             ? 'durable replay disabled by configuration'
             : prepared.reason || undefined,
         externalVolatileReason: undefined,
+        pendingExternalVolatileReason: undefined,
         control: { names: new Set(this.checkpoints.keys()) },
       }
       request.signal?.addEventListener('abort', onAbort, { once: true })
@@ -1195,6 +1250,10 @@ class SessionKernel {
       active.resolve({ logs, error: { kind: 'recovery', message: 'durable history requested a volatile capability during replay' } }, true)
       return
     }
+    if (active.replayFailure !== undefined) {
+      active.resolve({ logs, error: { kind: 'recovery', message: active.replayFailure } }, true)
+      return
+    }
     if (active.replay !== undefined
       && (active.replayIndex !== active.replay.calls.length || active.replayPending.size !== 0)) {
       active.resolve({ logs, error: { kind: 'recovery', message: 'session log replay consumed a different host-call transcript' } }, true)
@@ -1283,7 +1342,48 @@ class SessionKernel {
         this.port.postMessage({ type: 'reply', runId: message.runId, id: message.id, ok: false, error: 'session log replay diverged at a host binding call' })
         return
       }
-      active.replayPending.set(recorded.settle, { message, recorded })
+      const pending = { message, recorded }
+      active.replayPending.set(recorded.settle, pending)
+      if (typeof this.config.replayBinding === 'function') {
+        let replayResponse
+        try {
+          replayResponse = this.config.replayBinding({
+            global: message.global,
+            member: message.member,
+            args,
+            recorded,
+            replayRecord: active.replay,
+            callIndex: active.replayIndex - 1,
+            binding,
+            state: active.replayState,
+            request: active.request,
+            valueLimits: this.valueLimits(),
+          })
+        } catch (error) {
+          const replayError = `session log replay binding failed: ${messageOf(error)}`
+          active.replayFailure ??= replayError
+          pending.response = { ok: false, error: replayError }
+        }
+        if (replayResponse !== undefined) {
+          pending.waiting = true
+          Promise.resolve(replayResponse).then((response) => {
+            if (response.ok === true) {
+              pending.response = { ok: true, value: encodeValue(response.value, this.valueLimits()) }
+            } else {
+              pending.response = {
+                ok: false,
+                error: typeof response.error === 'string' ? response.error : 'session log replay binding failed',
+              }
+            }
+            this.flushReplayReplies(worker, active)
+          }).catch((error) => {
+            const replayError = `session log replay binding failed: ${messageOf(error)}`
+            active.replayFailure ??= replayError
+            pending.response = { ok: false, error: replayError }
+            this.flushReplayReplies(worker, active)
+          })
+        }
+      }
       this.flushReplayReplies(worker, active)
       return
     }
@@ -1292,8 +1392,9 @@ class SessionKernel {
       ? undefined
       : { global: message.global, member: message.member, args: argsWire }
     if (call !== undefined) active.journal.calls.push(call)
+    const callIndex = call === undefined ? undefined : active.journal.calls.length - 1
     try {
-      const value = await binding(args)
+      const value = await this.bindingScope.run(callIndex, () => binding(args))
       const valueWire = encodeValue(value, this.valueLimits())
       if (call !== undefined) {
         call.ok = true
@@ -1323,12 +1424,15 @@ class SessionKernel {
     while (worker === this.worker) {
       const pending = active.replayPending.get(active.replayNextSettle)
       if (pending === undefined) return
+      if (pending.waiting === true && pending.response === undefined) return
       active.replayPending.delete(active.replayNextSettle)
       active.replayNextSettle += 1
       const { message, recorded } = pending
-      this.port.postMessage(recorded.ok
-        ? { type: 'reply', runId: message.runId, id: message.id, ok: true, value: recorded.value }
-        : { type: 'reply', runId: message.runId, id: message.id, ok: false, error: recorded.error })
+      const response = pending.response
+      const selected = response ?? recorded
+      this.port.postMessage(selected.ok
+        ? { type: 'reply', runId: message.runId, id: message.id, ok: true, value: selected.value }
+        : { type: 'reply', runId: message.runId, id: message.id, ok: false, error: selected.error })
     }
   }
 
@@ -1436,6 +1540,25 @@ export class SessionRuntime {
     if (sessionContext === null || typeof sessionContext !== 'object'
       || typeof reason !== 'string' || reason.length === 0) return false
     return this.kernels.get(String(sessionContext.id))?.markActiveVolatile(sessionContext, reason) ?? false
+  }
+
+  markPendingVolatile(sessionContext, reason) {
+    if (sessionContext === null || typeof sessionContext !== 'object'
+      || typeof reason !== 'string' || reason.length === 0) return false
+    return this.kernels.get(String(sessionContext.id))?.markPendingVolatile(sessionContext, reason) ?? false
+  }
+
+  recordCordisEffect(sessionContext, effect) {
+    if (sessionContext === null || typeof sessionContext !== 'object') return false
+    return this.kernels.get(String(sessionContext.id))?.recordCordisEffect(sessionContext, effect) ?? false
+  }
+
+  cordisIdentityMap(sessionContext, direction = 'logicalToRuntime') {
+    if (sessionContext === null || typeof sessionContext !== 'object') return undefined
+    const kernel = this.kernels.get(String(sessionContext.id))
+    if (kernel?.active?.replay !== undefined) return undefined
+    const state = kernel?.replayState?.cordis
+    return state?.[direction]
   }
 
   finalize(sessionContext, confirmed) {

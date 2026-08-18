@@ -32,6 +32,7 @@ PTC Plus 的正确承诺是：
   status: "durable" | "volatile" | "discarded" | "noop",
   calls: HostCall[],
   operations: StateOperation[],
+  cordisEffects?: CordisEffect[],
   confirms: string[],
   diagnostics: Diagnostic[],
   completion?:
@@ -47,9 +48,12 @@ PTC Plus 的正确承诺是：
 - `durable`：创建可重放 node，推进 `durableHead`；
 - `bindingMode`：记录该 cell 实际采用的顶层 binding 语义；冷重放读取每个 node 的记录值，不读取恢复时的 profile 配置；
 - `volatile`：只推进 live heap，不推进 `durableHead`；
-- `discarded`：基础设施失败，calls 和 operations 必须为空；若 opaque external capability 已越过 possible-effect boundary，则保留 `volatileReason`，恢复时不能把它折叠为 no-op；
-- `noop`：程序未执行，calls 和 operations 必须为空；
+- `discarded`：基础设施失败，calls、operations 和 `cordisEffects` 必须为空；若 opaque external capability 已越过 possible-effect boundary，则保留 `volatileReason`，恢复时不能把它折叠为 no-op；
+- `noop`：程序未执行，calls、operations 和 `cordisEffects` 必须为空；
 - `confirms`：确认此前无 journal 的 call id 没有进入 runtime；
+- `cordisEffects`：可选的 typed Cordis domain effect transcript，以父 host-call index 关联 mutation；
+  普通 typed Cordis call 仍由自己的 `calls` entry 驱动 replay，嵌套 `code.run` 内的 effect 则使用
+  该关联记录；
 - `diagnostics`：本 cell 产生的封闭结构化诊断；
 - `completion`：区分普通 return 与可重放的语义 throw；
 - `volatileReason`：记录第一次触发降级的 capability。
@@ -82,6 +86,24 @@ journal、diagnostic、source、cause、call、operation、completion 和 comple
 ```
 
 `settle` 必须是从 0 开始的连续序列。重放按源码产生调用，但按 recorded settlement order 释放结果；这同时校验调用提交顺序和异步完成顺序。
+
+typed Cordis effect 使用独立的可选记录：
+
+```ts
+{
+  parent: number,
+  member: string,
+  args: PtcValueGraphV1,
+  ok: boolean,
+  value?: PtcValueGraphV1,
+  error?: string,
+}
+```
+
+`parent` 必须指向拥有该 effect 的 `code.run` host-call index。它只保留隔离 child 内部发生、但不会出现在
+父 canonical result 中的 Cordis mutation；普通 `cordis.*` 调用由自身 host-call transcript 重建，不重复记录。冷恢复执行该父调用时，adapter 按记录重新调用当前
+typed Cordis binding，并验证逻辑 identity。`cordisEffects` 不参与 host-call `settle` 排序，且在
+`noop`/`discarded` journal 中必须为空。字段省略等价于没有此类领域 effect。
 
 journal 的 host-call `args`/`value` 与 completion value 保存 `ptc-value-graph/v1` canonical envelope，不保存 decoded rich JS value，也不依赖递归 `JSON.stringify` 或 `structuredClone`。因此深层数组/对象、own `__proto__`、`undefined`、special number、BigInt、hole、shared identity 和 cycle 不会被外层 session JSON 改写。完整支持域和预算见 [PTC Value Graph V1](value-wire.md)。
 
@@ -123,7 +145,7 @@ pre-execute -> tools/execute -> post-execute
 
 只有模型直接发起的 top-level `run_code` 创建本 schema 的 cell journal。父 cell 的 `code.run` capability 在 upstream CodeRuntime 的隔离环境中执行 child，不创建 child PTC journal，也不产生可合并到父 heap 的 binding。
 
-父 cell 把 `code.run` 当成普通 host call，记录其 graph-encoded arguments、canonical result/error 和 settlement order。父 cell 冷重放时核对同一个 binding call 并直接释放 transcript 中的结果，不再次执行 child 或其外部工具，因此 child side effect 至多发生在原始 live 执行。projection 继承当前 request 的可见 authority 与取消信号，并以配置深度限制递归；它不注册第二个模型工具，不伪造 DSH child UI、独立 policy hook、调用树或 code-dispatch events。宿主若已提供可调用的 `run_code` binding，`code.run` 使用该宿主路径。
+父 cell 把 `code.run` 当成普通 host call，记录其 graph-encoded arguments、canonical result/error 和 settlement order。若 child 产生 typed Cordis domain effect，projection 同时在父 journal 的 `cordisEffects` 中记录 effect 与父 call index；冷重放先重建这些 Cordis effect，再返回 child 的 canonical result，不重新执行 child 源码或 raw 外部工具。没有 typed effect 的普通 child 仍只回放结果。projection 继承当前 request 的可见 authority 与取消信号，并以配置深度限制递归；它不注册第二个模型工具，不伪造 DSH child UI、独立 policy hook、调用树或 code-dispatch events。宿主若已提供可调用的 `run_code` binding，`code.run` 使用该宿主路径。
 
 ## 日志折叠
 
@@ -234,7 +256,13 @@ live kernel 首次进入 volatile 时记录并投影一次 `PTC-V001`，包含�
 - `run_code.output.presentationMeta`；
 - 标准 `tool/call` 与 `tool/result.meta`。
 
-任何 RC7 无法持久确认的状态都必须收缩为 volatile/unknown 边界。修改 DSH 源码、patch 私有 scheduler、伪造事件或增加 tool call 不属于本协议。
+以上是当前已实现的 PTC journal 协议；迁移目标若加入 program-only ToolDefinition，还会使用公开
+`ctx.tools.register()` 与 nested Code Mode bridge，但不能把该内部 operation 变成新的模型 transport。
+
+任何 RC7 无法持久确认的状态都必须收缩为 volatile/unknown 边界。修改或 fork DSH、patch 私有
+scheduler、复制 policy/event protocol 或伪造事件不属于本协议；通过公开 API 执行的
+program-only nested dispatch 可以作为 capability 实现，但不得伪装成 journal confirmation，且
+不得泄漏为模型直接 tool。
 
 ## 已验证场景
 

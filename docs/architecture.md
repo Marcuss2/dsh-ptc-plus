@@ -71,15 +71,31 @@ PTC Plus 在 `system-prompt/assemble` waterfall 的 `next()` 结果上不可变�
 
 错误结果由 `tools/execute` around hook 附加同一 journal。插件卸载时恢复原 runtime method 和 metadata projector。
 
-禁止修改或 fork DSH、接入私有 scheduler、伪造 session event、注册内部 tool call，或要求宿主增加 metadata seam。
+唯一不可跨越的分发边界是修改或 fork DSH。插件不得接入私有 scheduler、复制 policy/event
+protocol 或伪造 session event；在迁移目标中，program-only ToolDefinition 可以通过公开 `ctx.tools`
+注册并经 DSH nested dispatch 复用现有治理管线。此类 operation 必须在 prompt、schema 和 direct
+execution 三处都与 model-facing tool surface 隔离；公共 API 不能证明隔离时，目标能力保持未实现。
 
 ## Top-level 与 Nested run_code
 
 模型直接发起的 top-level `run_code` 进入 `SessionKernel.tail`，保持 binding continuity、journal、durable/volatile、诊断和状态管理。进入 kernel 前，PTC Plus 从本次 request 的真实可见 bindings 构造新的 `workspace`、`code`、`host` 和条件性 `cordis` namespaces，并移除 raw `tools` alias。domain adapter 在 host 调用两侧分别校验并重建 program request/result；它不能因为 native outcome 当前字段碰巧同名就透传整个对象，也不能把 native UI metadata 或未来新增字段变成隐式 program ABI。`code.run` 直接调用捕获的 upstream `CodeRuntime.run`，因此获得隔离的一次性语言环境，绝不能排入仍被父 cell 占用的同一个 kernel。
 
-child 继承父 request 的当前可见 authority、取消信号和 owning top-level execution token，并为每一级 child 建立新的 capability projection 与 execution lease。token 只在 top-level `patchedRun` 从 `tools/execute` scope 捕获一次，递归 projection 显式传递；不能在 MessagePort callback 中重新读取 `AsyncLocalStorage`。因此任意深度 child 的 Cordis creator 都把 possible-effect boundary 归属到父 journal。projection 只调用宿主已经为本次 execution 建立的 binding closure，不直接调用 tool definition、不接入私有 scheduler，也不创建 DSH child tool event。它返回与 `run_code` 一致的 `{ logs, result? }` 值，但不声称复刻原生 nested dispatch 的独立 UI、policy hook 或 start/settle event。若宿主已经提供可调用的 `run_code` binding，`code.run` 保留宿主路径而不覆盖。
+child 继承父 request 的当前可见 authority、取消信号和 owning top-level execution token，并为每一级 child 建立新的 capability projection 与 execution lease。token 只在 top-level `patchedRun` 从 `tools/execute` scope 捕获一次，递归 projection 显式传递；不能在 MessagePort callback 中重新读取 `AsyncLocalStorage`。typed Cordis domain effect 记录到父 journal 的 `cordisEffects`，并在冷恢复时按父 `code.run` call 关联重建；raw compatibility call 仍标记父 cell volatile。当前 fallback `code.run` projection 只调用宿主已经为本次 execution 建立的 binding closure，不直接调用 tool definition、不接入私有 scheduler，也不创建 DSH child tool event。它返回与 `run_code` 一致的 `{ logs, result? }` 值，但不声称复刻原生 nested dispatch 的独立 UI、policy hook 或 start/settle event。若宿主已经提供可调用的 `run_code` binding，`code.run` 保留宿主路径并由该 DSH nested dispatch 拥有对应 lifecycle。
 
-full-access 不由 sandbox mode 推断。插件只识别当前 RC7 的已知 Cordis creator profile：本次 immutable binding snapshot 必须完整包含该 profile，且不能出现未知的额外 `cordis_*` closure，才建立 `cordis.*` namespace。RC7 没有公开 capability-set 版本或语义 manifest；缺项、改名或新增未知成员时整体 fail-closed，也不经 `host.invoke` 暴露任何 raw `cordis_*` alias。creator program 参数校验完成后、调用 opaque host closure 前，通过当前 execution token 建立 possible-effect volatile boundary；该边界跨 abort/timeout 的 worker rollback 保留，迟到 settlement 不归属后续 cell。官方 `tool:cordis` 行为 guidance 在 profile 匹配时翻译为 program contract，而不是只保留类型或直接删除。完整组合与 approval 归属见 [Full-access composition](full-access.md)。
+full-access 不由 sandbox mode 推断。插件只在当前 immutable binding snapshot 精确匹配已知 RC7
+Cordis creator profile 时建立强类型 `cordis.*` namespace；未知或变化成员不猜测 domain schema，
+但与 `read` 及其他所有当前可见 binding 一样保留在 `host.invoke` compatibility 面；任何 raw
+`cordis_*` 调用因无法可靠分类读写而在 dispatch 前保守进入 volatile。typed Cordis mutation
+使用 journal calls 作为领域 transcript：`define`、`stop`、`undefine`，以及同步完成的 Host-only
+`run` 在冷恢复时重新调用当前 runner，并验证结果与逻辑 identity 映射；Client approval、异步
+settlement、部分失败或结果转换失败仍进入 volatile。该 replay adapter 是插件自己的公开 binding
+适配，不修改 DSH scheduler 或伪造 tool event。官方 `tool:cordis` 行为 guidance 在 profile
+匹配时翻译为 program
+contract，而不是只保留类型或直接删除。插件拥有的 `omnipotent` system preset 通过只读 Include
+继承当前官方 `cordis` composition，附加 Code/PTC presentation，并在 scoped lifecycle 中选择
+`danger-full-access` permission preset。它通过可逆 decorator 向官方动态 `agentPresets.list()`
+追加包内 system discovery，不替换 provider、不写用户 preset 目录；完整组合见
+[Full-access composition](full-access.md)。
 
 nested child 不创建 PTC Plus journal，也不修改父/子 REPL heap。对父 kernel 而言，`code.run` 是普通 program capability call：arguments、canonical success/error 和 settlement order 进入父 journal；冷重放从 transcript 返回记录结果，不再执行 child，因此不会重复 child tool side effect。每一级 child 都得到同样的 projection，直到配置的 `maxNestedRunCodeDepth`；超限是普通 binding error，父 REPL 仍可继续。历史源码通过通用 session-event capability 读取并在 PTC 内转换，插件不提供专用源码编辑或寻址 API。
 
@@ -240,7 +256,12 @@ abort / timeout / worker exit / cold recovery
 { global, member, args, ok, value | error, settle }
 ```
 
-重放仍执行原始语言代码，以重建变量、函数、闭包和模块对象，但 host bridge 不调用真实 capability。它逐项核对 program namespace/member 与 canonical PTC value graph 参数，再按原 `settle` 顺序返回记录的值或错误。
+隔离 child 中的 typed Cordis mutation 还会记录与父 `code.run` host-call index 关联的 `cordisEffects`。普通 typed Cordis call
+由 replay adapter 直接重建；隔离 `code.run` 内部发生、但被父调用 canonical result 隐藏的领域
+effect 则通过该关联 transcript 重建。这个字段不是 UI event，也不改变普通 host-call settlement
+顺序。
+
+重放仍执行原始语言代码，以重建变量、函数、闭包和模块对象。普通 host bridge 不调用真实 capability；typed Cordis domain call 则由 replay adapter 在新的 runner registry 中重建 effect，并逐项核对 canonical 参数、结果和逻辑 identity，再按原 `settle` 顺序返回。raw `host.invoke` 仍只返回记录值并保持 volatile。
 
 以下情况使恢复失败：
 
@@ -284,13 +305,15 @@ worker 的宿主环境仍为空，只显式设置 `TEMP`、`TMP`、`TMPDIR` 为 
 
 durability 对后缀单调生效：volatile 后续的 recorded program capability 调用不能单独宣称可恢复。块作用域只影响 active name mapping，不删除源码、journal node 或 replay 成本。
 
-首次从 durable 进入 sticky volatile 时，本次 `run_code` logs 前置一次状态通知，明确该 cell 与后续 live 后缀不会冷重放。若 post-execute 删除 journal、导致降级只能在 `tools/result` 阶段确定，通知延迟到下一 cell。通知与 `repl.state(list)` 都复用现有 `run_code`，不增加 DSH tool call。
+首次从 durable 进入 sticky volatile 时，本次 `run_code` logs 前置一次状态通知，明确该 cell 与后续 live 后缀不会冷重放。若 post-execute 删除 journal、导致降级只能在 `tools/result` 阶段确定，通知延迟到下一 cell。当前通知与 `repl.state(list)` 都复用现有 `run_code`，不增加模型往返；未来的 program-only operation 仍可作为 nested dispatch 实现，不改变这一模型 transport。
 
 ## 权限和调用树
 
 持久代码不等于持久权限。execution token、旧 capability closure、取消信号、凭据、policy decision 和 parent identity 永不写入 journal。每个 cell 重新投影当前 DSH authority；先前函数可读取当前全局 `workspace`、`code` 或 `host`，但保存的具体 capability function 在下一 cell 会得到 `PTC execution lease expired`。
 
-真实子调用始终经过 DSH registry、policy、取消、事件和调用树管线。只有恢复重放读取已提交 transcript。
+经 DSH nested dispatch 发起的真实子调用始终经过 registry、policy、取消、事件和调用树管线；当前
+fallback `code.run` 是明确记录的例外，只复用捕获的 host binding。只有恢复重放读取已提交
+transcript。
 
 ## 当前限制
 

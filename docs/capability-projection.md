@@ -1,5 +1,9 @@
 # Program Capability Projection
 
+> 本文描述当前已实现的 native binding 投影。它是过渡架构，不是最终的程序数据面边界；
+> `ctx.fs` 平级 Consumer、内部值可见性和仅在模型出口实施 context budget 的目标决策见
+> [Program Data Plane 与模型输出边界](program-data-plane.md)。
+
 ## 目标
 
 严格 PTC 模式只保留一个模型直接调用的 DSH tool：`run_code`。程序中的外部能力使用程序化命名空间，而不是再次暴露一套看起来可由模型直接调用的 native tool 语法：
@@ -21,7 +25,7 @@ const child = await code.run({ code: "return 1", description: "Evaluate generate
 | `workspace.readLines({ path, offset?, limit? }) -> { path, offset, lines, totalLines }` | `read({ file_path, offset?, limit? })` | 双向翻译并校验 program-native 数据契约，同时保留 native `read` 的有界、逐行语义；不会把截断窗口冒充完整文件 |
 | `code.run({ code, description })` | 插件注入或宿主已有的 `run_code` binding | 在隔离 child runtime 中执行动态源码 |
 | `host.invoke({ name, args })` | 当前 cell 中同名的未适配 host binding | 第三方和动态能力的显式兼容入口 |
-| `cordis.*` | 当前 RC7 已知 Cordis creator profile | 仅在完整且无额外未知 `cordis_*` binding 的 profile snapshot 中投影；未知/变更 profile fail-closed；数据映射、approval 与 volatile 规则见 [Full-access composition](full-access.md) |
+| `cordis.*` | 当前 RC7 已知 Cordis creator profile | 完整且无额外未知 `cordis_*` binding 时提供强类型翻译；typed domain transcript 可恢复 registry/Fiber effect，Client approval、异步 settlement 和失败/部分应用结果保持 volatile；未知/变更 binding 保留在 `host.invoke`，不猜测 domain schema，并因无法可靠分类读写而在调用前进入 volatile；数据映射规则见 [Full-access composition](full-access.md) |
 
 只有当前 agent 的 request bindings 中存在 `read` 时才安装 `workspace.readLines`。adapter 每个 cell 重新建立，旧 closure 不能越过 execution lease。一次 program call 只调用一次原 host binding，因此 authority、policy、approval、取消、并发调度、审计和原生 nested dispatch 内容仍由 DSH 拥有。
 
@@ -47,7 +51,7 @@ native extra/missing/invalid fields -> WorkspaceError
 
 已适配的 raw alias 不再安装或宣传：存在 `workspace.readLines` 时，程序中没有 `tools.read`。其他能力不以 `tools.<native-name>` 形式出现，而由 `host.invoke` 显式表明这是兼容投影。`run_code` 的程序内元编程入口是 `code.run`；模型直接调用的外层 transport 名仍是 `run_code`。
 
-当前不提供 `workspace.readText`。native `read` 有 line、单行字符和 byte ceiling，拼接其结果会静默得到不完整文本。完整 snapshot 需要独立 provider operation、明确的 PTC retention ceiling，以及大值 resource/blob 协议后才能加入。写入、编辑与 shell 也暂不投影；在 nested UI 能稳定保留 diff/terminal presentation 前，不以 facade 降低可审查性。full-access 也不会改变这些普通 projection 限制。
+当前不提供 `workspace.readText`。native `read` 有 line、单行字符和 byte ceiling，拼接其结果会静默得到不完整文本。完整 snapshot 需要独立 provider operation、明确的 PTC retention ceiling，以及大值 resource/blob 协议后才能加入。写入、编辑与 shell 也暂不建立专用 facade；它们与 native `read` 仍通过显式 `host.invoke` 可达，不用一个看似稳定但丢失 UI/domain 语义的 namespace 隐藏原始契约。
 
 ## Prompt 契约
 
