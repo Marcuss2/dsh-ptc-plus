@@ -2,12 +2,11 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import repl from 'node:repl'
 import { PassThrough } from 'node:stream'
 import { formatWithOptions } from 'node:util'
-import { MessageChannel, parentPort } from 'node:worker_threads'
+import { MessageChannel, parentPort, workerData } from 'node:worker_threads'
 import { decodeJson, encodeJson } from './json-wire.js'
 
 if (parentPort === null) throw new Error('ptc-plus kernel worker started without a parent port')
 const { port1, port2: channel } = new MessageChannel()
-parentPort.postMessage({ type: 'ready', port: port1 }, [port1])
 
 const input = new PassThrough()
 const output = new PassThrough()
@@ -21,10 +20,16 @@ const server = repl.start({
   ignoreUndefined: true,
 })
 const context = server.context
+const sessionCwd = typeof workerData?.cwd === 'string' ? workerData.cwd : undefined
 const logScope = new AsyncLocalStorage()
 const pending = new Map()
 const installedGlobals = new Set()
 const RETURN_SIGNAL = '__dsh_ptc_return_signal_7f3a__'
+const CELL_FRAME_SUFFIX = '\n;'
+const CONFORMANCE_CELL = `{
+  const __ptc_canary = await Promise.resolve(1)
+  if (__ptc_canary !== 1) throw new Error('invalid REPL await semantics')
+}`
 let activeRun
 let activeExecution
 let pendingVolatileReason
@@ -40,10 +45,50 @@ Object.defineProperty(context, RETURN_SIGNAL, { value: CellReturn })
 
 function messageOf(error) {
   try {
-    return String(error instanceof Error ? error.stack ?? error.message : error)
+    if (error !== null && typeof error === 'object' && typeof error.message === 'string') {
+      return error.message
+    }
+    return String(error)
   } catch {
     return 'Unprintable thrown value'
   }
+}
+
+function safeProperty(value, key) {
+  if ((typeof value !== 'object' || value === null) && typeof value !== 'function') return undefined
+  try {
+    return value[key]
+  } catch {
+    return undefined
+  }
+}
+
+function firstLine(value) {
+  if (typeof value !== 'string') return undefined
+  const line = value.split(/[\r\n]/, 1)[0]
+  return line.length > 0 ? line : undefined
+}
+
+function errorDetails(error) {
+  const message = messageOf(error)
+  let name = 'Error'
+  try {
+    if (error !== null && typeof error === 'object' && typeof error.name === 'string' && error.name.length > 0) {
+      name = error.name
+    }
+  } catch {}
+  const candidate = safeProperty(error, 'ptcCause')
+  const candidateMessage = safeProperty(candidate, 'message')
+  const candidateCode = safeProperty(candidate, 'code')
+  const causeMessage = firstLine(candidateMessage)
+  const causeCode = firstLine(candidateCode)
+  const cause = causeMessage !== undefined
+    ? {
+        ...(causeCode === undefined ? {} : { code: causeCode }),
+        message: causeMessage,
+      }
+    : undefined
+  return { name, message, ...(cause === undefined ? {} : { cause }) }
 }
 
 function appendLog(...values) {
@@ -135,6 +180,11 @@ const capturedOutput = Object.freeze({ write: captureWrite })
 const processView = new Proxy(process, {
   get(target, property) {
     if (property === 'stdout' || property === 'stderr') return capturedOutput
+    if (property === 'cwd') {
+      if (sessionCwd !== undefined) return () => sessionCwd
+      markVolatile('process.cwd')
+      return target.cwd.bind(target)
+    }
     if (['exit', 'abort', 'kill'].includes(property)) {
       return () => { throw new Error(`process.${String(property)} is forbidden inside the REPL kernel`) }
     }
@@ -188,7 +238,7 @@ function evaluate(program) {
     }
     const onError = error => finish(error)
     domain.on('error', onError)
-    server.eval(program, context, 'ptc-plus-repl', finish)
+    server.eval(program + CELL_FRAME_SUFFIX, context, 'ptc-plus-repl', finish)
   })
 }
 
@@ -227,10 +277,11 @@ function installBindings(message) {
     if (namespace.errorClass !== undefined) {
       const descriptor = namespace.errorClass
       const BoundError = class extends Error {
-        constructor(member, detail) {
+        constructor(member, detail, cause) {
           super(detail)
           this.name = descriptor.name
           Object.defineProperty(this, descriptor.memberNameProperty, { enumerable: true, value: member })
+          if (cause !== undefined) Object.defineProperty(this, 'ptcCause', { value: cause })
         }
       }
       Object.defineProperty(context, descriptor.name, { configurable: true, value: BoundError })
@@ -274,12 +325,14 @@ async function runCell(message) {
     } catch (error) {
       activeRun = undefined
       execution.open = false
-      const detail = messageOf(error)
+      const detail = errorDetails(error)
       channel.postMessage({
         type: 'done',
         id: message.id,
         logs: execution.logs,
-        error: detail,
+        error: detail.message,
+        errorName: detail.name,
+        ...(detail.cause === undefined ? {} : { cause: detail.cause }),
         ...completionDurability(execution),
       })
       return
@@ -319,9 +372,22 @@ channel.on('message', (message) => {
     if (call === undefined || call.runId !== message.runId) return
     pending.delete(message.id)
     if (message.ok) call.resolve(decodeJson(message.value))
-    else if (call.errorClass === undefined) call.reject(new Error(message.error))
-    else call.reject(new context[call.errorClass.name](call.member, message.error))
+    else if (call.errorClass === undefined) {
+      const error = new Error(message.error)
+      if (message.cause !== undefined) error.ptcCause = message.cause
+      call.reject(error)
+    } else call.reject(new context[call.errorClass.name](call.member, message.error, message.cause))
     return
   }
   if (message?.type === 'run') void runCell(message)
 })
+
+try {
+  await evaluate(CONFORMANCE_CELL)
+  parentPort.postMessage({ type: 'ready', port: port1 }, [port1])
+} catch (error) {
+  parentPort.postMessage({
+    type: 'startup-error',
+    error: `Node REPL does not satisfy the PTC Plus cell framing contract: ${messageOf(error)}`,
+  })
+}

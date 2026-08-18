@@ -20,6 +20,7 @@
     "node": ">=22.19"
   },
   "dependencies": {
+    "@babel/code-frame": "^7.29.7",
     "acorn": "^8.15.0"
   },
   "scripts": {

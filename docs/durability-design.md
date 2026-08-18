@@ -30,6 +30,7 @@ PTC Plus 的正确承诺是：
   calls: HostCall[],
   operations: StateOperation[],
   confirms: string[],
+  diagnostics: Diagnostic[],
   completion?: {
     kind: "return" | "throw",
     error?: { kind: string, message: string }
@@ -45,10 +46,13 @@ PTC Plus 的正确承诺是：
 - `discarded`：基础设施失败，calls 和 operations 必须为空；
 - `noop`：程序未执行，calls 和 operations 必须为空；
 - `confirms`：确认此前无 journal 的 call id 没有进入 runtime；
+- `diagnostics`：本 cell 产生的封闭结构化诊断；
 - `completion`：区分普通 return 与可重放的语义 throw；
 - `volatileReason`：记录第一次触发降级的 capability。
 
-journal、call、operation、completion 和 completion error 都使用封闭字段集合；未知、symbol 或非枚举自有字段会使 journal 无效。只有 `args` 和 `value` 是开放的 lossless-JSON 数据。
+journal、diagnostic、source、cause、call、operation、completion 和 completion error 都使用封闭字段集合；未知、symbol 或非枚举自有字段会使 journal 无效。只有 `args` 和 `value` 是开放的 lossless-JSON 数据。诊断结构、source frame 依赖和稳定代码见[架构说明](architecture.md#诊断契约)。
+
+当前实现只定义并接受本文这一种 `version: 1` schema；同一版本不存在其他历史形状或兼容迁移。包括 `diagnostics` 在内的必需字段缺失时 journal 必须失效，不能静默补默认值，否则会削弱最终持久值与 tentative journal 的严格一致性确认。
 
 ## Host Transcript
 
@@ -104,13 +108,19 @@ pre-execute -> tools/execute -> post-execute
 
 `tools/result` 不修改结果。若 pending no-op 尚未被后续 journal 确认进程就退出，冷恢复保守形成 unknown boundary。
 
+## Nested run_code
+
+只有模型直接发起的 top-level `run_code` 创建本 schema 的 cell journal。PTC Plus 注入父 cell `tools` namespace 的 `run_code` bridge 在 upstream CodeRuntime 的隔离环境中执行 child，不创建 child PTC journal，也不产生可合并到父 heap 的 binding。
+
+父 cell 把 nested `run_code` 当成普通 host call，记录其 lossless-JSON arguments、canonical result/error 和 settlement order。父 cell 冷重放时核对同一个 binding call 并直接释放 transcript 中的结果，不再次执行 child 或其外部工具，因此 child side effect 至多发生在原始 live 执行。bridge 继承当前 request 的可见 bindings 与取消信号，并以配置深度限制递归；它不注册第二个模型工具，不伪造 DSH child UI、独立 policy hook、调用树或 code-dispatch events。宿主若已提供同名 binding，插件不覆盖。
+
 ## 日志折叠
 
-恢复按 session event 顺序处理外层 `run_code`：
+恢复按 session event 顺序处理外层 `run_code`。触发本次恢复的 call id 作为 live boundary 传入折叠器；同 id 的在途 `tool/call` 不属于历史：
 
 1. 用 `sourceEventSeqs[0]` 关联 `tool/result` 与 `tool/call`；
 2. 预收集 valid journal 中的 `confirms`；
-3. 已确认 no-op 的无 journal call 不改变状态；
+3. 排除当前在途 call，并让已确认 no-op 的无 journal call 不改变状态；
 4. 缺失源码、缺失/损坏 journal 进入 untrusted suffix；
 5. `discarded` 和 `noop` 不改变语言状态；
 6. `volatile` 进入 untrusted suffix，只应用可独立持久的 delete/restore 操作；
@@ -143,15 +153,16 @@ pre-execute -> tools/execute -> post-execute
 ```ts
 type StateOperation =
   | { action: "save", name: string }
-  | { action: "restore", name: string }
+  | { action: "restore", name?: string }
   | { action: "delete", name: string }
 ```
 
 - `save` 只可提交到 durable node；
 - cell 静态判断 durable、但在 `save` 后运行时降级时，tentative save 会被删除；
 - `delete` 可独立应用于命名索引；
+- 无名称 `restore` 选择当前 cell 之前的最后 durable head，清除 volatile suffix；
 - `restore` 把 head 切回已存在的 durable node，清除 volatile suffix；
-- list 不写 operation，只读取当前 checkpoint 名称快照。
+- list 不写 operation，返回当前 checkpoint 名称、`mode` 和首次 `volatileReason`。
 
 状态名称由 agent 选择，内部 node index、hash、revision 和日志位置不进入模型接口。
 
@@ -163,24 +174,43 @@ type StateOperation =
 
 - Date、performance、fetch、WebSocket、crypto、Intl；
 - setTimeout、setInterval、setImmediate；
-- eval、Function、process、require；
+- eval、Function、除 `cwd()` 外的 process 能力、require；
 - `Math.random()`；
 - durable allowlist 之外的 dynamic import，包括 `node:path`。
 
 普通 `Math` intrinsic 保持完整。`process.stdout/stderr.write` 被捕获为 cell log，不因输出本身降级。
 
+worker 不继承 Electron 的工作目录语义。插件通过现有 `tools/execute` context 读取不可变的 `agent.session.header.cwd` 并注入 session worker；`process.cwd()` 返回该值且保持 durable。header 未记录 cwd 时才回退宿主值并在运行时标记 volatile。
+
 直接访问 `worker_threads` 或 `cluster` 的常见 import/require 形式被拒绝，因为它们暴露 worker lifecycle control。该 gate 不是恶意代码安全沙箱；部署安全仍依赖 DSH policy、进程隔离和操作系统权限。
 
 ## 恢复通知
 
-构造 kernel 时若折叠结果含 volatile/unknown suffix，第一次 `run_code` 的 logs 前置一条通知：
+构造 kernel 时若折叠结果含 volatile/unknown suffix，第一次 `run_code` 记录并投影 `PTC-R002`。它只统计当前 call 之前的历史边界：
 
 ```text
-Restored the last durable REPL state. N volatile or unconfirmed cell(s)
-were not replayed; their source remains in the session log.
+warning[PTC-R002]: restored the durable head and skipped N historical cells
+phase: recover
+state: ...
+help: ...
 ```
 
-通知进入正常 CodeRuntime logs，因此成功结果和错误结果都能呈现给模型。每个 kernel 只发送一次，避免污染后续上下文。
+通知进入正常 CodeRuntime logs，结构化值进入当前 journal，因此成功结果和错误结果都能呈现并从 session log 重建。每个 kernel 只发送一次，避免污染后续上下文。
+
+live kernel 首次进入 volatile 时记录并投影一次 `PTC-V001`，包含精确 `volatileReason`。消息先确认当前 live state 仍可继续复用，并按 execution outcome 说明 cell 成功或失败前 mutation 可能已生效，再说明 sticky 后缀不会在冷启动重放；它不得诱导模型重建环境。后续 volatile cell 不重复该诊断。post-execute confirmation 丢失导致的延迟降级在下一 cell 通知。当前状态也可通过 `repl.state({ action: "list" })` 查询，不需要解析 model-invisible metadata。
+
+## 失败状态语义
+
+诊断的 `stateEffect` 描述当前 cell 的 live/冷恢复状态事实，不由 severity 推断，也不表示当前 binding 是否仍可用：
+
+- parse、无法安全放宽的跨 cell collision 在执行前失败，使用 `unchanged`，journal 为 `noop`；
+- 求值开始后的普通 throw 使用 `partially-applied`，因为此前 binding mutation 可能已生效；
+- lossless-JSON 输出编码失败使用 `PTC-O001` 与 `partially-applied`，因为返回前的 binding/mutation 已经执行；诊断建议将 `undefined` 改为 `null`、省略该键或返回其他 JSON 值，而不是静默丢失信息；
+- 首次 volatile transition 使用 `unknown`，表示 live heap 仍可继续使用但冷恢复不再有确定重放路径；文本必须先说明 live continuity，再说明后缀不会冷重放；
+- 冷恢复丢弃不可信后缀使用 `rolled-back`；
+- 只有已知外部 dispatch 发生但 completion 无法确定时才使用 `unknown` 并附 `dispatchState: "unknown"`，插件不得在 RC7 未提供该事实时猜测。
+
+模型可见文本与 `diagnostics` 必须由同一个结构确定性生成。恢复不通过解析既有 message 重建诊断；session export/import 和 replay 均保留结构化 code、cause、dispatch state 与 state effect。源码 frame 使用 `@babel/code-frame` 的无色投影。
 
 ## 插件边界
 
@@ -189,6 +219,7 @@ were not replayed; their source remains in the session log.
 - `tools/execute`；
 - `tools/result`；
 - `CodeRuntime.run`；
+- 当前 `CodeRuntime.run` request 的 public bindings 与 signal；
 - `run_code.output.presentationMeta`；
 - 标准 `tool/call` 与 `tool/result.meta`。
 
@@ -205,4 +236,6 @@ were not replayed; their source remains in the session log.
 - Math intrinsic、局部 ambient 名称、CWD 相关 `node:path`；
 - 命名状态 save/restore/delete 与 volatile restore；
 - 5,000 层 lossless JSON 与 own `__proto__` key；
+- 宽松变量重声明与严格/混合名称 collision preflight；
+- runtime throw、invalid output、首次 volatile 和真实 recovery 的结构化诊断与模型可见投影；
 - 未修改 RC7 的真实公共扩展面和两个独立 Node 进程恢复。

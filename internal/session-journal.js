@@ -1,10 +1,11 @@
 import { decodeJson, encodeJson } from './json-wire.js'
+import { normalizeDiagnostic } from './diagnostic.js'
 
 export const JOURNAL_KEY = 'dshPtcPlus'
 export const JOURNAL_VERSION = 1
 
 const STATUSES = new Set(['durable', 'volatile', 'discarded', 'noop'])
-const JOURNAL_FIELDS = new Set(['version', 'status', 'calls', 'operations', 'confirms', 'completion', 'volatileReason'])
+const JOURNAL_FIELDS = new Set(['version', 'status', 'calls', 'operations', 'confirms', 'diagnostics', 'completion', 'volatileReason'])
 const CALL_SUCCESS_FIELDS = new Set(['global', 'member', 'args', 'ok', 'value', 'settle'])
 const CALL_ERROR_FIELDS = new Set(['global', 'member', 'args', 'ok', 'error', 'settle'])
 const OPERATION_FIELDS = new Set(['action', 'name'])
@@ -69,11 +70,11 @@ function normalizeOperations(value) {
   if (!Array.isArray(value)) throw new Error('invalid dsh-ptc-plus journal operations')
   return value.map((operation, index) => {
     if (!isRecord(operation) || !['save', 'restore', 'delete'].includes(operation.action)
-      || !validName(operation.name)) {
+      || ((operation.action !== 'restore' || operation.name !== undefined) && !validName(operation.name))) {
       throw new Error(`invalid dsh-ptc-plus journal operation at index ${index}`)
     }
     assertOwnFields(operation, OPERATION_FIELDS, `journal operation at index ${index}`)
-    return { action: operation.action, name: operation.name }
+    return { action: operation.action, ...(operation.name === undefined ? {} : { name: operation.name }) }
   })
 }
 
@@ -107,6 +108,17 @@ function normalizeConfirms(value) {
   return confirms
 }
 
+function normalizeDiagnostics(value) {
+  if (!Array.isArray(value)) throw new Error('invalid dsh-ptc-plus journal diagnostics')
+  return value.map((diagnostic, index) => {
+    try {
+      return normalizeDiagnostic(diagnostic)
+    } catch (error) {
+      throw new Error(`invalid dsh-ptc-plus journal diagnostic at index ${index}: ${error.message}`)
+    }
+  })
+}
+
 /** Validate and detach one journal emitted by the runtime. */
 export function normalizeJournal(value) {
   if (!isRecord(value)) throw new Error('invalid dsh-ptc-plus journal')
@@ -117,6 +129,7 @@ export function normalizeJournal(value) {
   const calls = normalizeCalls(value.calls)
   const operations = normalizeOperations(value.operations)
   const confirms = normalizeConfirms(value.confirms)
+  const diagnostics = normalizeDiagnostics(value.diagnostics)
   const completion = normalizeCompletion(value.completion, value.status === 'durable' || value.status === 'volatile')
   if ((value.status === 'discarded' || value.status === 'noop')
     && (calls.length !== 0 || operations.length !== 0)) {
@@ -131,6 +144,7 @@ export function normalizeJournal(value) {
     calls: Object.freeze(calls),
     operations: Object.freeze(operations),
     confirms: Object.freeze(confirms),
+    diagnostics: Object.freeze(diagnostics),
     ...(completion === undefined ? {} : { completion }),
     ...(value.volatileReason === undefined ? {} : { volatileReason: value.volatileReason }),
   })
@@ -149,7 +163,7 @@ export function journalsEqual(left, right) {
 
 /** Start a mutable journal for one live cell. */
 export function createJournal(confirms = []) {
-  return { version: JOURNAL_VERSION, calls: [], operations: [], confirms: [...confirms] }
+  return { version: JOURNAL_VERSION, calls: [], operations: [], confirms: [...confirms], diagnostics: [] }
 }
 
 /** Complete a call which never entered the code runtime. */
@@ -160,6 +174,7 @@ export function createNoopJournal(result) {
     calls: [],
     operations: [],
     confirms: [],
+    diagnostics: [],
     completion: result?.isError === true
       ? { kind: 'throw', error: { kind: 'pipeline', message: result.error?.message ?? 'tool call rejected before dispatch' } }
       : { kind: 'return' },
@@ -193,8 +208,12 @@ function applyOperations(state, operations, nodeIndex, allowSave) {
       state.checkpoints.delete(operation.name)
       continue
     }
-    const target = state.checkpoints.get(operation.name)
-    if (target === undefined) throw new Error(`session log restores unknown REPL state "${operation.name}"`)
+    const target = operation.name === undefined
+      ? nodeIndex === undefined ? state.head : state.nodes[nodeIndex]?.parent
+      : state.checkpoints.get(operation.name)
+    if (operation.name !== undefined && target === undefined) {
+      throw new Error(`session log restores unknown REPL state "${operation.name}"`)
+    }
     state.head = target
     state.trusted = true
     state.volatileSuffix.length = 0
@@ -204,7 +223,7 @@ function applyOperations(state, operations, nodeIndex, allowSave) {
 }
 
 /** Fold the session log into the last exactly replayable frontier. */
-export function recoverJournal(session) {
+export function recoverJournal(session, currentCallId) {
   const events = session?.events
   if (!Array.isArray(events)) {
     return { nodes: [], head: undefined, checkpoints: new Map(), volatileSuffix: [], available: true }
@@ -213,7 +232,10 @@ export function recoverJournal(session) {
   const results = new Map()
   let found = false
   for (const event of events) {
-    if (event?.type === 'tool/call' && event.data?.name === 'run_code') calls.push(event)
+    if (event?.type === 'tool/call' && event.data?.name === 'run_code'
+      && (currentCallId === undefined || String(event.data.callId) !== String(currentCallId))) {
+      calls.push(event)
+    }
     if (event?.type !== 'tool/result') continue
     const sourceSeq = event.sourceEventSeqs?.[0]
     if (!Number.isSafeInteger(sourceSeq)) continue
