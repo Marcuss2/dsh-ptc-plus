@@ -1,0 +1,42 @@
+{
+  "name": "dsh-ptc-plus",
+  "version": "0.0.0-development",
+  "description": "A session-bound agent-native REPL for DeepSeek Harness Code Mode.",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "internal",
+    "docs",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.19"
+  },
+  "dependencies": {
+    "acorn": "^8.15.0"
+  },
+  "scripts": {
+    "check": "node --check index.js && node --test"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "ptc",
+    "code-mode",
+    "repl"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

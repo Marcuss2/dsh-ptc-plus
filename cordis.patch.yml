@@ -1,0 +1,5 @@
+# Attach the session REPL after both the tools registry and Code Runtime exist.
+# The plugin adds no model-facing tools; run_code remains the only Code Mode entry.
+- insert:
+    - id: ptc-plus
+      name: dsh-ptc-plus
