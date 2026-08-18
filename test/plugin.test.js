@@ -4,6 +4,7 @@ import { isAbsolute } from 'node:path'
 import test from 'node:test'
 import { apply } from '../index.js'
 import { normalizeJournal } from '../internal/session-journal.js'
+import { decodeValue, encodeValue, renderValueWire } from '../internal/value-wire.js'
 
 function fixture(config = {}, fixtureOptions = {}) {
   const listeners = new Map()
@@ -36,7 +37,10 @@ function fixture(config = {}, fixtureOptions = {}) {
   }
   const ctx = {
     codeRuntime: runtime,
-    tools: { get: name => name === 'run_code' ? runCodeDefinition : undefined },
+    tools: {
+      get: name => name === 'run_code' ? runCodeDefinition : undefined,
+      schemas: () => [runCodeDefinition, ...(fixtureOptions.schemas ?? [])],
+    },
     systemPrompt: {
       section(value) {
         sections.push(value)
@@ -245,8 +249,8 @@ test('presents one coherent persistent REPL contract to the model', async (t) =>
   assert.match(guidance, /Repeated top-level `const`\/`let` variable declarations replace existing bindings/)
   assert.match(guidance, /Direct non-journalable Node\/process access changes only cold recovery/)
   assert.match(guidance, /Follow `\[PTC-\.\.\.\]` `help:` lines and retry only the failing part/)
-  assert.match(guidance, /tools\.run_code\(\{ code, description \}\).*returns `\{ logs, result\? \}`/)
-  assert.match(guidance, /historical source may be read through available session-event tools/i)
+  assert.match(guidance, /code\.run\(\{ code, description \}\).*returns `\{ logs, result\? \}`/)
+  assert.match(guidance, /historical source may be read through available session-event capabilities/i)
   const strict = fixture({ looseTopLevelRedeclarations: false })
   t.after(() => strict.dispose())
   assert.match(strict.sections[0].text({}), /Redeclaring an existing top-level name fails before execution/)
@@ -298,6 +302,36 @@ test('immutably adapts only the model-visible run_code schema wording', async (t
   assert.equal(adapted.tools[1].parameters.properties.description.maxLength, 80)
 })
 
+test('assembles one strict PTC capability grammar without the adapted native read face', async (t) => {
+  const state = fixture({}, {
+    schemas: [
+      { name: 'read', description: 'Native read.', parameters: { type: 'object', properties: {} } },
+      { name: 'echo', description: 'Echo.', parameters: { type: 'object', properties: {} } },
+    ],
+  })
+  t.after(() => state.dispose())
+  const assembly = {
+    sections: [
+      { name: 'tools:code-only', text: 'Only run_code is direct.' },
+      { name: 'tool:read', text: 'Use the read tool.' },
+      { name: 'tools:sdk', text: 'declare const tools: unknown' },
+    ],
+    contexts: [],
+    variables: {},
+    tools: [state.runCodeDefinition],
+  }
+  const adapted = await state.assemble(assembly, { scope: { id: 'strict-agent' } })
+  assert.deepEqual(adapted.tools.map(tool => tool.name), ['run_code'])
+  assert.equal(adapted.sections.some(section => section.name === 'tool:read'), false)
+  const sdk = adapted.sections.find(section => section.name === 'tools:sdk').text
+  assert.match(sdk, /declare const workspace:/)
+  assert.match(sdk, /readLines\(args: \{ path: string; offset\?: number; limit\?: number \}\)/)
+  assert.match(sdk, /declare const code:/)
+  assert.match(sdk, /declare const host:/)
+  assert.match(sdk, /type HostCapabilityName = "echo"/)
+  assert.doesNotMatch(sdk, /declare const tools:|tools\.read|Use the read tool/)
+})
+
 test('leaves absent run_code assemblies unchanged and rejects incompatible schemas', async (t) => {
   const state = fixture()
   t.after(() => state.dispose())
@@ -324,7 +358,7 @@ test('accepts only the single current journal schema', () => {
     calls: [],
     operations: [],
     confirms: [],
-    completion: { kind: 'return' },
+    completion: { kind: 'return', hasValue: false },
   }), /invalid dsh-ptc-plus journal diagnostics/)
 })
 
@@ -522,13 +556,13 @@ test('retains dynamic imports without repeating their source', async (t) => {
   )
 })
 
-test('rebinds tools for old functions and expires captured tool closures', async (t) => {
+test('rebinds program capabilities for old functions and expires captured closures', async (t) => {
   const state = fixture()
   t.after(() => state.dispose())
 
   await state.run('session-a', `
-async function currentValue() { return tools.value({}) }
-const staleValue = tools.value
+async function currentValue() { return host.invoke({ name: 'value', args: {} }) }
+const staleValue = host.invoke
 `, { value: async () => 1 })
 
   assert.deepEqual(
@@ -548,7 +582,44 @@ return expiredMessage
   assert.deepEqual(expired, { logs: [], value: 'PTC execution lease expired' })
 })
 
-test('injects tools.run_code and routes it to the isolated upstream runtime', async (t) => {
+test('projects read and compatibility bindings through one governed host call', async (t) => {
+  const state = fixture()
+  t.after(() => state.dispose())
+  const calls = []
+  const functions = {
+    async read(args) {
+      calls.push(['read', args])
+      return { path: args.file_path, offset: args.offset ?? 1, lines: [{ number: 2, text: 'line' }], totalLines: 3 }
+    },
+    async echo(args) {
+      calls.push(['echo', args])
+      return args
+    },
+  }
+  const observed = await state.executeRun('capability-projection', `
+const page = await workspace.readLines({ path: 'src/a.ts', offset: 2, limit: 1 })
+const echoed = await host.invoke({ name: 'echo', args: { value: 7 } })
+return { page, echoed, rawTools: typeof tools }
+`, functions, {})
+  assert.deepEqual(observed.raw, {
+    logs: [],
+    value: {
+      page: { path: 'src/a.ts', offset: 2, lines: [{ number: 2, text: 'line' }], totalLines: 3 },
+      echoed: { value: 7 },
+      rawTools: 'undefined',
+    },
+  })
+  assert.deepEqual(calls, [
+    ['read', { file_path: 'src/a.ts', offset: 2, limit: 1 }],
+    ['echo', { value: 7 }],
+  ])
+  assert.deepEqual(observed.result.meta.dshPtcPlus.calls.map(call => [call.global, call.member]), [
+    ['workspace', 'readLines'],
+    ['host', 'invoke'],
+  ])
+})
+
+test('injects code.run and routes it to the isolated upstream runtime', async (t) => {
   const state = fixture()
   t.after(() => state.dispose())
   const childCode = 'const childOnly = 1; return childOnly'
@@ -556,7 +627,7 @@ test('injects tools.run_code and routes it to the isolated upstream runtime', as
 
   const observed = await state.executeRun('recursive-isolation', `
 const parentOnly = 41
-const nestedOutcome = await tools.run_code({
+const nestedOutcome = await code.run({
   code: ${JSON.stringify(childCode)},
   description: 'Execute isolated child code',
 })
@@ -570,13 +641,14 @@ return { parentOnly, nestedOutcome }
   assert.equal(state.upstreamCalls.length, 1)
   assert.equal(state.upstreamCalls[0].program, childCode)
   assert.equal(state.upstreamCalls[0].signal instanceof AbortSignal, true)
-  const childTools = state.upstreamCalls[0].bindings.find(binding => binding.global === 'tools')
-  assert.equal(childTools.functions.read, functions.read)
-  assert.equal(typeof childTools.functions.run_code, 'function')
+  const childWorkspace = state.upstreamCalls[0].bindings.find(binding => binding.global === 'workspace')
+  assert.equal(typeof childWorkspace.functions.readLines, 'function')
+  const childCodeBinding = state.upstreamCalls[0].bindings.find(binding => binding.global === 'code')
+  assert.equal(typeof childCodeBinding.functions.run, 'function')
   assert.equal(Object.hasOwn(functions, 'run_code'), false)
   assert.equal(observed.result.meta.dshPtcPlus.status, 'durable')
   assert.deepEqual(observed.result.meta.dshPtcPlus.calls.map(call => [call.global, call.member]), [
-    ['tools', 'run_code'],
+    ['code', 'run'],
   ])
   assert.deepEqual(await state.run('recursive-isolation', `
 return { parentOnly, childOnly: typeof childOnly }
@@ -593,7 +665,7 @@ test('preserves an existing host run_code binding', async (t) => {
   }
 
   assert.deepEqual(await state.run('host-recursion', `
-return tools.run_code({ code: 'return 1', description: 'Use host recursion' })
+return code.run({ code: 'return 1', description: 'Use host recursion' })
 `, { run_code: hostRunCode }), {
     logs: [],
     value: { logs: ['upstream'], result: 'upstream' },
@@ -606,7 +678,7 @@ test('supports bounded recursive run_code and leaves the parent usable after ove
     async upstreamRun(request) {
       const remaining = Number(request.program)
       if (remaining === 0) return { logs: ['leaf'], value: 0 }
-      const runCode = request.bindings.find(binding => binding.global === 'tools').functions.run_code
+      const runCode = request.bindings.find(binding => binding.global === 'code').functions.run
       try {
         const result = await runCode({
           code: String(remaining - 1),
@@ -621,14 +693,14 @@ test('supports bounded recursive run_code and leaves the parent usable after ove
   t.after(() => state.dispose())
 
   assert.deepEqual(await state.run('recursive-depth-ok', `
-return tools.run_code({ code: '1', description: 'Evaluate two child levels' })
+return code.run({ code: '1', description: 'Evaluate two child levels' })
 `), {
     logs: [],
     value: { logs: [], result: { logs: ['leaf'], result: 0 } },
   })
 
   const overflow = await state.run('recursive-depth-overflow', `
-return tools.run_code({ code: '2', description: 'Exceed child depth limit' })
+return code.run({ code: '2', description: 'Exceed child depth limit' })
 `)
   assert.equal(overflow.error.kind, 'exception')
   assert.match(overflow.error.message, /recursion depth exceeds configured maximum 2/)
@@ -642,7 +714,7 @@ test('validates nested run_code arguments as a closed object', async (t) => {
   const result = await state.run('recursive-arguments', `
 let message
 try {
-  await tools.run_code({ code: 'return 1', description: 'Reject extra input', extra: true })
+  await code.run({ code: 'return 1', description: 'Reject extra input', extra: true })
 } catch (error) {
   message = error.message
 }
@@ -665,17 +737,17 @@ test('turns child runtime failure into a normal binding error and keeps the pare
   const result = await state.run('recursive-child-failure', `
 let childFailure
 try {
-  await tools.run_code({ code: 'for (;;) {}', description: 'Reach child timeout' })
+  await code.run({ code: 'for (;;) {}', description: 'Reach child timeout' })
 } catch (error) {
-  childFailure = { name: error.name, toolName: error.toolName, message: error.message }
+  childFailure = { name: error.name, operation: error.operation, message: error.message }
 }
 return childFailure
 `, {}, { controller })
   assert.deepEqual(result, {
     logs: [],
     value: {
-      name: 'ToolCallError',
-      toolName: 'run_code',
+      name: 'CodeExecutionError',
+      operation: 'run',
       message: 'nested run_code failed (timeout): child budget exhausted',
     },
   })
@@ -687,13 +759,13 @@ test('cold-replays a nested run_code result without dispatching the child again'
   const session = { id: 'recursive-replay', events }
   const first = fixture()
   t.after(() => first.dispose())
-  const code = `const recursiveReplayResult = await tools.run_code({
+  const code = `const recursiveReplayResult = await code.run({
   code: 'return 42',
   description: 'Compute isolated child value',
 })`
   const recorded = await first.runDurable(session.id, code, {}, { session })
   assert.equal(first.upstreamCalls.length, 1)
-  assert.equal(recorded.meta.dshPtcPlus.calls[0].member, 'run_code')
+  assert.equal(recorded.meta.dshPtcPlus.calls[0].member, 'run')
   appendRunCodeEvents(events, 'recursive-parent', code, recorded)
   await first.dispose()
 
@@ -710,14 +782,14 @@ test('materializes binding failures as the declared tool error class', async (t)
 
   const result = await state.run('session-a', `
 let caught
-try { await tools.fail({}) } catch (error) {
-  caught = { name: error.name, toolName: error.toolName, message: error.message }
+try { await host.invoke({ name: 'fail', args: {} }) } catch (error) {
+  caught = { name: error.name, operation: error.operation, message: error.message }
 }
 return caught
 `, { fail: async () => { throw new Error('denied') } })
   assert.deepEqual(result, {
     logs: [],
-    value: { name: 'ToolCallError', toolName: 'fail', message: 'denied' },
+    value: { name: 'HostCapabilityError', operation: 'invoke', message: 'denied' },
   })
 })
 
@@ -727,7 +799,7 @@ test('preserves available host error codes as a structured diagnostic cause', as
   const state = fixture()
   t.after(() => state.dispose())
 
-  const code = 'return await tools.read({ path: "missing" })'
+  const code = 'return await workspace.readLines({ path: "missing" })'
   const observed = await state.executeRun(session.id, code, {
     read: async () => {
       const error = new Error('file not found')
@@ -760,7 +832,7 @@ test('ignores throwing diagnostic accessors on host errors', async (t) => {
   const state = fixture()
   t.after(() => state.dispose())
 
-  const observed = await state.executeRun('host-hostile-error', 'return await tools.fail({})', {
+  const observed = await state.executeRun('host-hostile-error', 'return await host.invoke({ name: "fail", args: {} })', {
     fail: async () => {
       const error = new Error('original host failure')
       Object.defineProperties(error, {
@@ -836,13 +908,10 @@ test('reports runtime exceptions and invalid output without hanging the kernel',
   assert.match(thrown.error.message, /boom/)
 
   const invalid = await state.executeRun('session-a', 'return { temp: undefined }', {}, {})
-  assert.equal(invalid.raw.error.kind, 'invalid-output')
-  assert.match(invalid.raw.error.message, /^error\[PTC-O001\]: cell result could not cross the lossless-JSON boundary:/)
-  assert.match(invalid.raw.error.message, /value at \$\.temp is not lossless JSON: undefined/)
-  assert.match(invalid.raw.error.message, /state: partially-applied/)
-  assert.match(invalid.raw.error.message, /help: replace undefined with null or omit that property before returning/)
+  assert.equal(invalid.raw.error, undefined)
+  assert.equal(invalid.raw.value, '{temp: undefined}')
   assert.equal(invalid.result.meta.dshPtcPlus.status, 'durable')
-  assert.deepEqual(invalid.result.meta.dshPtcPlus.diagnostics.map(item => item.code), ['PTC-O001'])
+  assert.deepEqual(invalid.result.meta.dshPtcPlus.diagnostics, [])
   assert.deepEqual(await state.run('session-a', 'return 6'), { logs: [], value: 6 })
 })
 
@@ -937,7 +1006,91 @@ test('fails closed when replay throws a different semantic exception than the jo
   assert.match(result.error.message, /cell replay produced a different semantic failure/)
 })
 
-test('matches the lossless-JSON boundary for shared and exotic values', async (t) => {
+test('round-trips the canonical PTC value graph without losing JavaScript graph semantics', () => {
+  const shared = { value: 1 }
+  const sparse = new Array(3)
+  sparse[1] = undefined
+  const input = Object.create(null)
+  Object.defineProperty(input, '__proto__', {
+    value: shared, enumerable: true, writable: true, configurable: true,
+  })
+  Object.defineProperties(input, {
+    alias: { value: shared, enumerable: true, writable: true, configurable: true },
+    sparse: { value: sparse, enumerable: true, writable: true, configurable: true },
+    values: {
+      value: [NaN, Infinity, -Infinity, -0, 12345678901234567890n],
+      enumerable: true, writable: true, configurable: true,
+    },
+    self: { value: input, enumerable: true, writable: true, configurable: true },
+  })
+
+  const wire = encodeValue(input)
+  assert.equal(JSON.parse(JSON.stringify(wire)).codec, 'ptc-value-graph/v1')
+  const output = decodeValue(wire)
+  assert.equal(Object.getPrototypeOf(output), null)
+  assert.equal(Object.hasOwn(output, '__proto__'), true)
+  assert.equal(output.__proto__, output.alias)
+  assert.equal(output.self, output)
+  assert.equal(0 in output.sparse, false)
+  assert.equal(1 in output.sparse, true)
+  assert.equal(output.sparse[1], undefined)
+  assert.equal(2 in output.sparse, false)
+  assert.equal(Number.isNaN(output.values[0]), true)
+  assert.equal(output.values[1], Infinity)
+  assert.equal(output.values[2], -Infinity)
+  assert.equal(Object.is(output.values[3], -0), true)
+  assert.equal(output.values[4], 12345678901234567890n)
+  assert.deepEqual(encodeValue(output), wire)
+})
+
+test('rejects executable, accessor, malformed, and over-budget PTC values', () => {
+  let getterCalls = 0
+  const accessor = {}
+  Object.defineProperty(accessor, 'value', {
+    enumerable: true,
+    get() { getterCalls += 1; return 1 },
+  })
+  assert.throws(() => encodeValue(accessor), /property must be an enumerable data property/)
+  assert.equal(getterCalls, 0)
+
+  for (const value of [() => 1, new Date(0), Promise.resolve(1), new Map()]) {
+    assert.throws(() => encodeValue(value), /not PTC Value V1/)
+  }
+  assert.throws(() => decodeValue({
+    codec: 'ptc-value-graph/v1',
+    root: { tag: 'reference', index: 1 },
+    nodes: [],
+  }), /dangling PTC value reference/)
+  assert.throws(() => decodeValue({
+    codec: 'ptc-value-graph/v1',
+    root: { tag: 'mystery' },
+    nodes: [],
+  }), /unknown PTC value atom tag/)
+  assert.throws(() => decodeValue({
+    codec: 'ptc-value-graph/v1', extra: true,
+    root: null,
+    nodes: [],
+  }), /invalid PTC value envelope field extra/)
+  assert.throws(() => encodeValue([1, 2], { maxEdges: 1 }), /edge budget exceeds 1/)
+})
+
+test('encodes and decodes deeply nested PTC values without recursive stack growth', () => {
+  let input = null
+  for (let depth = 0; depth < 5_000; depth += 1) input = [input]
+  const wire = encodeValue(input)
+  let output = decodeValue(wire)
+  for (let depth = 0; depth < 5_000; depth += 1) output = output[0]
+  assert.equal(output, null)
+})
+
+test('renders array holes distinctly from explicit undefined values', () => {
+  assert.equal(renderValueWire(encodeValue(new Array(1))), '[,]')
+  assert.equal(renderValueWire(encodeValue(new Array(2))), '[, ,]')
+  assert.equal(renderValueWire(encodeValue([, undefined, null])), '[, undefined, null]')
+  assert.equal(renderValueWire(encodeValue([undefined])), '[undefined]')
+})
+
+test('projects supported rich values and rejects values outside PTC Value V1', async (t) => {
   const state = fixture()
   t.after(() => state.dispose())
 
@@ -945,11 +1098,9 @@ test('matches the lossless-JSON boundary for shared and exotic values', async (t
 const sharedItem = { value: 1 }
 return [sharedItem, sharedItem]
 `)
-  assert.deepEqual(shared, { logs: [], value: [{ value: 1 }, { value: 1 }] })
-  assert.notEqual(shared.value[0], shared.value[1])
+  assert.deepEqual(shared, { logs: [], value: '[<ref *1> {value: 1}, [Reference *1]]' })
 
   for (const source of [
-    'return -0',
     'return new Date(0)',
     'const value = {}; value[Symbol("x")] = 1; return value',
     'const value = []; value.extra = 1; return value',
@@ -957,6 +1108,69 @@ return [sharedItem, sharedItem]
     const result = await state.run(`invalid-${source.length}`, source)
     assert.ok(['invalid-output', 'exception'].includes(result.error.kind))
   }
+  assert.deepEqual(await state.run('special-number', 'return -0'), { logs: [], value: '-0' })
+})
+
+test('distinguishes an explicit undefined completion from no completion value', async (t) => {
+  const state = fixture()
+  t.after(() => state.dispose())
+
+  const explicit = await state.executeRun('explicit-undefined', 'return undefined', {}, {})
+  assert.deepEqual(explicit.raw, { logs: [], value: 'undefined' })
+  assert.equal(explicit.result.meta.dshPtcPlus.completion.hasValue, true)
+  assert.deepEqual(decodeValue(explicit.result.meta.dshPtcPlus.completion.value), undefined)
+
+  const absent = await state.executeRun('absent-value', 'const noCompletionValue = 1', {}, {})
+  assert.deepEqual(absent.raw, { logs: [] })
+  assert.equal(absent.result.meta.dshPtcPlus.completion.hasValue, false)
+  assert.equal(Object.hasOwn(absent.result.meta.dshPtcPlus.completion, 'value'), false)
+})
+
+test('persists and cold-replays a rich completion through session-log JSON alone', async (t) => {
+  const events = []
+  const session = { id: 'rich-value-replay', events }
+  const first = fixture()
+  t.after(() => first.dispose())
+  const code = `
+const richReplayShared = { value: undefined }
+const richReplaySparse = [, undefined, null]
+const richReplayState = {
+  shared: richReplayShared,
+  alias: richReplayShared,
+  sparse: richReplaySparse,
+  negativeZero: -0,
+  big: 42n,
+}
+richReplayState.self = richReplayState
+return richReplayState
+`
+  const recorded = await first.runDurable(session.id, code, {}, { session })
+  assert.equal(recorded.meta.dshPtcPlus.status, 'durable')
+  assert.equal(recorded.meta.dshPtcPlus.completion.hasValue, true)
+  assert.equal(recorded.meta.dshPtcPlus.completion.value.codec, 'ptc-value-graph/v1')
+  appendRunCodeEvents(events, 'rich-value-cell', code, JSON.parse(JSON.stringify(recorded)))
+  await first.dispose()
+
+  const restored = fixture()
+  t.after(() => restored.dispose())
+  assert.deepEqual(await restored.run(session.id, `return {
+    alias: richReplayState.shared === richReplayState.alias,
+    cycle: richReplayState.self === richReplayState,
+    hole: !(0 in richReplayState.sparse),
+    explicitUndefined: 1 in richReplayState.sparse && richReplayState.sparse[1] === undefined,
+    negativeZero: Object.is(richReplayState.negativeZero, -0),
+    bigint: richReplayState.big === 42n,
+  }`, {}, { session }), {
+    logs: [],
+    value: {
+      alias: true,
+      cycle: true,
+      hole: true,
+      explicitUndefined: true,
+      negativeZero: true,
+      bigint: true,
+    },
+  })
 })
 
 test('preserves Math intrinsics and harmless local ambient names as durable', async (t) => {
@@ -1300,7 +1514,7 @@ test('compares persisted journals with deeply nested tool arguments iteratively'
   const result = await state.runDurable('deep-journal', `
 let nestedArgument = "leaf"
 for (let index = 0; index < 5000; index += 1) nestedArgument = [nestedArgument]
-return await tools.measureDepth({ value: nestedArgument })
+return await host.invoke({ name: 'measureDepth', args: { value: nestedArgument } })
 `, {
     measureDepth: async ({ value }) => {
       let cursor = value
@@ -1377,9 +1591,8 @@ return {
   }
 }
 `)
-  assert.equal(typeof returned.value.value, 'number')
-  assert.equal(returned.meta.dshPtcPlus.status, 'volatile')
-  assert.equal(returned.meta.dshPtcPlus.volatileReason, 'Math.random')
+  assert.match(returned.error.message, /^error\[PTC-O001\]: cell result could not cross the PTC Value V1 boundary:/)
+  assert.equal(returned.meta.dshPtcPlus.status, 'durable')
 
   const thrown = await state.runDurable('error-conversion-volatility', `
 throw {
@@ -1420,7 +1633,7 @@ test('clears incomplete host calls from a discarded journal', async (t) => {
   let signalStarted
   const started = new Promise(resolve => { signalStarted = resolve })
   const controller = new AbortController()
-  const pending = state.runDurable('pending-call-abort', 'await tools.neverSettles({})', {
+  const pending = state.runDurable('pending-call-abort', 'await host.invoke({ name: "neverSettles", args: {} })', {
     neverSettles: async () => {
       signalStarted()
       return new Promise(() => {})
@@ -1616,7 +1829,7 @@ test('reconstructs the live REPL from only session-log journal metadata', async 
   t.after(() => first.dispose())
 
   let originalCalls = 0
-  const firstCode = 'const persistedValue = await tools.readValue({})'
+  const firstCode = 'const persistedValue = await host.invoke({ name: "readValue", args: {} })'
   const firstResult = await first.runDurable('session-a', firstCode, {
     readValue: async () => { originalCalls++; return 40 },
   }, { session })
@@ -1628,7 +1841,7 @@ test('reconstructs the live REPL from only session-log journal metadata', async 
   t.after(() => restored.dispose())
   let replayedExternalCalls = 0
   let invoked = 0
-  const secondCode = 'return persistedValue + await tools.answer({})'
+  const secondCode = 'return persistedValue + await host.invoke({ name: "answer", args: {} })'
   const secondResult = await restored.runDurable('session-a', secondCode, {
     readValue: async () => { replayedExternalCalls++; throw new Error('replayed external call') },
     answer: async () => { invoked++; return 2 },
@@ -1645,8 +1858,8 @@ test('replays concurrent host calls in their recorded settlement order', async (
   t.after(() => first.dispose())
   const code = `
 const recordedWinner = await Promise.race([
-  tools.slow({}),
-  tools.fast({}),
+  host.invoke({ name: 'slow', args: {} }),
+  host.invoke({ name: 'fast', args: {} }),
 ])
 `
   const result = await first.runDurable('session-race', code, {
@@ -1862,6 +2075,10 @@ test('rejects unsupported runtimes and invalid limits', () => {
     ...base,
     codeRuntime: { language: 'typescript', run() {} },
   }, { maxNestedRunCodeDepth: 0 }), /maxNestedRunCodeDepth must be a positive safe integer/)
+  assert.throws(() => apply({
+    ...base,
+    codeRuntime: { language: 'typescript', run() {} },
+  }, { maxValueNodes: 0 }), /maxValueNodes must be a positive safe integer/)
   assert.throws(() => apply({
     ...base,
     codeRuntime: { language: 'typescript', run() {} },

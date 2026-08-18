@@ -32,10 +32,10 @@ PTC Plus 的正确承诺是：
   operations: StateOperation[],
   confirms: string[],
   diagnostics: Diagnostic[],
-  completion?: {
-    kind: "return" | "throw",
-    error?: { kind: string, message: string }
-  },
+  completion?:
+    | { kind: "return", hasValue: false }
+    | { kind: "return", hasValue: true, value: PtcValueGraphV1 }
+    | { kind: "throw", error: { kind: string, message: string } },
   volatileReason?: string
 }
 ```
@@ -52,7 +52,7 @@ PTC Plus 的正确承诺是：
 - `completion`：区分普通 return 与可重放的语义 throw；
 - `volatileReason`：记录第一次触发降级的 capability。
 
-journal、diagnostic、source、cause、call、operation、completion 和 completion error 都使用封闭字段集合；未知、symbol 或非枚举自有字段会使 journal 无效。只有 `args` 和 `value` 是开放的 lossless-JSON 数据。诊断结构、source frame 依赖和稳定代码见[架构说明](architecture.md#诊断契约)。
+journal、diagnostic、source、cause、call、operation、completion 和 completion error 都使用封闭字段集合；未知、symbol 或非枚举自有字段会使 journal 无效。host-call `args`/`value` 与 return completion `value` 都是封闭、规范化的 `ptc-value-graph/v1` envelope。诊断结构、source frame 依赖和稳定代码见[架构说明](architecture.md#诊断契约)。
 
 当前实现只定义并接受本文这一种 `version: 1` schema；同一版本不存在其他历史形状或兼容迁移。包括 `bindingMode`、`diagnostics` 在内的必需字段缺失时 journal 必须失效，不能静默补默认值，否则会削弱最终持久值与 tentative journal 的严格一致性确认。profile 后续切换宽松/严格模式只影响新 cell，历史 node 始终按自身记录的模式重放。
 
@@ -64,9 +64,9 @@ journal、diagnostic、source、cause、call、operation、completion 和 comple
 {
   global: string,
   member: string,
-  args: JsonValue,
+  args: PtcValueGraphV1,
   ok: boolean,
-  value?: JsonValue,
+  value?: PtcValueGraphV1,
   error?: string,
   settle: number
 }
@@ -74,7 +74,7 @@ journal、diagnostic、source、cause、call、operation、completion 和 comple
 
 `settle` 必须是从 0 开始的连续序列。重放按源码产生调用，但按 recorded settlement order 释放结果；这同时校验调用提交顺序和异步完成顺序。
 
-journal 使用扁平 lossless-JSON wire clone，不依赖递归 `JSON.stringify` 或 `structuredClone`。因此深层数组/对象和 own `__proto__` key 不会改变语义或耗尽 JS 调用栈。
+journal 的 host-call `args`/`value` 与 completion value 保存 `ptc-value-graph/v1` canonical envelope，不保存 decoded rich JS value，也不依赖递归 `JSON.stringify` 或 `structuredClone`。因此深层数组/对象、own `__proto__`、`undefined`、special number、BigInt、hole、shared identity 和 cycle 不会被外层 session JSON 改写。完整支持域和预算见 [PTC Value Graph V1](value-wire.md)。
 
 ## 两阶段确认
 
@@ -106,15 +106,15 @@ pre-execute -> tools/execute -> post-execute
 | 未进入 runtime | pending no-op | 后续 `confirms` 存在时忽略 |
 | 无法判断且未被确认 | 保守处理 | 回到此前 durable frontier |
 
-比较使用扁平 lossless-JSON wire 表示，不对深层参数做递归遍历。额外无关 metadata 不影响确认，但 `dshPtcPlus` 自身任何可观察差异都拒绝确认。
+比较先严格规范化 journal，再使用 PTC value graph 的扁平 wire 表示，不对深层参数做递归遍历。额外无关 metadata 不影响确认，但 `dshPtcPlus` 自身任何可观察差异都拒绝确认。
 
 `tools/result` 不修改结果。若 pending no-op 尚未被后续 journal 确认进程就退出，冷恢复保守形成 unknown boundary。
 
 ## Nested run_code
 
-只有模型直接发起的 top-level `run_code` 创建本 schema 的 cell journal。PTC Plus 注入父 cell `tools` namespace 的 `run_code` bridge 在 upstream CodeRuntime 的隔离环境中执行 child，不创建 child PTC journal，也不产生可合并到父 heap 的 binding。
+只有模型直接发起的 top-level `run_code` 创建本 schema 的 cell journal。父 cell 的 `code.run` capability 在 upstream CodeRuntime 的隔离环境中执行 child，不创建 child PTC journal，也不产生可合并到父 heap 的 binding。
 
-父 cell 把 nested `run_code` 当成普通 host call，记录其 lossless-JSON arguments、canonical result/error 和 settlement order。父 cell 冷重放时核对同一个 binding call 并直接释放 transcript 中的结果，不再次执行 child 或其外部工具，因此 child side effect 至多发生在原始 live 执行。bridge 继承当前 request 的可见 bindings 与取消信号，并以配置深度限制递归；它不注册第二个模型工具，不伪造 DSH child UI、独立 policy hook、调用树或 code-dispatch events。宿主若已提供同名 binding，插件不覆盖。
+父 cell 把 `code.run` 当成普通 host call，记录其 graph-encoded arguments、canonical result/error 和 settlement order。父 cell 冷重放时核对同一个 binding call 并直接释放 transcript 中的结果，不再次执行 child 或其外部工具，因此 child side effect 至多发生在原始 live 执行。projection 继承当前 request 的可见 authority 与取消信号，并以配置深度限制递归；它不注册第二个模型工具，不伪造 DSH child UI、独立 policy hook、调用树或 code-dispatch events。宿主若已提供可调用的 `run_code` binding，`code.run` 使用该宿主路径。
 
 ## 日志折叠
 
@@ -172,7 +172,7 @@ type StateOperation =
 
 静态分类器理解 top-level、block、function、catch 和 loop binding。它只把实际未绑定的 ambient reference 作为降级候选；属性键和局部同名变量无影响。
 
-运行时对以下访问标记 volatile。归因依据是 worker 当前 active execution，不使用异步回调继承的 `AsyncLocalStorage` store。active execution 从开始求值持续到 host calls 结算、返回值 lossless-JSON 编码或异常归一化全部完成；这些阶段的 getter、Proxy 或字符串转换仍可能执行用户代码。最终 durability 必须在转换后采样，纯 wire message 构造完成后才在最外层 `finally` 清除 active execution。只有此后发生的访问才暂存 reason 并使下一 cell volatile：
+运行时对以下访问标记 volatile。归因依据是 worker 当前 active execution，不使用异步回调继承的 `AsyncLocalStorage` store。active execution 从开始求值持续到 host calls 结算、返回值 PTC value graph 编码或异常归一化全部完成；这些阶段的 getter、Proxy 或字符串转换仍可能执行用户代码。最终 durability 必须在转换后采样，纯 wire message 构造完成后才在最外层 `finally` 清除 active execution。只有此后发生的访问才暂存 reason 并使下一 cell volatile：
 
 - Date、performance、fetch、WebSocket、crypto、Intl；
 - setTimeout、setInterval、setImmediate；
@@ -207,7 +207,7 @@ live kernel 首次进入 volatile 时记录并投影一次 `PTC-V001`，包含�
 
 - parse、无法安全放宽的跨 cell collision 在执行前失败，使用 `unchanged`，journal 为 `noop`；
 - 求值开始后的普通 throw 使用 `partially-applied`，因为此前 binding mutation 可能已生效；
-- lossless-JSON 输出编码失败使用 `PTC-O001` 与 `partially-applied`，因为返回前的 binding/mutation 已经执行；诊断建议将 `undefined` 改为 `null`、省略该键或返回其他 JSON 值，而不是静默丢失信息；
+- PTC Value V1 输出超出支持域或预算时使用 `PTC-O001` 与 `partially-applied`，因为返回前的 binding/mutation 已经执行；`undefined`、special number、BigInt、hole、shared identity 和 cycle 属于受支持值，不要求模型为了 transport 改写；
 - 首次 volatile transition 使用 `unknown`，表示 live heap 仍可继续使用但冷恢复不再有确定重放路径；文本必须先说明 live continuity，再说明后缀不会冷重放；
 - 冷恢复丢弃不可信后缀使用 `rolled-back`；
 - 只有已知外部 dispatch 发生但 completion 无法确定时才使用 `unknown` 并附 `dispatchState: "unknown"`，插件不得在 RC7 未提供该事实时猜测。
@@ -237,7 +237,7 @@ live kernel 首次进入 volatile 时记录并投影一次 `PTC-V001`，包含�
 - replay timeout fail closed；
 - Math intrinsic、局部 ambient 名称、CWD 相关 `node:path`；
 - 命名状态 save/restore/delete 与 volatile restore；
-- 5,000 层 lossless JSON 与 own `__proto__` key；
+- 深层 graph value、own `__proto__` key、`undefined`、special number、BigInt、hole、alias 与 cycle；
 - 宽松变量重声明与严格/混合名称 collision preflight；
 - runtime throw、invalid output、首次 volatile 和真实 recovery 的结构化诊断与模型可见投影；
 - 未修改 RC7 的真实公共扩展面和两个独立 Node 进程恢复。

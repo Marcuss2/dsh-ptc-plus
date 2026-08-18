@@ -29,7 +29,7 @@ function replGuidance(looseTopLevelRedeclarations) {
   return `\`run_code\` evaluates consecutive top-level cells in one session-bound persistent REPL.
 
 ## session-bound REPL
-Reuse existing top-level bindings and do not resend setup source. ${redeclaration} Use the current global \`tools.*\`; it is rebound for every cell, so never retain an individual tool function. Direct non-journalable Node/process access changes only cold recovery; live bindings remain usable. Follow \`[PTC-...]\` \`help:\` lines and retry only the failing part. Use \`tools.run_code({ code, description })\` to execute source constructed or transformed by this cell in an isolated child environment; it returns \`{ logs, result? }\`. Historical source may be read through available session-event tools and edited with ordinary TypeScript.`
+Reuse existing top-level bindings and do not resend setup source. ${redeclaration} Use the current \`workspace\`, \`code\`, and \`host\` capability globals; they are rebound for every cell, so never retain an individual capability function. Direct non-journalable Node/process access changes only cold recovery; live bindings remain usable. Follow \`[PTC-...]\` \`help:\` lines and retry only the failing part. Use \`code.run({ code, description })\` to execute source constructed or transformed by this cell in an isolated child environment; it returns \`{ logs, result? }\`. Historical source may be read through available session-event capabilities and edited with ordinary TypeScript.`
 }
 
 function isRecord(value) {
@@ -67,27 +67,93 @@ function sessionId(agent) {
 
 function nestedRunCodeArguments(value) {
   if (!isRecord(value)) {
-    throw new TypeError('tools.run_code expects an object with code and description strings')
+    throw new TypeError('code.run expects an object with code and description strings')
   }
   const keys = Reflect.ownKeys(value)
   if (keys.length !== 2 || !keys.includes('code') || !keys.includes('description')
     || keys.some(key => typeof key !== 'string' || !Object.prototype.propertyIsEnumerable.call(value, key))
     || typeof value.code !== 'string' || typeof value.description !== 'string') {
-    throw new TypeError('tools.run_code expects exactly code and description string properties')
+    throw new TypeError('code.run expects exactly code and description string properties')
   }
   return { code: value.code, description: value.description }
 }
 
-function cloneFunctionsWith(functions, member, binding) {
-  const clone = Object.create(Object.getPrototypeOf(functions))
-  Object.defineProperties(clone, Object.getOwnPropertyDescriptors(functions))
-  Object.defineProperty(clone, member, {
-    configurable: true,
-    enumerable: true,
-    writable: true,
-    value: binding,
-  })
-  return clone
+function exactObject(value, fields, label) {
+  if (!isRecord(value)) throw new TypeError(`${label} expects an object`)
+  const keys = Reflect.ownKeys(value)
+  if (keys.some(key => typeof key !== 'string' || !fields.has(key)
+    || !Object.prototype.propertyIsEnumerable.call(value, key))) {
+    throw new TypeError(`${label} received unknown or non-enumerable fields`)
+  }
+  return value
+}
+
+function readLinesArguments(value) {
+  exactObject(value, new Set(['path', 'offset', 'limit']), 'workspace.readLines')
+  if (typeof value.path !== 'string' || value.path.trim().length === 0) {
+    throw new TypeError('workspace.readLines path must be a non-empty string')
+  }
+  for (const name of ['offset', 'limit']) {
+    if (value[name] !== undefined && (!Number.isSafeInteger(value[name]) || value[name] < 1)) {
+      throw new TypeError(`workspace.readLines ${name} must be a positive integer`)
+    }
+  }
+  return {
+    file_path: value.path,
+    ...(value.offset === undefined ? {} : { offset: value.offset }),
+    ...(value.limit === undefined ? {} : { limit: value.limit }),
+  }
+}
+
+function hostInvokeArguments(value) {
+  exactObject(value, new Set(['name', 'args']), 'host.invoke')
+  if (typeof value.name !== 'string' || value.name.length === 0 || !Object.hasOwn(value, 'args')) {
+    throw new TypeError('host.invoke expects non-empty name and args properties')
+  }
+  return { name: value.name, args: value.args }
+}
+
+function namespace(global, functions, errorName, memberNameProperty) {
+  return {
+    global,
+    functions,
+    errorClass: { name: errorName, memberNameProperty },
+  }
+}
+
+function capabilitySdk(names) {
+  const available = new Set(names)
+  const compatibility = [...available].filter(name => !['read', RUN_CODE].includes(name)).sort()
+  const hostNames = compatibility.length === 0 ? 'never' : compatibility.map(JSON.stringify).join(' | ')
+  const workspace = available.has('read')
+    ? `interface WorkspaceLine { number: number; text: string }
+interface WorkspaceLines { path: string; offset: number; lines: WorkspaceLine[]; totalLines: number }
+declare class WorkspaceError extends Error { readonly operation: "readLines" }
+declare const workspace: {
+  readLines(args: { path: string; offset?: number; limit?: number }): Promise<WorkspaceLines>
+}`
+    : ''
+  return `## Program capabilities
+
+Only \`run_code\` is model-callable. Inside a cell, use these program APIs; do not emit native tool calls or \`tools.*\` expressions. Capability objects are rebound for each cell.
+
+\`\`\`ts
+type HostJson = null | boolean | number | string | HostJson[] | { [key: string]: HostJson }
+${workspace}
+
+declare class CodeExecutionError extends Error { readonly operation: "run" }
+declare const code: {
+  run(args: { code: string; description: string }): Promise<{ logs: string[]; result?: HostJson }>
+}
+
+type HostCapabilityName = ${hostNames}
+declare class HostCapabilityError extends Error { readonly operation: "invoke" }
+declare const host: {
+  invoke(call: { name: HostCapabilityName; args: HostJson }): Promise<HostJson>
+}
+\`\`\`
+
+\`workspace.readLines\` is intentionally bounded and never claims to return a complete file. \`host.invoke\` is the explicit compatibility path for unadapted capabilities.`
 }
 
 /** Register the session-bound REPL runtime. */
@@ -110,43 +176,61 @@ export function apply(ctx, config = {}) {
   const patchedDefinitions = new Map()
   const pending = new WeakMap()
 
-  const withRunCodeBinding = (request, depth) => {
-    if (!Array.isArray(request.bindings)) return request
-    const toolsIndex = request.bindings.findIndex(namespace => namespace?.global === 'tools')
-    const toolsNamespace = toolsIndex < 0 ? undefined : request.bindings[toolsIndex]
-    const functions = toolsNamespace?.functions
-    if (functions !== null && typeof functions === 'object' && Object.hasOwn(functions, RUN_CODE)) {
-      return request
+  const projectBindings = (request, depth, inheritedTools = undefined) => {
+    const lease = { active: true }
+    const release = () => { lease.active = false }
+    if (!Array.isArray(request.bindings)) return { request, release }
+    const toolsNamespace = request.bindings.find(binding => binding?.global === 'tools')
+    const functions = inheritedTools ?? toolsNamespace?.functions
+    if (functions === null || typeof functions !== 'object') return { request, release }
+    const ensureLease = () => {
+      if (!lease.active) throw new Error('PTC execution lease expired')
     }
     const runCode = async (value) => {
+      ensureLease()
       const args = nestedRunCodeArguments(value)
       if (depth >= maxNestedRunCodeDepth) {
-        throw new RangeError(`tools.run_code recursion depth exceeds configured maximum ${maxNestedRunCodeDepth}`)
+        throw new RangeError(`code.run recursion depth exceeds configured maximum ${maxNestedRunCodeDepth}`)
       }
-      const childRequest = withRunCodeBinding({ ...request, program: args.code }, depth + 1)
-      const child = await upstreamRun.call(runtime, childRequest)
+      if (typeof functions[RUN_CODE] === 'function') return functions[RUN_CODE](args)
+      const childProjected = projectBindings({ ...request, program: args.code }, depth + 1, functions)
+      let child
+      try {
+        child = await upstreamRun.call(runtime, childProjected.request)
+      } finally {
+        childProjected.release()
+      }
       if (child.error !== undefined) {
         throw new Error(`nested run_code failed (${child.error.kind}): ${child.error.message}`)
       }
       return { logs: child.logs, ...(child.value === undefined ? {} : { result: child.value }) }
     }
-    if (toolsIndex < 0) {
-      return {
-        ...request,
-        bindings: [...request.bindings, {
-          global: 'tools',
-          functions: { [RUN_CODE]: runCode },
-          errorClass: { name: 'ToolCallError', memberNameProperty: 'toolName' },
-        }],
-      }
+
+    const projected = request.bindings.filter(binding => !['tools', 'workspace', 'code', 'host'].includes(binding?.global))
+    if (typeof functions.read === 'function') {
+      projected.push(namespace(
+        'workspace',
+        { readLines: value => { ensureLease(); return functions.read(readLinesArguments(value)) } },
+        'WorkspaceError',
+        'operation',
+      ))
     }
-    if (functions === null || typeof functions !== 'object') return request
-    const bindings = [...request.bindings]
-    bindings[toolsIndex] = {
-      ...toolsNamespace,
-      functions: cloneFunctionsWith(functions, RUN_CODE, runCode),
+    projected.push(namespace('code', { run: runCode }, 'CodeExecutionError', 'operation'))
+    const compatible = new Map()
+    for (const key of Reflect.ownKeys(functions)) {
+      if (typeof key !== 'string' || ['read', RUN_CODE].includes(key) || typeof functions[key] !== 'function') continue
+      compatible.set(key, functions[key])
     }
-    return { ...request, bindings }
+    projected.push(namespace('host', {
+      invoke(value) {
+        ensureLease()
+        const call = hostInvokeArguments(value)
+        const binding = compatible.get(call.name)
+        if (binding === undefined) throw new RangeError(`host capability ${JSON.stringify(call.name)} is unavailable`)
+        return binding(call.args)
+      },
+    }, 'HostCapabilityError', 'operation'))
+    return { request: { ...request, bindings: projected }, release }
   }
 
   const patchResultMetadata = (agent) => {
@@ -181,7 +265,8 @@ export function apply(ctx, config = {}) {
   const patchedRun = function (request) {
     const current = scope.getStore()
     if (current === undefined) return upstreamRun.call(runtime, request)
-    return sessions.run(current, withRunCodeBinding(request, 0))
+    const projected = projectBindings(request, 0)
+    return sessions.run(current, projected.request).finally(projected.release)
   }
 
   Object.defineProperty(runtime, 'run', {
@@ -198,16 +283,29 @@ export function apply(ctx, config = {}) {
       : replGuidance(looseTopLevelRedeclarations),
   })
 
-  ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
+  ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
     const assembly = await next()
     const tools = assembly.tools
     if (!Array.isArray(tools)) {
       throw new Error('ptc-plus: incompatible prompt assembly; expected a tools array')
     }
     if (!tools.some(tool => tool?.name === RUN_CODE)) return assembly
+    const strictPtc = tools.length === 1 && tools[0]?.name === RUN_CODE
+    const schemas = strictPtc && typeof ctx.tools.schemas === 'function'
+      ? ctx.tools.schemas(context.scope)
+      : []
+    const names = schemas.map(schema => schema?.name).filter(name => typeof name === 'string')
+    const hasRead = names.includes('read')
     return {
       ...assembly,
       tools: tools.map(tool => tool?.name === RUN_CODE ? adaptRunCodeSchema(tool) : tool),
+      sections: !strictPtc || !Array.isArray(assembly.sections)
+        ? assembly.sections
+        : assembly.sections
+            .filter(section => !(hasRead && section?.name === 'tool:read'))
+            .map(section => section?.name === 'tools:sdk'
+              ? { ...section, text: capabilitySdk(names) }
+              : section),
     }
   })
 

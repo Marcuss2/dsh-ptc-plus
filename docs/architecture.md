@@ -18,6 +18,7 @@
 | authority freshness | 每个 cell 使用当前 execution 的 tools 与权限 |
 | durable log completeness | 仅凭完整 session log 可重建 durable 状态 |
 | conservative recovery | 不自动重放 volatile、unknown 或基础设施失败的副作用 |
+| program-native projection | capability 名称与数据契约适合程序表达；adapter 映射到同一个 DSH authority/effect source |
 
 worker 与内存索引只是缓存。volatile heap 可以在当前 worker 中继续使用，但不会被描述成可恢复状态。
 
@@ -46,15 +47,15 @@ kernel-worker.js
 └── private MessageChannel
 ```
 
-插件不注册新的模型工具。原生 `run_code` 仍是唯一模型直接调用的 Code Mode 入口。
+插件不注册新的模型工具。原生 `run_code` 仍是唯一模型直接调用的 Code Mode 入口；程序内部使用 `workspace`、`code` 和 `host` capability projection，契约见 [Program Capability Projection](capability-projection.md)。
 
 ## Agent 指令
 
-系统提示首先建立执行模型，而不是罗列实现细节：模型直接发起的 `run_code` 是同一个 session REPL 的连续 cell，绝不是互相独立的脚本。随后只给出生成下一 cell 前必须知道的决策：复用已有语义 binding、默认宽松模式下顶层变量可自然重定义、通过 `tools.*` 获取可重放外部输入、理解 direct Node/process capability 只改变冷恢复属性而不影响当前 live REPL，以及看到 `[PTC-...]` 后只按 `help` 修复失败部分。提示同时声明插件注入的 `tools.run_code` 可执行当前程序构造或转换的隔离源码，但不规定编辑算法。
+系统提示首先建立执行模型，而不是罗列实现细节：模型直接发起的 `run_code` 是同一个 session REPL 的连续 cell，绝不是互相独立的脚本。随后只给出生成下一 cell 前必须知道的决策：复用已有语义 binding、默认宽松模式下顶层变量可自然重定义、通过当前 `workspace`/`code`/`host` capability 获取可重放外部输入、理解 direct Node/process capability 只改变冷恢复属性而不影响当前 live REPL，以及看到 `[PTC-...]` 后只按 `help` 修复失败部分。提示同时声明 `code.run` 可执行当前程序构造或转换的隔离源码，但不规定编辑算法。
 
 提示不得要求模型探测完整 namespace、维护编号别名、记录 journal id 或重发 setup source。这些都是 runtime 的 bookkeeping，转移给模型会破坏不搬运源码、不浪费 token 和不增加往返的不变量。
 
-PTC Plus 在 `system-prompt/assemble` waterfall 的 `next()` 结果上不可变替换 model-visible `run_code` 的 tool description、`code.description` 和 `description.description`，其余字段全部保留。该 listener 不修改注册表 definition，也不字符串重写 `tools:sdk`。若 assembly 存在 `run_code` 但缺少预期的 object schema 或两个 string properties，则以 `ptc-plus: incompatible run_code schema` 失败，不能静默恢复 DSH 的 one-shot wording。PTC guidance section 使用 order 98，在 core order 99 的 Code Mode collapse 之前组装。
+PTC Plus 在 `system-prompt/assemble` waterfall 的 `next()` 结果上不可变替换 model-visible `run_code` 的 tool description、`code.description` 和 `description.description`，其余字段全部保留。严格 PTC assembly 还以当前 scope 的可见 schemas 生成 program capability SDK，删除已适配 native guidance，并且不宣传 raw `tools.*` alias。该 listener 不修改注册表 definition。若 assembly 存在 `run_code` 但缺少预期的 object schema 或两个 string properties，则以 `ptc-plus: incompatible run_code schema` 失败，不能静默恢复 DSH 的 one-shot wording。PTC guidance section 使用 order 98，在 core order 99 的 Code Mode collapse 之前组装。
 
 ## RC7 公共扩展面
 
@@ -62,8 +63,8 @@ PTC Plus 在 `system-prompt/assemble` waterfall 的 `next()` 结果上不可变�
 
 - `tools/execute`：取得 owning agent/session，并包住一次真实 dispatch；
 - `CodeRuntime.run`：将属于 `run_code` 的程序路由到 session kernel；
-- 当前 `CodeRuntime.run` request bindings：不可变增加插件拥有的 `tools.run_code` 元编程桥；
-- `system-prompt/assemble`：不可变调整 detached `run_code` schema，使模型只看到持久 cell 契约；
+- 当前 `CodeRuntime.run` request bindings：不可变投影为 `workspace`、`code` 和 `host` program namespaces；
+- `system-prompt/assemble`：不可变调整 detached `run_code` schema 与严格 PTC SDK，使模型只看到持久 cell 和 program capability 契约；
 - `run_code.output.presentationMeta`：把 tentative journal 投影到成功结果；
 - `tools/result`：观察 post-execute 与 content finalization 之后的冻结结果；
 - 标准 `tool/call` 与 `tool/result.meta`：提供持久日志。
@@ -74,11 +75,11 @@ PTC Plus 在 `system-prompt/assemble` waterfall 的 `next()` 结果上不可变�
 
 ## Top-level 与 Nested run_code
 
-模型直接发起的 top-level `run_code` 进入 `SessionKernel.tail`，保持 binding continuity、journal、durable/volatile、诊断和状态管理。进入 kernel 前，PTC Plus 不可变扩展本次 request 的 `tools` namespace：若宿主尚未提供同名 binding，就注入插件拥有的 `tools.run_code`。该 bridge 直接调用捕获的 upstream `CodeRuntime.run`，因此获得隔离的一次性语言环境，绝不能排入仍被父 cell 占用的同一个 kernel。
+模型直接发起的 top-level `run_code` 进入 `SessionKernel.tail`，保持 binding continuity、journal、durable/volatile、诊断和状态管理。进入 kernel 前，PTC Plus 从本次 request 的真实可见 bindings 构造新的 `workspace`、`code` 和 `host` namespaces，并移除 raw `tools` alias。`code.run` 直接调用捕获的 upstream `CodeRuntime.run`，因此获得隔离的一次性语言环境，绝不能排入仍被父 cell 占用的同一个 kernel。
 
-child 继承父 request 的当前可见 bindings 与取消信号；其中普通 `tools.*` 函数仍使用宿主为本次 execution 建立的 authority。bridge 不直接调用 tool definition、不接入私有 scheduler，也不创建 DSH child tool event。它返回与 `run_code` 一致的 `{ logs, result? }` 值，但不声称复刻原生 nested dispatch 的独立 UI、policy hook 或 start/settle event。若未来宿主已经提供自有 `tools.run_code` binding，插件保留宿主实现而不覆盖。
+child 继承父 request 的当前可见 authority 与取消信号，并为每一级 child 建立新的 capability projection 与 execution lease。projection 只调用宿主已经为本次 execution 建立的 binding closure，不直接调用 tool definition、不接入私有 scheduler，也不创建 DSH child tool event。它返回与 `run_code` 一致的 `{ logs, result? }` 值，但不声称复刻原生 nested dispatch 的独立 UI、policy hook 或 start/settle event。若宿主已经提供可调用的 `run_code` binding，`code.run` 保留宿主路径而不覆盖。
 
-nested child 不创建 PTC Plus journal，也不修改父/子 REPL heap。对父 kernel 而言，它只是名为 `run_code` 的普通 host binding call：arguments、canonical success/error 和 settlement order 进入父 journal；冷重放从 transcript 返回记录结果，不再执行 child，因此不会重复 child tool side effect。每一级 child 都得到同样的 bridge，直到配置的 `maxNestedRunCodeDepth`；超限是普通 binding error，父 REPL 仍可继续。历史源码通过通用 session-event tools 读取并在 PTC 内转换，插件不提供专用源码编辑或寻址 API。
+nested child 不创建 PTC Plus journal，也不修改父/子 REPL heap。对父 kernel 而言，`code.run` 是普通 program capability call：arguments、canonical success/error 和 settlement order 进入父 journal；冷重放从 transcript 返回记录结果，不再执行 child，因此不会重复 child tool side effect。每一级 child 都得到同样的 projection，直到配置的 `maxNestedRunCodeDepth`；超限是普通 binding error，父 REPL 仍可继续。历史源码通过通用 session-event capability 读取并在 PTC 内转换，插件不提供专用源码编辑或寻址 API。
 
 ## Cell 生命周期
 
@@ -95,7 +96,7 @@ nested child 不创建 PTC Plus journal，也不修改父/子 REPL heap。对父
 9. `tools/result` 只在最终 journal 可规范化且与 tentative journal 语义相同时确认，否则降级；
 10. 当前 cell 的 tool lease 失效。
 
-cell 的执行边界不止是 `evaluate()`。返回对象的 getter/Proxy、lossless-JSON 编码，以及被抛值的 stack/message/字符串转换都可能继续执行用户代码并访问 capability。worker 已禁止 cell 重叠，因此归因遵守一个单一不变量：从开始求值到生成纯 wire message，`activeExecution` 始终指向当前 cell，并只在最外层 `finally` 清除。没有 active cell 时发生的访问才进入 `pendingVolatileReason`，由下一 cell 继承。
+cell 的执行边界不止是 `evaluate()`。返回对象的 getter/Proxy、PTC value graph 编码，以及被抛值的 stack/message/字符串转换都可能继续执行用户代码并访问 capability。worker 已禁止 cell 重叠，因此归因遵守一个单一不变量：从开始求值到生成纯 wire message，`activeExecution` 始终指向当前 cell，并只在最外层 `finally` 清除。没有 active cell 时发生的访问才进入 `pendingVolatileReason`，由下一 cell 继承。
 
 ### 完整 cell 与 Node REPL 边界
 
@@ -173,7 +174,7 @@ Acorn 负责 syntax position；`@babel/code-frame` 负责源码片段、行号�
 | `PTC-C001` | `parse` | `unchanged` | Acorn/TypeScript stripping 无法产生可执行 cell；使用 cell-relative source frame |
 | `PTC-C002` | `preflight` | `unchanged` | cell 请求暴露 worker lifecycle control 的 module；在 worker 执行前拒绝 |
 | `PTC-N001` | `preflight` | `unchanged` | 严格模式或无法安全放宽的跨 cell 顶层声明冲突；在 worker 执行前报告全部冲突 |
-| `PTC-O001` | `execute` | `partially-applied` | cell 已执行但返回值无法通过 lossless-JSON boundary；指出具体路径并建议使用 `null` 或省略 `undefined` 字段 |
+| `PTC-O001` | `execute` | `partially-applied` | cell 已执行但返回值超出 PTC Value V1 支持域或预算；`undefined` 等受支持 rich value 不触发该错误 |
 | `PTC-V001` | `execute` | `unknown` | durable 后缀首次使用非 journalable capability；所有已生效 live binding 继续可用，只是不再冷重放 |
 | `PTC-X001` | `execute` | `partially-applied` | 求值已开始后抛出语义异常；抛出前变更可能保留并按当前 durability 记录 |
 | `PTC-R002` | `recover` | `rolled-back` | 冷恢复跳过历史 volatile/unconfirmed cell 并回到 durable head |
@@ -182,7 +183,7 @@ Acorn 负责 syntax position；`@babel/code-frame` 负责源码片段、行号�
 
 `PTC-N001` 按源码顺序汇总所有未被宽松规则安全覆盖的冲突，并给出第一个相关声明的 cell span。严格模式拒绝所有跨 cell 重声明；默认宽松模式仍拒绝 mixed destructuring pattern 与 function/class 重声明。同一 cell 内的 JavaScript 重复声明始终由语言 parser 报告。
 
-PTC Plus 负责 top-level `run_code` 的 parse/preflight、名称、volatility、persistence、replay divergence 和 recovery 诊断，也负责插件 bridge 的 arguments、递归深度与 child runtime failure。DSH core 继续负责外层 `run_code` dispatch 以及 child 内普通 `tools.*` 的 authority、policy、timeout/cancel 与 tool-result 诊断。社区插件不把 bridge 伪装成 DSH nested dispatch，不虚构 rejected-before-dispatch、dispatched-and-failed 或 completion unknown 等不可观察事实，也不为获得这些事实修改 DSH 源码。
+PTC Plus 负责 top-level `run_code` 的 parse/preflight、名称、volatility、persistence、replay divergence 和 recovery 诊断，也负责 capability projection 的 arguments、递归深度与 child runtime failure。DSH core 继续负责外层 `run_code` dispatch 以及 projection 下层 host binding 的 authority、policy、timeout/cancel 与 tool-result 诊断。社区插件不把 projection 伪装成 DSH nested dispatch，不虚构 rejected-before-dispatch、dispatched-and-failed 或 completion unknown 等不可观察事实，也不为获得这些事实修改 DSH 源码。
 
 ## Session 状态
 
@@ -222,7 +223,7 @@ abort / timeout / worker exit / cold recovery
 { global, member, args, ok, value | error, settle }
 ```
 
-重放仍执行原始语言代码，以重建变量、函数、闭包和模块对象，但 host bridge 不调用真实 tool。它逐项核对 binding 名与 lossless-JSON 参数，再按原 `settle` 顺序返回记录的值或错误。
+重放仍执行原始语言代码，以重建变量、函数、闭包和模块对象，但 host bridge 不调用真实 capability。它逐项核对 program namespace/member 与 canonical PTC value graph 参数，再按原 `settle` 顺序返回记录的值或错误。
 
 以下情况使恢复失败：
 
@@ -264,13 +265,13 @@ worker 的宿主环境仍为空，只显式设置 `TEMP`、`TMP`、`TMPDIR` 为 
 
 如果 cell 在调用 `save` 后才运行时降级为 volatile，tentative save 会从 journal 删除。volatile cell 可以 restore 已存在的 durable 名称，由此显式丢弃 live-only 后缀。
 
-durability 对后缀单调生效：volatile 后续的 recorded `tools.*` 调用不能单独宣称可恢复。块作用域只影响 active name mapping，不删除源码、journal node 或 replay 成本。
+durability 对后缀单调生效：volatile 后续的 recorded program capability 调用不能单独宣称可恢复。块作用域只影响 active name mapping，不删除源码、journal node 或 replay 成本。
 
 首次从 durable 进入 sticky volatile 时，本次 `run_code` logs 前置一次状态通知，明确该 cell 与后续 live 后缀不会冷重放。若 post-execute 删除 journal、导致降级只能在 `tools/result` 阶段确定，通知延迟到下一 cell。通知与 `repl.state(list)` 都复用现有 `run_code`，不增加 DSH tool call。
 
 ## 权限和调用树
 
-持久代码不等于持久权限。execution token、旧 tool closure、取消信号、凭据、policy decision 和 parent identity 永不写入 journal。每个 cell 重新绑定当前 DSH tools；先前函数可读取当前全局 `tools`，但保存的具体 tool function 在下一 cell 会得到 `PTC execution lease expired`。
+持久代码不等于持久权限。execution token、旧 capability closure、取消信号、凭据、policy decision 和 parent identity 永不写入 journal。每个 cell 重新投影当前 DSH authority；先前函数可读取当前全局 `workspace`、`code` 或 `host`，但保存的具体 capability function 在下一 cell 会得到 `PTC execution lease expired`。
 
 真实子调用始终经过 DSH registry、policy、取消、事件和调用树管线。只有恢复重放读取已提交 transcript。
 

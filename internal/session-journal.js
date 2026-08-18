@@ -1,4 +1,4 @@
-import { decodeJson, encodeJson } from './json-wire.js'
+import { decodeValue, encodeValue, normalizeValueWire } from './value-wire.js'
 import { normalizeDiagnostic } from './diagnostic.js'
 
 export const JOURNAL_KEY = 'dshPtcPlus'
@@ -10,7 +10,7 @@ const JOURNAL_FIELDS = new Set(['version', 'bindingMode', 'status', 'calls', 'op
 const CALL_SUCCESS_FIELDS = new Set(['global', 'member', 'args', 'ok', 'value', 'settle'])
 const CALL_ERROR_FIELDS = new Set(['global', 'member', 'args', 'ok', 'error', 'settle'])
 const OPERATION_FIELDS = new Set(['action', 'name'])
-const RETURN_FIELDS = new Set(['kind'])
+const RETURN_FIELDS = new Set(['kind', 'hasValue', 'value'])
 const THROW_FIELDS = new Set(['kind', 'error'])
 const ERROR_FIELDS = new Set(['kind', 'message'])
 
@@ -29,7 +29,7 @@ function assertOwnFields(value, allowed, label) {
 
 function cloneJson(value) {
   if (value === undefined) return undefined
-  return decodeJson(encodeJson(value))
+  return decodeValue(encodeValue(value))
 }
 
 function validName(name) {
@@ -54,10 +54,10 @@ function normalizeCalls(value) {
     return {
       global: call.global,
       member: call.member,
-      args: cloneJson(call.args),
+      args: normalizeValueWire(call.args),
       ok: call.ok,
       settle: call.settle,
-      ...(call.ok ? { value: cloneJson(call.value) } : { error: call.error }),
+      ...(call.ok ? { value: normalizeValueWire(call.value) } : { error: call.error }),
     }
   })
   const order = calls.map(call => call.settle).sort((left, right) => left - right)
@@ -86,7 +86,15 @@ function normalizeCompletion(value, required) {
   }
   if (value.kind === 'return') {
     assertOwnFields(value, RETURN_FIELDS, 'journal return completion')
-    return Object.freeze({ kind: 'return' })
+    if (typeof value.hasValue !== 'boolean'
+      || (value.hasValue ? !Object.hasOwn(value, 'value') : Object.hasOwn(value, 'value'))) {
+      throw new Error('invalid dsh-ptc-plus journal return value')
+    }
+    return Object.freeze({
+      kind: 'return',
+      hasValue: value.hasValue,
+      ...(value.hasValue ? { value: normalizeValueWire(value.value) } : {}),
+    })
   }
   if (!isRecord(value.error) || typeof value.error.kind !== 'string' || typeof value.error.message !== 'string') {
     throw new Error('invalid dsh-ptc-plus journal throw completion')
@@ -156,8 +164,8 @@ export function normalizeJournal(value) {
 /** Compare journal semantics without recursive traversal of nested JSON. */
 export function journalsEqual(left, right) {
   try {
-    const leftWire = encodeJson(normalizeJournal(left))
-    const rightWire = encodeJson(normalizeJournal(right))
+    const leftWire = encodeValue(normalizeJournal(left))
+    const rightWire = encodeValue(normalizeJournal(right))
     return JSON.stringify(leftWire) === JSON.stringify(rightWire)
   } catch {
     return false
@@ -183,7 +191,7 @@ export function createNoopJournal(result, bindingMode) {
     diagnostics: [],
     completion: result?.isError === true
       ? { kind: 'throw', error: { kind: 'pipeline', message: result.error?.message ?? 'tool call rejected before dispatch' } }
-      : { kind: 'return' },
+      : { kind: 'return', hasValue: false },
   }
 }
 

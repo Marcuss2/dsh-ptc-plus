@@ -4,7 +4,13 @@ import { tmpdir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import { parse } from 'acorn'
-import { decodeJson, encodeJson } from './json-wire.js'
+import {
+  decodeValue,
+  encodeValue,
+  normalizeValueWire,
+  projectValueWire,
+  valueWiresEqual,
+} from './value-wire.js'
 import { diagnostic, renderDiagnostic } from './diagnostic.js'
 import { assertStateName, createJournal, normalizeJournal, pathToHead, recoverJournal } from './session-journal.js'
 
@@ -17,6 +23,10 @@ const DEFAULTS = Object.freeze({
   maxWallMs: 600_000,
   maxOutputBytes: 64 * 1024 * 1024,
   maxOldGenerationSizeMb: 512,
+  maxValueNodes: 100_000,
+  maxValueEdges: 1_000_000,
+  maxValueArrayLength: 1_000_000,
+  maxValueBigIntDigits: 100_000,
   looseTopLevelRedeclarations: true,
 })
 const MAX_TIMER_DELAY_MS = 2_147_483_647
@@ -194,41 +204,13 @@ function invalidOutputDiagnostic(detail) {
     code: 'PTC-O001',
     severity: 'error',
     phase: 'execute',
-    message: `cell result could not cross the lossless-JSON boundary: ${firstLine(detail, 'unknown output encoding failure')}`,
+    message: `cell result could not cross the PTC Value V1 boundary: ${firstLine(detail, 'unknown output encoding failure')}`,
     stateEffect: 'partially-applied',
     help: [
-      'return only null, booleans, finite numbers, strings, arrays, and plain objects',
-      'replace undefined with null or omit that property before returning',
+      'return a PTC Value V1 value or keep the live value in a REPL binding',
+      'reduce the returned graph when it exceeds the configured value budget',
     ],
   })
-}
-
-/** Compare two lossless JSON trees without recursive stack growth. */
-function sameJson(left, right) {
-  const pending = [[left, right]]
-  while (pending.length > 0) {
-    const pair = pending.pop()
-    const a = pair[0]
-    const b = pair[1]
-    if (a === b) continue
-    if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return false
-    const aArray = Array.isArray(a)
-    if (aArray !== Array.isArray(b)) return false
-    if (aArray) {
-      if (a.length !== b.length) return false
-      for (let index = 0; index < a.length; index++) pending.push([a[index], b[index]])
-      continue
-    }
-    const aKeys = Object.keys(a)
-    const bKeys = Object.keys(b)
-    if (aKeys.length !== bKeys.length) return false
-    for (let index = 0; index < aKeys.length; index++) {
-      const key = aKeys[index]
-      if (key !== bKeys[index] || !Object.hasOwn(b, key)) return false
-      pending.push([a[key], b[key]])
-    }
-  }
-  return true
 }
 
 function stateArguments(value) {
@@ -454,7 +436,10 @@ function classifyDurability(code, knownBindings = new Set()) {
 
 function resolveConfig(config) {
   const resolved = { ...DEFAULTS, ...config }
-  for (const key of ['computeMs', 'maxWallMs', 'maxOutputBytes', 'maxOldGenerationSizeMb']) {
+  for (const key of [
+    'computeMs', 'maxWallMs', 'maxOutputBytes', 'maxOldGenerationSizeMb',
+    'maxValueNodes', 'maxValueEdges', 'maxValueArrayLength', 'maxValueBigIntDigits',
+  ]) {
     const value = resolved[key]
     if (!Number.isSafeInteger(value) || value < 1) {
       throw new TypeError(`ptc-plus: ${key} must be a positive safe integer`)
@@ -686,6 +671,16 @@ class SessionKernel {
     this.disposed = false
   }
 
+  valueLimits() {
+    return {
+      maxNodes: this.config.maxValueNodes,
+      maxEdges: this.config.maxValueEdges,
+      maxArrayLength: this.config.maxValueArrayLength,
+      maxBigIntDigits: this.config.maxValueBigIntDigits,
+      maxStringBytes: this.config.maxOutputBytes,
+    }
+  }
+
   run(request) {
     const execute = () => this.execute(request)
     const result = this.tail.then(execute, execute)
@@ -747,11 +742,15 @@ class SessionKernel {
     this.volatile = false
   }
 
-  completeJournal(journal, status, result, volatileReason, diagnostics = []) {
+  completeJournal(journal, status, result, volatileReason, diagnostics = [], completion = undefined) {
     if (journal === undefined) return
     journal.status = status
     journal.completion = result.error === undefined
-      ? { kind: 'return' }
+      ? {
+          kind: 'return',
+          hasValue: completion?.hasValue === true,
+          ...(completion?.hasValue === true ? { value: completion.value } : {}),
+        }
       : { kind: 'throw', error: { kind: result.error.kind, message: result.error.message } }
     if (volatileReason !== undefined) journal.volatileReason = volatileReason
     if (diagnostics.length > 0) journal.diagnostics.push(...diagnostics)
@@ -859,7 +858,9 @@ class SessionKernel {
               this.volatileNoticeShown = true
               result.logs = [renderDiagnostic(transition, request.program), ...result.logs]
             }
-            this.completeJournal(journal, status, result, active.volatileReason, active.diagnostics)
+            this.completeJournal(
+              journal, status, result, active.volatileReason, active.diagnostics, active.completion,
+            )
             this.tentatives.set(journal, {
               program: request.program,
               declared: prepared.declared,
@@ -895,6 +896,7 @@ class SessionKernel {
         replayPending: new Map(),
         settlementSequence: 0,
         diagnostics: [],
+        completion: undefined,
         desiredDurability,
         effectiveDurability: desiredDurability,
         volatileReason: this.volatile ? this.volatileReason : prepared.reason || undefined,
@@ -909,7 +911,9 @@ class SessionKernel {
         const effectiveNamespaces = describeBindings(bindings)
         this.port.postMessage({
           type: 'run', id, program: prepared.code, namespaces: effectiveNamespaces,
-          maxOutputBytes: this.config.maxOutputBytes, durability: desiredDurability,
+          maxOutputBytes: this.config.maxOutputBytes,
+          valueLimits: this.valueLimits(),
+          durability: desiredDurability,
         })
       } catch (error) {
         settle({ logs: [], error: { kind: 'worker-exit', message: messageOf(error) } }, true)
@@ -1122,7 +1126,25 @@ class SessionKernel {
       return
     }
     try {
-      active.resolve({ logs, ...(message.value === undefined ? {} : { value: decodeJson(message.value) }) })
+      if (typeof message.hasValue !== 'boolean'
+        || (message.hasValue ? message.value === undefined : message.value !== undefined)) {
+        throw new TypeError('invalid PTC completion envelope')
+      }
+      const value = message.hasValue ? normalizeValueWire(message.value, this.valueLimits()) : undefined
+      active.completion = {
+        hasValue: message.hasValue,
+        ...(message.hasValue ? { value } : {}),
+      }
+      if (active.replay?.completion?.kind === 'return'
+        && (active.replay.completion.hasValue !== message.hasValue
+          || (message.hasValue && !valueWiresEqual(active.replay.completion.value, value, this.valueLimits())))) {
+        active.resolve({ logs, error: { kind: 'recovery', message: 'cell replay produced a different completion value' } }, true)
+        return
+      }
+      active.resolve({
+        logs,
+        ...(message.hasValue ? { value: projectValueWire(value, this.valueLimits()) } : {}),
+      })
     } catch (error) {
       const failure = invalidOutputDiagnostic(messageOf(error))
       const invalid = { kind: 'invalid-output', message: renderDiagnostic(failure, active.request.program) }
@@ -1143,9 +1165,11 @@ class SessionKernel {
       this.port.postMessage({ type: 'reply', runId: message.runId, id: message.id, ok: false, error: `unknown binding ${message.global}.${message.member}` })
       return
     }
+    let argsWire
     let args
     try {
-      args = decodeJson(message.args)
+      argsWire = normalizeValueWire(message.args, this.valueLimits())
+      args = decodeValue(argsWire, this.valueLimits())
     } catch (error) {
       this.port.postMessage({ type: 'reply', runId: message.runId, id: message.id, ok: false, error: messageOf(error) })
       return
@@ -1154,7 +1178,7 @@ class SessionKernel {
     if (active.replay !== undefined) {
       active.replayIndex += 1
       if (recorded === undefined || recorded.global !== message.global || recorded.member !== message.member
-        || !sameJson(recorded.args, args)) {
+        || !valueWiresEqual(recorded.args, argsWire, this.valueLimits())) {
         this.port.postMessage({ type: 'reply', runId: message.runId, id: message.id, ok: false, error: 'session log replay diverged at a host binding call' })
         return
       }
@@ -1162,16 +1186,21 @@ class SessionKernel {
       this.flushReplayReplies(worker, active)
       return
     }
-    const call = active.journal === undefined ? undefined : { global: message.global, member: message.member, args }
+    const call = active.journal === undefined
+      ? undefined
+      : { global: message.global, member: message.member, args: argsWire }
     if (call !== undefined) active.journal.calls.push(call)
     try {
       const value = await binding(args)
+      const valueWire = encodeValue(value, this.valueLimits())
       if (call !== undefined) {
         call.ok = true
-        call.value = value
+        call.value = valueWire
         call.settle = active.settlementSequence++
       }
-      if (worker === this.worker) this.port.postMessage({ type: 'reply', runId: message.runId, id: message.id, ok: true, value: encodeJson(value) })
+      if (worker === this.worker) {
+        this.port.postMessage({ type: 'reply', runId: message.runId, id: message.id, ok: true, value: valueWire })
+      }
     } catch (error) {
       const cause = hostCause(error)
       if (call !== undefined) {
@@ -1196,7 +1225,7 @@ class SessionKernel {
       active.replayNextSettle += 1
       const { message, recorded } = pending
       this.port.postMessage(recorded.ok
-        ? { type: 'reply', runId: message.runId, id: message.id, ok: true, value: encodeJson(recorded.value) }
+        ? { type: 'reply', runId: message.runId, id: message.id, ok: true, value: recorded.value }
         : { type: 'reply', runId: message.runId, id: message.id, ok: false, error: recorded.error })
     }
   }

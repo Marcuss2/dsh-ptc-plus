@@ -13,7 +13,7 @@ function parseSessionLine(line: string) {
 
 ```ts
 // Cell 2：直接继续求值，不搬运 Cell 1
-const result = await tools.read({ file_path: "G:/logs/session.jsonl" })
+const result = await workspace.readLines({ path: "G:/logs/session.jsonl" })
 return result.lines.map(line => parseSessionLine(line.text)).length
 ```
 
@@ -32,7 +32,7 @@ PTC Plus 是纯 RC7 社区插件：只使用 DSH 已有公共扩展面，不修�
 
 ## 连续求值与诊断
 
-每次模型直接发起的 `run_code` 都是同一个 session REPL 的下一格，而不是独立脚本。顶层 binding 会跨 cell 保留。默认宽松模式允许模型再次写顶层 `const`/`let`：完整 declarator 中的名称若全部已存在就替换现值，若全部为新名称就建立持久 binding。严格模式、同一解构里混合新旧名称，以及 function/class 重声明仍在执行前报告冲突。可重放的外部输入应通过 `tools.*` 获取；直接 Node/process capability 会开启 sticky volatile 后缀，但不会禁用或丢弃当前进程中的任何 live binding。
+每次模型直接发起的 `run_code` 都是同一个 session REPL 的下一格，而不是独立脚本。顶层 binding 会跨 cell 保留。默认宽松模式允许模型再次写顶层 `const`/`let`：完整 declarator 中的名称若全部已存在就替换现值，若全部为新名称就建立持久 binding。严格模式、同一解构里混合新旧名称，以及 function/class 重声明仍在执行前报告冲突。可重放的外部输入应通过 program capability 获取；当前只读投影提供 `workspace.readLines(...)`，未适配能力使用显式 `host.invoke(...)`，动态源码使用 `code.run(...)`。直接 Node/process capability 会开启 sticky volatile 后缀，但不会禁用或丢弃当前进程中的任何 live binding。
 
 cell 始终按完整 async function body 解释，不采用 Node 终端 REPL 对 `{ ... }` 的对象字面量猜测。模型可以自然使用块作用域中的 `const`/`let`、top-level `await` 和末尾注释，无需添加分号、包装函数或遵守执行器特有的书写仪式；适配器负责无语义变化的 statement framing。
 
@@ -43,7 +43,7 @@ cell 始终按完整 async function body 解释，不采用 Node 终端 REPL 对
 | `PTC-C001` | cell syntax 无法解析 | cell 未执行，REPL 不变 |
 | `PTC-C002` | preflight 拒绝 kernel-control capability | cell 未执行，REPL 不变 |
 | `PTC-N001` | 与已有顶层 binding 冲突 | cell 未执行，REPL 不变 |
-| `PTC-O001` | 返回值不满足 lossless-JSON | cell 已执行；此前 binding/mutation 可能生效 |
+| `PTC-O001` | 返回值超出 PTC Value V1 支持域或预算 | cell 已执行；此前 binding/mutation 可能生效 |
 | `PTC-V001` | 首次进入 volatile 模式 | live binding 继续可用；该后缀不参与冷重放，cell 成败由实际执行结果单独说明 |
 | `PTC-X001` | cell 执行中的未捕获异常 | 抛出前的变更可能已经生效 |
 | `PTC-R002` | 冷恢复跳过历史 volatile/unconfirmed 后缀 | 回到最后可信 durable head |
@@ -54,9 +54,9 @@ PTC Plus 还通过 RC7 的 `system-prompt/assemble` 公共 waterfall，把模型
 
 ## 源码元编程
 
-PTC Plus 在每个顶层 cell 的当前 `tools` binding 中注入 `tools.run_code({ code, description })`。cell 可以把历史 `run_code` 源码作为普通数据读取、用 TypeScript 转换，并直接执行转换后的源码。子调用使用捕获的 upstream CodeRuntime 创建隔离的一次性环境，继承当前可见 tools 与取消信号，但不读取或合并父 REPL binding。父 cell 返回后仍保留原环境，子声明不会进入父环境。
+PTC Plus 在每个顶层 cell 中提供 `code.run({ code, description })`。cell 可以把历史 `run_code` 源码作为普通数据读取、用 TypeScript 转换，并直接执行转换后的源码。子调用使用捕获的 upstream CodeRuntime 创建隔离的一次性环境，继承当前可见 capability 与取消信号，但不读取或合并父 REPL binding。父 cell 返回后仍保留原环境，子声明不会进入父环境。
 
-这种路径不把长源码搬回模型上下文：历史源码应通过可用的通用 session-event tools 读取，修改逻辑留在当前 PTC 程序中。PTC Plus 不增加 `repl.revise`、行编辑、cell id、源码 hash 或专用历史源码工具。
+这种路径不把长源码搬回模型上下文：历史源码应通过当前可见的 session-event capability 读取，修改逻辑留在当前 PTC 程序中。PTC Plus 不增加 `repl.revise`、行编辑、cell id、源码 hash 或专用历史源码工具。
 
 这个入口是已有 PTC 执行环境中的插件 host binding，不是第二个模型工具，也不依赖 RC7 把 `run_code` 加入原生 SDK projection。它不会伪造原生 nested tool card、独立 policy hook 或 `tool/code-dispatch-*` 事件；这些 UI/事件差异不改变代码中的元编程能力。递归深度由 `maxNestedRunCodeDepth` 限制，默认 8 层。
 
@@ -69,13 +69,13 @@ PTC Plus 在每个顶层 cell 的当前 `tools` binding 中注入 `tools.run_cod
 | `durable` | 正常继续求值 | 从 session log 精确重放，外部工具结果不重复执行 |
 | `volatile` | 保留完整 REPL 能力并继续求值 | 不重放源码或副作用，回到最后一个 durable frontier |
 
-确定性计算、受支持的 Node 模块和经 `tools.*` 记录的结果可以 durable。`process.cwd()` 返回 session header 中不可变的工作目录，因此该调用本身可 durable；直接文件 I/O、依赖隐式 CWD 的模块、时钟、随机数、timer、其他进程能力和无法 journal 的能力会在同一次 `run_code` 中自动进入 volatile，不要求模型重试。
+确定性计算、受支持的 Node 模块和经 program capability 记录的结果可以 durable。`process.cwd()` 返回 session header 中不可变的工作目录，因此该调用本身可 durable；直接文件 I/O、依赖隐式 CWD 的模块、时钟、随机数、timer、其他进程能力和无法 journal 的能力会在同一次 `run_code` 中自动进入 volatile，不要求模型重试。
 
 一旦进入 volatile，后续 live cell 保持 volatile，直到显式恢复最后或命名的 durable 状态，或 worker 因取消、超时、退出或进程重启而回到 `durableHead`。被跳过的源码仍在 session log 中，首次恢复会向模型报告边界。
 
 session log 是所有**可恢复状态**的唯一真相。复制完整日志到另一个进程或机器，可以恢复相同的 durable frontier、命名状态和工具 transcript；worker 内存与旁路文件不参与正确性。volatile 内存不会被伪装成可迁移 checkpoint。
 
-详细协议见 [Durable / Volatile 恢复协议](docs/durability-design.md)。
+详细协议见 [Durable / Volatile 恢复协议](docs/durability-design.md)。程序能力投影见 [Program Capability Projection](docs/capability-projection.md)，rich runtime value 与持久格式见 [PTC Value Graph V1](docs/value-wire.md)。
 
 ## 状态管理
 
@@ -111,9 +111,9 @@ tool/call(run_code)             tool/result
                                   └── confirmed no-op call ids
 ```
 
-冷恢复只重放 durable 路径。`tools.*` 调用读取已记录结果，并按原结算顺序释放，因此不会重复外部副作用，也保留 `Promise.race` 等可观察语义。插件注入的 `tools.run_code` 也是普通 parent host call：其参数和规范结果进入父 journal，冷重放直接返回记录结果，不再次执行隔离 child。重放调用名称、参数、数量、结算顺序或 completion 不一致时恢复失败，不带着错误 heap 继续。
+冷恢复只重放 durable 路径。`workspace.*`、`code.*` 和 `host.*` 调用读取已记录结果，并按原结算顺序释放，因此不会重复外部副作用，也保留 `Promise.race` 等可观察语义。`code.run` 也是普通 parent capability call：其参数和规范结果进入父 journal，冷重放直接返回记录结果，不再次执行隔离 child。重放调用名称、参数、数量、结算顺序或 completion 不一致时恢复失败，不带着错误 heap 继续。
 
-durability 属于整个 live 后缀，不属于单个工具结果：进入 volatile 后，即使后续 cell 只调用可记录的 `tools.*`，也不会重新变成 durable。块作用域只避免新增持久顶层名称；完整 durable cell 仍是 journal node，并在冷恢复时重放。
+durability 属于整个 live 后缀，不属于单个 capability 结果：进入 volatile 后，即使后续 cell 只调用可记录的 program capability，也不会重新变成 durable。块作用域只避免新增持久顶层名称；完整 durable cell 仍是 journal node，并在冷恢复时重放。
 
 RC7 不能为某次调用保留 journal 时，插件采用保守边界：
 
@@ -163,6 +163,10 @@ install-dev.cmd headless
     maxWallMs: 600000
     maxOutputBytes: 67108864
     maxOldGenerationSizeMb: 512
+    maxValueNodes: 100000
+    maxValueEdges: 1000000
+    maxValueArrayLength: 1000000
+    maxValueBigIntDigits: 100000
     maxNestedRunCodeDepth: 8
     looseTopLevelRedeclarations: true
 ```
@@ -183,4 +187,4 @@ install-dev.cmd headless
 npm run check
 ```
 
-测试覆盖 live continuation、durable/volatile 转换、两阶段 metadata 确认、仅凭 session log 冷恢复、工具结果 record/replay、并发结算顺序、命名状态、取消与 worker 失败，以及深层 lossless JSON。
+测试覆盖 live continuation、capability projection、durable/volatile 转换、两阶段 metadata 确认、仅凭 session log 冷恢复、host 结果 record/replay、并发结算顺序、命名状态、取消与 worker 失败，以及 PTC Value Graph 的 rich/deep value。

@@ -3,7 +3,7 @@ import repl from 'node:repl'
 import { PassThrough } from 'node:stream'
 import { formatWithOptions } from 'node:util'
 import { MessageChannel, parentPort, workerData } from 'node:worker_threads'
-import { decodeJson, encodeJson } from './json-wire.js'
+import { decodeValue, encodeValue } from './value-wire.js'
 
 if (parentPort === null) throw new Error('ptc-plus kernel worker started without a parent port')
 const { port1, port2: channel } = new MessageChannel()
@@ -232,9 +232,18 @@ function evaluate(program) {
       settled = true
       domain.removeListener('error', onError)
       for (const listener of prior) domain.on('error', listener)
-      if (error instanceof CellReturn) resolve(error.value)
-      else if (error) reject(error)
-      else resolve(value)
+      if (error instanceof CellReturn) {
+        Promise.resolve(error.value).then(
+          value => resolve({ hasValue: true, value }),
+          reject,
+        )
+      } else if (error) reject(error)
+      else {
+        Promise.resolve(value).then(
+          value => resolve({ hasValue: value !== undefined, value }),
+          reject,
+        )
+      }
     }
     const onError = error => finish(error)
     domain.on('error', onError)
@@ -250,7 +259,10 @@ function callHost(runId, global, member, args, errorClass) {
   void result.catch(() => {})
   pending.set(id, { ...settle, runId })
   try {
-    channel.postMessage({ type: 'call', runId, id, global, member, args: encodeJson(args) })
+    channel.postMessage({
+      type: 'call', runId, id, global, member,
+      args: encodeValue(args, activeExecution?.valueLimits),
+    })
   } catch (error) {
     pending.delete(id)
     settle.reject(error)
@@ -301,6 +313,7 @@ async function runCell(message) {
     outputLimited: false,
     logBytes: 2,
     maxOutputBytes: message.maxOutputBytes,
+    valueLimits: message.valueLimits,
     durability: message.durability === 'volatile' || pendingVolatileReason !== undefined ? 'volatile' : 'durable',
     volatileReason: pendingVolatileReason,
   }
@@ -308,9 +321,9 @@ async function runCell(message) {
   activeExecution = execution
 
   try {
-    let value
+    let completion
     try {
-      value = await logScope.run(execution, () => evaluate(message.program))
+      completion = await logScope.run(execution, () => evaluate(message.program))
       activeRun = undefined
       execution.open = false
       const calls = [...pending.values()]
@@ -340,11 +353,14 @@ async function runCell(message) {
 
     let response
     try {
-      const encodedValue = value === undefined ? undefined : encodeJson(value)
+      const encodedValue = completion.hasValue
+        ? encodeValue(completion.value, execution.valueLimits)
+        : undefined
       response = {
         type: 'done',
         id: message.id,
         logs: execution.logs,
+        hasValue: completion.hasValue,
         ...(encodedValue === undefined ? {} : { value: encodedValue }),
         ...completionDurability(execution),
       }
@@ -371,7 +387,7 @@ channel.on('message', (message) => {
     const call = pending.get(message.id)
     if (call === undefined || call.runId !== message.runId) return
     pending.delete(message.id)
-    if (message.ok) call.resolve(decodeJson(message.value))
+    if (message.ok) call.resolve(decodeValue(message.value, activeExecution?.valueLimits))
     else if (call.errorClass === undefined) {
       const error = new Error(message.error)
       if (message.cause !== undefined) error.ptcCause = message.cause
