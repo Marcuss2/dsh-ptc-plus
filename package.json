@@ -24,7 +24,7 @@
     "acorn": "^8.15.0"
   },
   "scripts": {
-    "coverage": "node --test --experimental-test-module-mocks --experimental-test-coverage --test-coverage-include=\"index.js\" --test-coverage-include=\"internal/*.js\" --test-coverage-lines=95 --test-coverage-branches=90 --test-coverage-functions=95",
+    "coverage": "node --test --experimental-test-module-mocks --experimental-test-coverage --test-concurrency=1 --test-coverage-include=\"index.js\" --test-coverage-include=\"internal/*.js\" --test-coverage-lines=100 --test-coverage-branches=95 --test-coverage-functions=100",
     "check": "node --check index.js && npm run coverage"
   },
   "keywords": [

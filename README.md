@@ -170,7 +170,14 @@ install-dev.cmd headless
     maxValueBigIntDigits: 100000
     maxNestedRunCodeDepth: 8
     looseTopLevelRedeclarations: true
+    durableReplay: true
 ```
+
+`durableReplay` 默认开启。设为 `false` 是恢复故障的逃生开关：新 kernel 不读取或重放
+session log 中的 REPL heap，所有实际进入 evaluator 的 cell 都以 volatile 运行，但 binding
+仍可在当前进程内连续复用。`noop` 与因取消、超时或 worker 失败而 `discarded` 的调用保持
+原语义。此模式不会删除已有日志；重新开启后，新 kernel 仍可按日志中最后可信的 durable
+frontier 恢复。
 
 ## 当前边界
 
@@ -188,8 +195,9 @@ install-dev.cmd headless
 npm run check
 ```
 
-`npm run check` 使用 Node 原生 coverage runner 执行完整测试，并对 `index.js` 与
-`internal/*.js` 设置行 95%、分支 90%、函数 95% 的回退门禁。覆盖率用于发现测试面
-退化，不要求为命中不可达实现分支而暴露私有函数、改写源码或扭曲生产代码。
+`npm run check` 使用 Node 原生 coverage runner 串行执行测试文件，避免并发子进程退出时
+丢失覆盖率数据；单个测试文件内的异步行为不受影响。它对 `index.js` 与 `internal/*.js`
+设置行 100%、分支 95%、函数 100% 的回退门禁。覆盖率用于发现测试面退化，不要求为
+命中不可达实现分支而暴露私有函数、改写源码或扭曲生产代码。
 
 测试覆盖 live continuation、capability projection、durable/volatile 转换、两阶段 metadata 确认、仅凭 session log 冷恢复、host 结果 record/replay、并发结算顺序、命名状态、取消与 worker 失败，以及 PTC Value Graph 的 rich/deep value。

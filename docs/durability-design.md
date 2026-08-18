@@ -15,6 +15,8 @@ PTC Plus 的正确承诺是：
 - 一旦进入 volatile，整个 live 后缀保持 volatile；
 - restore 命名的 durable 状态可以显式丢弃 volatile 后缀；
 - abort、timeout、worker exit、OOM 和进程恢复都回到最后一个 durable frontier；
+- `durableReplay: false` 时，新 kernel 从空状态开始且所有已执行 live cell 都是 volatile，作为
+  用户怀疑恢复正确性时的显式逃生模式；
 - 被跳过的源码仍保存在原始 `tool/call` 中。
 
 这避免了两个错误极端：既不为追求恢复而删除正常 REPL 能力，也不把无法迁移的 heap 伪装成可确定重建。
@@ -51,6 +53,13 @@ PTC Plus 的正确承诺是：
 - `diagnostics`：本 cell 产生的封闭结构化诊断；
 - `completion`：区分普通 return 与可重放的语义 throw；
 - `volatileReason`：记录第一次触发降级的 capability。
+
+`durableReplay` 不写入 journal，也不引入 schema 分支。它默认是 `true`。设为 `false` 时，
+SessionRuntime 创建 kernel 时完全忽略历史 nodes、head、checkpoints 与 volatile suffix；之后实际
+求值的 cell 无论静态分类如何都记录为 `volatile`。这是已知配置态，不是运行时降级，因此不
+发送 `PTC-V001`；system prompt 直接告知模型 binding 仅在当前进程可复用，`repl.state(list)`
+返回同一状态。未进入 evaluator 的调用仍是 `noop`，取消、超时和 worker failure 仍是
+`discarded`。关闭期间不能保存 durable named state；restore 后的下一 cell 仍被强制为 volatile。
 
 journal、diagnostic、source、cause、call、operation、completion 和 completion error 都使用封闭字段集合；未知、symbol 或非枚举自有字段会使 journal 无效。host-call `args`/`value` 与 return completion `value` 都是封闭、规范化的 `ptc-value-graph/v1` envelope。诊断结构、source frame 依赖和稳定代码见[架构说明](architecture.md#诊断契约)。
 

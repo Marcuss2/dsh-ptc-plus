@@ -235,6 +235,49 @@ test('cold-replays a block-scoped awaited initializer without source conventions
   })
 })
 
+test('can disable durable replay while preserving live volatile continuation', async (t) => {
+  const events = []
+  const session = { id: 'durable-replay-disabled', events }
+  const writer = fixture()
+
+  const setupCode = 'let historicalBinding = 41'
+  const setup = await writer.runDurable(session.id, setupCode, {}, { session })
+  appendRunCodeEvents(events, 'durable-replay-setup', setupCode, setup)
+  appendRunCodeEvents(events, 'durable-replay-corrupt', 'let corruptHistory = 1', {
+    meta: { dshPtcPlus: { version: 999 } },
+  })
+  await writer.dispose()
+
+  const state = fixture({ durableReplay: false })
+  t.after(() => state.dispose())
+  const first = await state.executeRun(session.id, 'return typeof historicalBinding', {}, { session })
+  assert.equal(first.raw.value, 'undefined')
+  assert.equal(first.result.meta.dshPtcPlus.status, 'volatile')
+  assert.equal(
+    first.result.meta.dshPtcPlus.volatileReason,
+    'durable replay disabled by configuration',
+  )
+  assert.deepEqual(first.raw.logs, [])
+  assert.deepEqual(first.result.meta.dshPtcPlus.diagnostics, [])
+
+  const defined = await state.runDurable(session.id, 'let liveOnlyBinding = 42', {}, { session })
+  assert.equal(defined.meta.dshPtcPlus.status, 'volatile')
+  const reused = await state.runDurable(session.id, 'return liveOnlyBinding', {}, { session })
+  assert.equal(reused.value, 42)
+  assert.equal(reused.meta.dshPtcPlus.status, 'volatile')
+  assert.deepEqual(reused.meta.dshPtcPlus.diagnostics, [])
+
+  const save = await state.runDurable(
+    session.id,
+    'return await repl.state({ action: "save", name: "unavailable" })',
+    {},
+    { session },
+  )
+  assert.equal(save.isError, true)
+  assert.equal(save.meta.dshPtcPlus.status, 'volatile')
+  assert.match(save.error.message, /cannot save a durable REPL state from a volatile segment/)
+})
+
 test('presents one coherent persistent REPL contract to the model', async (t) => {
   const state = fixture()
   t.after(() => state.dispose())
@@ -257,6 +300,12 @@ test('presents one coherent persistent REPL contract to the model', async (t) =>
   const strict = fixture({ looseTopLevelRedeclarations: false })
   t.after(() => strict.dispose())
   assert.match(strict.sections[0].text({}), /Redeclaring an existing top-level name fails before execution/)
+  const volatileOnly = fixture({ durableReplay: false })
+  t.after(() => volatileOnly.dispose())
+  assert.match(
+    volatileOnly.sections[0].text({}),
+    /Durable replay is disabled for this profile\. Bindings remain reusable only in the current process; a new kernel starts empty\./,
+  )
   state.ctx.tools.get = () => undefined
   assert.equal(state.sections[0].text({}), '')
 })
@@ -405,6 +454,13 @@ test('advertises cordis only for the exact known creator binding profile', async
       { name: 'tools:sdk', text: 'declare const tools: unknown' },
     ],
   }), /unknown native API reference/)
+  await assert.rejects(complete.assemble({
+    ...assembly(complete),
+    sections: [
+      { name: 'tool:cordis', text: { rendered: false } },
+      { name: 'tools:sdk', text: 'declare const tools: unknown' },
+    ],
+  }), /expected rendered text/)
 })
 
 test('leaves absent run_code assemblies unchanged and rejects incompatible schemas', async (t) => {
@@ -2510,6 +2566,10 @@ test('rejects unsupported runtimes and invalid limits', () => {
     ...base,
     codeRuntime: { language: 'typescript', run() {} },
   }, { looseTopLevelRedeclarations: 'yes' }), /looseTopLevelRedeclarations must be a boolean/)
+  assert.throws(() => apply({
+    ...base,
+    codeRuntime: { language: 'typescript', run() {} },
+  }, { durableReplay: 'yes' }), /durableReplay must be a boolean/)
 })
 
 test('rejects malformed projected adapter requests and read results', async (t) => {

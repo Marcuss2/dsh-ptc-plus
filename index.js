@@ -34,14 +34,17 @@ export const name = 'ptc-plus'
 /** Services required by the plugin. */
 export const inject = ['tools', 'codeRuntime', 'systemPrompt']
 
-function replGuidance(looseTopLevelRedeclarations) {
+function replGuidance(looseTopLevelRedeclarations, durableReplay) {
   const redeclaration = looseTopLevelRedeclarations
     ? 'Repeated top-level `const`/`let` variable declarations replace existing bindings; reuse a name naturally when recomputing it. A non-blocking `[PTC-N002]` note after an adjacent redeclaration means the existing binding could have been referenced directly.'
     : 'Redeclaring an existing top-level name fails before execution, so reuse it or place one-off declarations inside a block.'
+  const recovery = durableReplay
+    ? ''
+    : ' Durable replay is disabled for this profile. Bindings remain reusable only in the current process; a new kernel starts empty.'
   return `\`run_code\` evaluates consecutive top-level cells in one session-bound persistent REPL.
 
 ## session-bound REPL
-Reuse existing top-level bindings and do not resend setup source. ${redeclaration} Use the current SDK-declared capability globals such as \`workspace\`, \`code\`, \`host\`, and optional \`cordis\`; they are rebound for every cell, so never retain an individual capability function. Direct non-journalable Node/process access changes only cold recovery; live bindings remain usable. Follow \`[PTC-...]\` \`help:\` lines and retry only the failing part. Use \`code.run({ code, description })\` to execute source constructed or transformed by this cell in an isolated child environment; it returns \`{ logs, result? }\`. Historical source may be read through available session-event capabilities and edited with ordinary TypeScript.`
+Reuse existing top-level bindings and do not resend setup source. ${redeclaration}${recovery} Use the current SDK-declared capability globals such as \`workspace\`, \`code\`, \`host\`, and optional \`cordis\`; they are rebound for every cell, so never retain an individual capability function. Direct non-journalable Node/process access changes only cold recovery; live bindings remain usable. Follow \`[PTC-...]\` \`help:\` lines and retry only the failing part. Use \`code.run({ code, description })\` to execute source constructed or transformed by this cell in an isolated child environment; it returns \`{ logs, result? }\`. Historical source may be read through available session-event capabilities and edited with ordinary TypeScript.`
 }
 
 function isRecord(value) {
@@ -589,7 +592,7 @@ export function apply(ctx, config = {}) {
     order: 98,
     text: context => ctx.tools.get(RUN_CODE, context.scope) === undefined
       ? ''
-      : replGuidance(looseTopLevelRedeclarations),
+      : replGuidance(looseTopLevelRedeclarations, sessions.config.durableReplay),
   })
 
   ctx.on('system-prompt/assemble', async (_assembly, context, next) => {

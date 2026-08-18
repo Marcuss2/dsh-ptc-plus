@@ -28,6 +28,7 @@ const DEFAULTS = Object.freeze({
   maxValueArrayLength: 1_000_000,
   maxValueBigIntDigits: 100_000,
   looseTopLevelRedeclarations: true,
+  durableReplay: true,
 })
 const MAX_TIMER_DELAY_MS = 2_147_483_647
 const DURABLE_IMPORTS = new Set([
@@ -481,6 +482,9 @@ function resolveConfig(config) {
   if (typeof resolved.looseTopLevelRedeclarations !== 'boolean') {
     throw new TypeError('ptc-plus: looseTopLevelRedeclarations must be a boolean')
   }
+  if (typeof resolved.durableReplay !== 'boolean') {
+    throw new TypeError('ptc-plus: durableReplay must be a boolean')
+  }
   return resolved
 }
 
@@ -909,7 +913,7 @@ class SessionKernel {
 
     const journal = request.journal
     const desiredDurability = replayRecord === undefined
-      ? this.volatile ? 'volatile' : prepared.durability
+      ? !this.config.durableReplay || this.volatile ? 'volatile' : prepared.durability
       : 'durable'
     const bindings = this.withControlBinding(request.bindings, journal, replayRecord)
     const id = ++this.sequence
@@ -928,7 +932,8 @@ class SessionKernel {
             this.rollbackToDurable()
           } else {
             const status = active.effectiveDurability
-            if (status === 'volatile' && !this.volatile && active.volatileReason !== undefined && replayRecord === undefined) {
+            if (status === 'volatile' && this.config.durableReplay
+              && !this.volatile && active.volatileReason !== undefined && replayRecord === undefined) {
               const transition = volatileDiagnostic(active.volatileReason, result.error === undefined)
               active.diagnostics.push(transition)
               this.volatileNoticeShown = true
@@ -982,7 +987,11 @@ class SessionKernel {
         completion: undefined,
         desiredDurability,
         effectiveDurability: desiredDurability,
-        volatileReason: this.volatile ? this.volatileReason : prepared.reason || undefined,
+        volatileReason: this.volatile
+          ? this.volatileReason
+          : !this.config.durableReplay
+            ? 'durable replay disabled by configuration'
+            : prepared.reason || undefined,
         externalVolatileReason: undefined,
         control: { names: new Set(this.checkpoints.keys()) },
       }
@@ -1384,10 +1393,12 @@ export class SessionRuntime {
     if (kernel === undefined) {
       let history
       try {
-        history = recoverJournal(
-          typeof sessionContext === 'object' ? sessionContext.session : undefined,
-          typeof sessionContext === 'object' ? sessionContext.callId : undefined,
-        )
+        history = this.config.durableReplay
+          ? recoverJournal(
+              typeof sessionContext === 'object' ? sessionContext.session : undefined,
+              typeof sessionContext === 'object' ? sessionContext.callId : undefined,
+            )
+          : { nodes: [], head: undefined, checkpoints: new Map(), volatileSuffix: [], available: true }
       } catch (error) {
         return { logs: [], error: { kind: 'recovery', message: messageOf(error) } }
       }

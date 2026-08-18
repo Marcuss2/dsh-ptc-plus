@@ -98,6 +98,15 @@ nested child 不创建 PTC Plus journal，也不修改父/子 REPL heap。对父
 9. `tools/result` 只在最终 journal 可规范化且与 tentative journal 语义相同时确认，否则降级；
 10. 当前 cell 的 tool lease 失效。
 
+`durableReplay` 是默认开启的恢复策略开关，而不是 journal schema 字段。关闭时，第 3 步以
+空 history、空 checkpoint 和空 binding 集合启动，不扫描或重放既有 session journal；每个
+真正进入 evaluator 的 live cell 都强制为 volatile，并以
+`durable replay disabled by configuration` 作为 journal 原因。该状态由 system prompt 和
+`repl.state(list)` 直接暴露，不发送表示运行时降级的 `PTC-V001`。当前 worker 内的 binding
+仍然连续可用，parse/preflight no-op 与基础设施 discarded 仍保留各自语义。restore 可以重置
+live heap，但不能在开关关闭期间重新产生 durable cell。重新开启只影响此后新建的 kernel，
+不修改或迁移已有日志。
+
 cell 的执行边界不止是 `evaluate()`。返回对象的 getter/Proxy、PTC value graph 编码，以及被抛值的 stack/message/字符串转换都可能继续执行用户代码并访问 capability。worker 已禁止 cell 重叠，因此归因遵守一个单一不变量：从开始求值到生成纯 wire message，`activeExecution` 始终指向当前 cell，并只在最外层 `finally` 清除。没有 active cell 时发生的访问才进入 `pendingVolatileReason`，由下一 cell 继承。
 
 ### 完整 cell 与 Node REPL 边界
