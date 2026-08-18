@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
-import { access } from 'node:fs/promises'
+import { access, rm } from 'node:fs/promises'
 import { isAbsolute } from 'node:path'
 import test from 'node:test'
 import { apply } from '../index.js'
 import { normalizeJournal } from '../internal/session-journal.js'
+import { SessionRuntime } from '../internal/session-runtime.js'
 import { decodeValue, encodeValue, renderValueWire } from '../internal/value-wire.js'
 
 function fixture(config = {}, fixtureOptions = {}) {
@@ -147,6 +148,7 @@ function fixture(config = {}, fixtureOptions = {}) {
 
   return {
     ctx,
+    listeners,
     runtime,
     runCodeDefinition,
     sections,
@@ -247,6 +249,7 @@ test('presents one coherent persistent REPL contract to the model', async (t) =>
   assert.match(guidance, /session-bound REPL/)
   assert.match(guidance, /Reuse existing top-level bindings and do not resend setup source/)
   assert.match(guidance, /Repeated top-level `const`\/`let` variable declarations replace existing bindings/)
+  assert.match(guidance, /non-blocking `\[PTC-N002\]` note after an adjacent redeclaration/)
   assert.match(guidance, /Direct non-journalable Node\/process access changes only cold recovery/)
   assert.match(guidance, /Follow `\[PTC-\.\.\.\]` `help:` lines and retry only the failing part/)
   assert.match(guidance, /code\.run\(\{ code, description \}\).*returns `\{ logs, result\? \}`/)
@@ -330,6 +333,78 @@ test('assembles one strict PTC capability grammar without the adapted native rea
   assert.match(sdk, /declare const host:/)
   assert.match(sdk, /type HostCapabilityName = "echo"/)
   assert.doesNotMatch(sdk, /declare const tools:|tools\.read|Use the read tool/)
+})
+
+test('advertises cordis only for the exact known creator binding profile', async (t) => {
+  const cordisNames = [
+    'cordis_inspect_list', 'cordis_inspect_query', 'cordis_inspect_self',
+    'cordis_define', 'cordis_run', 'cordis_stop', 'cordis_undefine',
+  ]
+  const assembly = state => ({
+    sections: [
+      {
+        name: 'tool:cordis',
+        text: [
+          'Use cordis_inspect_list and cordis_inspect_query before cordis_define.',
+          'Call cordis_inspect_self(pluginId, packageId) for source.',
+          'Submit idPrefix with code.host or code.client as plain JavaScript.',
+          'awaiting-approval and starting are not completed activation states.',
+        ].join('\n'),
+      },
+      { name: 'tools:sdk', text: 'declare const tools: unknown' },
+    ],
+    contexts: [],
+    variables: {},
+    tools: [state.runCodeDefinition],
+  })
+
+  const complete = fixture({}, { schemas: cordisNames.map(name => ({ name })) })
+  t.after(() => complete.dispose())
+  const projected = await complete.assemble(assembly(complete))
+  const guidance = projected.sections.find(section => section.name === 'tool:cordis').text
+  assert.match(guidance, /methods on the optional `cordis` namespace inside `run_code`/)
+  assert.match(guidance, /cordis\.inspectList and cordis\.inspect before cordis\.define/)
+  assert.match(guidance, /cordis\.inspectSelf\(\{ pluginId, packageId \}\)/)
+  assert.match(guidance, /target\.prefix with source\.host or source\.client as plain JavaScript/)
+  assert.match(guidance, /awaiting-approval and starting are not completed activation states/)
+  assert.doesNotMatch(guidance, /\bcordis_[a-z0-9_]+\b|idPrefix|code\.(?:host|client)/)
+  const sdk = projected.sections.find(section => section.name === 'tools:sdk').text
+  assert.match(sdk, /declare const cordis:/)
+  assert.match(sdk, /target: \{ kind: "new"; prefix: string \}/)
+  assert.doesNotMatch(sdk, /cordis_define|cordis_run|cordis_inspect_query/)
+
+  const partial = fixture({}, { schemas: cordisNames.slice(0, -1).map(name => ({ name })) })
+  t.after(() => partial.dispose())
+  const partialProjection = await partial.assemble(assembly(partial))
+  const partialSdk = partialProjection.sections.find(section => section.name === 'tools:sdk').text
+  assert.doesNotMatch(partialSdk, /declare const cordis:|cordis_define|cordis_run|cordis_inspect_query/)
+  assert.equal(partialProjection.sections.some(section => section.name === 'tool:cordis'), false)
+
+  const absent = fixture()
+  t.after(() => absent.dispose())
+  const absentProjection = await absent.assemble(assembly(absent))
+  const absentSdk = absentProjection.sections.find(section => section.name === 'tools:sdk').text
+  assert.doesNotMatch(absentSdk, /declare const cordis:|cordis_define|cordis_run|cordis_inspect_query/)
+  assert.equal(absentProjection.sections.some(section => section.name === 'tool:cordis'), false)
+
+  const future = fixture({}, { schemas: [...cordisNames, 'cordis_future'].map(name => ({ name })) })
+  t.after(() => future.dispose())
+  const futureProjection = await future.assemble(assembly(future))
+  const futureSdk = futureProjection.sections.find(section => section.name === 'tools:sdk').text
+  assert.doesNotMatch(futureSdk, /declare const cordis:|cordis_define|cordis_future/)
+  assert.equal(futureProjection.sections.some(section => section.name === 'tool:cordis'), false)
+
+  await assert.rejects(complete.assemble({
+    ...assembly(complete),
+    sections: [{ name: 'tools:sdk', text: 'declare const tools: unknown' }],
+  }), /Cordis profile has no guidance section/)
+  await assert.rejects(complete.assemble({
+    ...assembly(complete),
+    sections: [
+      { name: 'tool:cordis', text: 'Use cordis_future.' },
+      { name: 'tools:sdk', text: 'declare const tools: unknown' },
+    ],
+  }), /unknown native API reference/)
 })
 
 test('leaves absent run_code assemblies unchanged and rejects incompatible schemas', async (t) => {
@@ -441,6 +516,56 @@ return { repeatedValue, addedAfterReplace, repeatedLabel }
       repeatedLabel: 'first-second',
     },
   })
+})
+
+test('notes adjacent loose redeclarations without blocking or guessing across executed cells', async (t) => {
+  const state = fixture()
+  t.after(() => state.dispose())
+
+  await state.run('loose-redeclaration-note', 'const recentValue = 1\nconst recentLabel = "one"')
+  const source = 'const recentValue = 2\nconst recentLabel = "two"\nreturn { recentValue, recentLabel }'
+  const adjacent = await state.executeRun('loose-redeclaration-note', source, {}, {})
+  assert.deepEqual(adjacent.raw.value, { recentValue: 2, recentLabel: 'two' })
+  assert.equal(adjacent.raw.logs.length, 1)
+  assert.match(adjacent.raw.logs[0], /^note\[PTC-N002\]: recent top-level bindings are redeclared in this cell: recentValue, recentLabel\./)
+  assert.match(adjacent.raw.logs[0], /help: reuse the existing binding directly/)
+  assert.deepEqual(adjacent.result.meta.dshPtcPlus.diagnostics.map(item => item.code), ['PTC-N002'])
+
+  await state.run('loose-redeclaration-note', 'const broken =')
+  const afterNoop = await state.run('loose-redeclaration-note', 'const recentValue = 3\nreturn recentValue')
+  assert.equal(afterNoop.value, 3)
+  assert.match(afterNoop.logs[0], /^note\[PTC-N002\]/)
+
+  await state.run('loose-redeclaration-note', 'return recentValue')
+  const afterExecutedGap = await state.run('loose-redeclaration-note', 'const recentValue = 4\nreturn recentValue')
+  assert.deepEqual(afterExecutedGap, { logs: [], value: 4 })
+
+  await state.run('loose-note-with-volatility', 'const volatileRecentValue = 1')
+  const volatile = await state.executeRun(
+    'loose-note-with-volatility',
+    'const volatileRecentValue = Date.now()\nreturn volatileRecentValue',
+    {},
+    {},
+  )
+  assert.deepEqual(volatile.result.meta.dshPtcPlus.diagnostics.map(item => item.code), ['PTC-N002', 'PTC-V001'])
+  assert.match(volatile.raw.logs[0], /^note\[PTC-N002\]/)
+  assert.match(volatile.raw.logs[1], /^warning\[PTC-V001\]/)
+})
+
+test('reconstructs adjacent redeclaration reminders from the durable path', async (t) => {
+  const events = []
+  const session = { id: 'loose-note-replay', events }
+  const writer = fixture()
+  const source = 'const recoveredRecentValue = 1'
+  const written = await writer.runDurable(session.id, source, {}, { session })
+  appendRunCodeEvents(events, 'loose-note-setup', source, written)
+  await writer.dispose()
+
+  const reader = fixture()
+  t.after(() => reader.dispose())
+  const result = await reader.run(session.id, 'const recoveredRecentValue = 2\nreturn recoveredRecentValue', {}, { session })
+  assert.equal(result.value, 2)
+  assert.match(result.logs[0], /^note\[PTC-N002\]/)
 })
 
 test('preserves declaration TDZ while loosening new top-level const bindings', async (t) => {
@@ -619,6 +744,270 @@ return { page, echoed, rawTools: typeof tools }
   ])
 })
 
+test('rebuilds and validates the workspace.readLines program result contract', async (t) => {
+  const state = fixture()
+  t.after(() => state.dispose())
+
+  const extended = await state.executeRun('read-result-contract', `
+try {
+  await workspace.readLines({ path: 'src/a.ts' })
+} catch (error) {
+  return { name: error.name, operation: error.operation, message: error.message }
+}
+`, {
+    read: async args => ({
+      path: args.file_path,
+      offset: 1,
+      lines: [{ number: 1, text: 'line' }],
+      totalLines: 1,
+      nativePresentationHint: 'ts',
+    }),
+  }, {})
+  assert.deepEqual(extended.raw.value, {
+    name: 'WorkspaceError',
+    operation: 'readLines',
+    message: 'workspace.readLines host result received unknown or non-enumerable fields',
+  })
+
+  const malformed = await state.executeRun('read-result-contract', `
+try {
+  await workspace.readLines({ path: 'src/a.ts' })
+} catch (error) {
+  return { name: error.name, operation: error.operation, message: error.message }
+}
+`, {
+    read: async args => ({ path: args.file_path, offset: 1, lines: [{ number: 1 }], totalLines: 1 }),
+  }, {})
+  assert.deepEqual(malformed.raw.value, {
+    name: 'WorkspaceError',
+    operation: 'readLines',
+    message: 'workspace.readLines host result lines[0] text must be an enumerable data property',
+  })
+})
+
+test('projects the exact known Cordis profile through translated program contracts', async (t) => {
+  const state = fixture()
+  t.after(() => state.dispose())
+  const calls = []
+  const functions = {
+    async cordis_inspect_list(args) {
+      calls.push(['cordis_inspect_list', args])
+      return { providers: [{ id: 'Service', platform: 'host' }] }
+    },
+    async cordis_inspect_query(args) {
+      calls.push(['cordis_inspect_query', args])
+      return { ...args, data: { methods: ['listService'] } }
+    },
+    async cordis_inspect_self(args) {
+      calls.push(['cordis_inspect_self', args])
+      return { mode: 'plugins', plugins: [] }
+    },
+    async cordis_define(args) {
+      calls.push(['cordis_define', args])
+      return {
+        pluginId: 'demo-1', packageId: 'pkg-1', name: args.name, purpose: args.purpose,
+        hasHostHalf: true, hasClientHalf: false,
+      }
+    },
+    async cordis_run(args) {
+      calls.push(['cordis_run', args])
+      return { status: 'awaiting-approval', ...args, pluginRunId: 'run-1', nextPackageId: args.packageId }
+    },
+    async cordis_stop(args) {
+      calls.push(['cordis_stop', args])
+      return { pluginId: args.pluginId }
+    },
+    async cordis_undefine(args) {
+      calls.push(['cordis_undefine', args])
+      return { pluginId: args.pluginId, wasRunning: false }
+    },
+  }
+  const observed = await state.executeRun('cordis-projection', `
+const providers = await cordis.inspectList()
+const inspected = await cordis.inspect({ platform: 'host', provider: 'Service', method: 'listService' })
+const owned = await cordis.inspectSelf()
+const defined = await cordis.define({
+  target: { kind: 'new', prefix: 'demo' },
+  name: 'Demo',
+  purpose: 'Provide one temporary capability.',
+  source: { host: 'return ctx => {}' },
+})
+const activated = await cordis.run({ pluginId: defined.pluginId, packageId: defined.packageId, mode: 'run' })
+const stopped = await cordis.stop({ pluginId: defined.pluginId })
+const removed = await cordis.undefine({ pluginId: defined.pluginId })
+return { providers, inspected, owned, defined, activated, stopped, removed, rawTools: typeof tools }
+`, functions, {})
+
+  assert.deepEqual(observed.raw.value.providers, [{ id: 'Service', platform: 'host' }])
+  assert.deepEqual(observed.raw.value.inspected, { methods: ['listService'] })
+  assert.deepEqual(observed.raw.value.owned, { mode: 'plugins', plugins: [] })
+  assert.equal(observed.raw.value.activated.status, 'awaiting-approval')
+  assert.equal(observed.raw.value.rawTools, 'undefined')
+  assert.deepEqual(calls, [
+    ['cordis_inspect_list', {}],
+    ['cordis_inspect_query', { platform: 'host', provider: 'Service', method: 'listService' }],
+    ['cordis_inspect_self', {}],
+    ['cordis_define', {
+      plugin: { kind: 'new', idPrefix: 'demo' },
+      name: 'Demo',
+      purpose: 'Provide one temporary capability.',
+      code: { host: 'return ctx => {}' },
+    }],
+    ['cordis_run', { pluginId: 'demo-1', packageId: 'pkg-1', mode: 'run' }],
+    ['cordis_stop', { pluginId: 'demo-1' }],
+    ['cordis_undefine', { pluginId: 'demo-1' }],
+  ])
+  assert.equal(observed.result.meta.dshPtcPlus.status, 'volatile')
+  assert.equal(observed.result.meta.dshPtcPlus.volatileReason, 'cordis.define')
+  assert.deepEqual(observed.result.meta.dshPtcPlus.calls.map(call => [call.global, call.member]), [
+    ['cordis', 'inspectList'], ['cordis', 'inspect'], ['cordis', 'inspectSelf'], ['cordis', 'define'],
+    ['cordis', 'run'], ['cordis', 'stop'], ['cordis', 'undefine'],
+  ])
+})
+
+test('does not expose partial Cordis bindings through cordis or host.invoke', async (t) => {
+  const state = fixture()
+  t.after(() => state.dispose())
+  const observed = await state.run('partial-cordis', `
+let rawMessage
+try { await host.invoke({ name: 'cordis_inspect_list', args: {} }) } catch (error) { rawMessage = error.message }
+return { cordisType: typeof cordis, rawMessage }
+`, { cordis_inspect_list: async () => ({ providers: [] }) })
+  assert.deepEqual(observed.value, {
+    cordisType: 'undefined',
+    rawMessage: 'host capability "cordis_inspect_list" is unavailable',
+  })
+
+  const unavailable = async () => null
+  const future = await state.run('future-cordis', `
+let knownMessage
+let futureMessage
+try { await host.invoke({ name: 'cordis_inspect_list', args: {} }) } catch (error) { knownMessage = error.message }
+try { await host.invoke({ name: 'cordis_future', args: {} }) } catch (error) { futureMessage = error.message }
+return { cordisType: typeof cordis, knownMessage, futureMessage }
+`, {
+    cordis_inspect_list: unavailable,
+    cordis_inspect_query: unavailable,
+    cordis_inspect_self: unavailable,
+    cordis_define: unavailable,
+    cordis_run: unavailable,
+    cordis_stop: unavailable,
+    cordis_undefine: unavailable,
+    cordis_future: unavailable,
+  })
+  assert.deepEqual(future.value, {
+    cordisType: 'undefined',
+    knownMessage: 'host capability "cordis_inspect_list" is unavailable',
+    futureMessage: 'host capability "cordis_future" is unavailable',
+  })
+})
+
+test('marks Cordis creator dispatch volatile before opaque settlement', async (t) => {
+  const state = fixture()
+  t.after(() => state.dispose())
+  const unavailable = async () => { throw new Error('creator mutation rejected') }
+  const functions = {
+    cordis_inspect_list: async () => ({ providers: [] }),
+    cordis_inspect_query: async args => ({ ...args, data: null }),
+    cordis_inspect_self: async () => ({ mode: 'plugins', plugins: [] }),
+    cordis_define: unavailable,
+    cordis_run: unavailable,
+    cordis_stop: unavailable,
+    cordis_undefine: unavailable,
+  }
+  const observed = await state.executeRun('rejected-cordis', `
+try {
+  await cordis.define({
+    target: { kind: 'new', prefix: 'demo' },
+    name: 'Demo',
+    purpose: 'Rejected definition.',
+    source: { host: 'return ctx => {}' },
+  })
+} catch (error) {
+  return { name: error.name, operation: error.operation, message: error.message }
+}
+`, functions, {})
+  assert.deepEqual(observed.raw.value, {
+    name: 'CordisError', operation: 'define', message: 'creator mutation rejected',
+  })
+  assert.equal(observed.result.meta.dshPtcPlus.status, 'volatile')
+  assert.equal(observed.result.meta.dshPtcPlus.volatileReason, 'cordis.define')
+  assert.match(observed.raw.logs[0], /^warning\[PTC-V001\]/)
+
+  const malformed = await state.executeRun('malformed-cordis-result', `
+try {
+  await cordis.define({
+    target: { kind: 'new', prefix: 'demo' },
+    name: 'Demo',
+    purpose: 'Malformed definition result.',
+    source: { host: 'return ctx => {}' },
+  })
+} catch (error) {
+  return { name: error.name, operation: error.operation }
+}
+`, {
+    ...functions,
+    cordis_define: async () => ({
+      pluginId: 'demo-1', packageId: 'pkg-1', name: 'Demo', purpose: 'Malformed definition result.',
+      hasHostHalf: true, hasClientHalf: false, nativeExtra: true,
+    }),
+  }, {})
+  assert.deepEqual(malformed.raw.value, { name: 'CordisError', operation: 'define' })
+  assert.equal(malformed.result.meta.dshPtcPlus.status, 'volatile')
+  assert.equal(malformed.result.meta.dshPtcPlus.volatileReason, 'cordis.define')
+})
+
+test('preserves a cancelled Cordis mutation boundary without attributing its late settlement', async (t) => {
+  const state = fixture({ computeMs: 1_000, maxWallMs: 2_000 })
+  t.after(() => state.dispose())
+  let signalDefineStarted
+  const defineStarted = new Promise(resolve => { signalDefineStarted = resolve })
+  let settleDefine
+  const delayedDefine = new Promise(resolve => { settleDefine = resolve })
+  const controller = new AbortController()
+  const functions = {
+    cordis_inspect_list: async () => ({ providers: [] }),
+    cordis_inspect_query: async args => ({ ...args, data: null }),
+    cordis_inspect_self: async () => ({ mode: 'plugins', plugins: [] }),
+    cordis_define: async () => { signalDefineStarted(); return delayedDefine },
+    cordis_run: async () => { throw new Error('unused') },
+    cordis_stop: async () => { throw new Error('unused') },
+    cordis_undefine: async () => { throw new Error('unused') },
+  }
+  const cancelled = state.executeRun('late-cordis', `
+await cordis.define({
+  target: { kind: 'new', prefix: 'demo' },
+  name: 'Demo',
+  purpose: 'Complete after cancellation.',
+  source: { host: 'return ctx => {}' },
+})
+`, functions, { controller })
+  await defineStarted
+  controller.abort('cancel delayed Cordis mutation')
+  const cancelledResult = await cancelled
+  assert.equal(cancelledResult.result.meta.dshPtcPlus.status, 'discarded')
+  assert.equal(cancelledResult.result.meta.dshPtcPlus.volatileReason, 'cordis.define')
+
+  let signalHoldStarted
+  const holdStarted = new Promise(resolve => { signalHoldStarted = resolve })
+  let settleHold
+  const next = state.executeRun('late-cordis', 'return await host.invoke({ name: "hold", args: {} })', {
+    hold: async () => { signalHoldStarted(); return new Promise(resolve => { settleHold = resolve }) },
+  }, {})
+  await holdStarted
+  settleDefine({
+    pluginId: 'demo-1', packageId: 'pkg-1', name: 'Demo', purpose: 'Complete after cancellation.',
+    hasHostHalf: true, hasClientHalf: false,
+  })
+  await Promise.resolve()
+  settleHold(42)
+  const nextResult = await next
+  assert.equal(nextResult.raw.value, 42)
+  assert.equal(nextResult.result.meta.dshPtcPlus.status, 'volatile')
+  assert.equal(nextResult.result.meta.dshPtcPlus.volatileReason, 'cordis.define')
+  assert.match(nextResult.raw.logs[0], /^warning\[PTC-V001\]/)
+})
+
 test('injects code.run and routes it to the isolated upstream runtime', async (t) => {
   const state = fixture()
   t.after(() => state.dispose())
@@ -653,6 +1042,44 @@ return { parentOnly, nestedOutcome }
   assert.deepEqual(await state.run('recursive-isolation', `
 return { parentOnly, childOnly: typeof childOnly }
 `), { logs: [], value: { parentOnly: 41, childOnly: 'undefined' } })
+})
+
+test('attributes nested Cordis creator mutations to the owning parent cell', async (t) => {
+  const functions = {
+    cordis_inspect_list: async () => ({ providers: [] }),
+    cordis_inspect_query: async args => ({ ...args, data: null }),
+    cordis_inspect_self: async () => ({ mode: 'plugins', plugins: [] }),
+    cordis_define: async args => ({
+      pluginId: 'nested-1', packageId: 'package-1', name: args.name, purpose: args.purpose,
+      hasHostHalf: true, hasClientHalf: false,
+    }),
+    cordis_run: async () => { throw new Error('unused') },
+    cordis_stop: async () => { throw new Error('unused') },
+    cordis_undefine: async () => { throw new Error('unused') },
+  }
+  const state = fixture({}, {
+    async upstreamRun(request) {
+      const cordis = request.bindings.find(binding => binding.global === 'cordis').functions
+      const defined = await cordis.define({
+        target: { kind: 'new', prefix: 'nest' },
+        name: 'Nested',
+        purpose: 'Define from an isolated child.',
+        source: { host: 'return ctx => {}' },
+      })
+      return { logs: [], value: defined.pluginId }
+    },
+  })
+  t.after(() => state.dispose())
+
+  const observed = await state.executeRun('nested-cordis-mutation', `
+return code.run({ code: 'define nested plugin', description: 'Define nested Cordis plugin' })
+`, functions, {})
+  assert.equal(observed.raw.value.result, 'nested-1')
+  assert.equal(observed.result.meta.dshPtcPlus.status, 'volatile')
+  assert.equal(observed.result.meta.dshPtcPlus.volatileReason, 'cordis.define')
+  assert.deepEqual(observed.result.meta.dshPtcPlus.calls.map(call => [call.global, call.member]), [
+    ['code', 'run'],
+  ])
 })
 
 test('preserves an existing host run_code binding', async (t) => {
@@ -2083,4 +2510,542 @@ test('rejects unsupported runtimes and invalid limits', () => {
     ...base,
     codeRuntime: { language: 'typescript', run() {} },
   }, { looseTopLevelRedeclarations: 'yes' }), /looseTopLevelRedeclarations must be a boolean/)
+})
+
+test('rejects malformed projected adapter requests and read results', async (t) => {
+  const state = fixture()
+  t.after(() => state.dispose())
+  const programs = [
+    'return code.run(null)',
+    'return workspace.readLines({ path: "" })',
+    'return workspace.readLines({ path: "a", offset: 0 })',
+    'return workspace.readLines({ path: "a", limit: 1.5 })',
+    'return host.invoke({ name: "", args: {} })',
+    'return host.invoke({ name: "missing", args: {} })',
+  ]
+  for (const [index, program] of programs.entries()) {
+    const observed = await state.run(`adapter-invalid-${index}`, program, {
+      read: async () => ({ path: 'a', offset: 1, lines: [], totalLines: 0 }),
+    })
+    assert.equal(observed.error.kind, 'exception')
+  }
+
+  const outcomes = [
+    { path: '', offset: 1, lines: [], totalLines: 0 },
+    { path: 'a', offset: 0, lines: [], totalLines: 0 },
+    { path: 'a', offset: 1, lines: [], totalLines: -1 },
+    { path: 'a', offset: 1, lines: null, totalLines: 0 },
+    { path: 'a', offset: 1, lines: [{ number: 0, text: '' }], totalLines: 1 },
+    { path: 'a', offset: 1, lines: [{ number: 1, text: 2 }], totalLines: 1 },
+  ]
+  for (const [index, outcome] of outcomes.entries()) {
+    const observed = await state.run(`read-result-invalid-${index}`, 'return workspace.readLines({ path: "a" })', {
+      read: async () => outcome,
+    })
+    assert.equal(observed.error.kind, 'exception')
+  }
+})
+
+test('preflights complex scopes and rewrites returns through catch patterns', async (t) => {
+  const state = fixture()
+  t.after(() => state.dispose())
+  const scoped = await state.run('complex-scopes', `
+const [first, , third = 3, ...tail] = [1, 2, undefined, 4]
+const { value: renamed, nested: { item }, ...rest } = { value: 5, nested: { item: 6 }, extra: 7 }
+function outer({ input = 1 }, ...args) {
+  var local = input
+  function nested() { return Date.now() }
+  return local + args.length
+}
+class LocalClass {}
+{
+  const Date = { now: () => 8 }
+  function blockFunction() { return Date.now() }
+  class BlockClass {}
+  blockFunction()
+}
+for (const loopValue of [1]) { void loopValue }
+for (let loopIndex = 0; loopIndex < 1; loopIndex += 1) { void loopIndex }
+try { throw { reason: 1 } } catch ({ reason }) { void reason }
+try { throw 1 } catch { void 0 }
+return { first, third, tail, renamed, item, rest, outer: outer({}), className: LocalClass.name }
+`)
+  assert.deepEqual(scoped.value, {
+    first: 1, third: 3, tail: [4], renamed: 5, item: 6, rest: { extra: 7 }, outer: 1, className: 'LocalClass',
+  })
+
+  const values = [
+    ['try { return 11 } catch ({ message }) { return message }', 11],
+    ['try { return 12 } catch { return 0 }', 12],
+    ['try { throw { value: 13 } } catch ({ value }) { return value }', 13],
+    ['try { throw 14 } catch { return 14 }', 14],
+    ['return', 'undefined'],
+  ]
+  for (const [index, [program, expected]] of values.entries()) {
+    assert.equal((await state.run(`return-rewrite-${index}`, program)).value, expected)
+  }
+})
+
+test('validates state requests and classifies computed ambient access', async (t) => {
+  const state = fixture()
+  t.after(() => state.dispose())
+  const invalid = [
+    'return repl.state(null)',
+    'return repl.state([])',
+    'return repl.state({ action: "unknown" })',
+    'return repl.state({ action: "save" })',
+    'return repl.state({ action: "delete", name: "" })',
+    'return repl.state({ action: "restore", name: "missing" })',
+  ]
+  for (const [index, program] of invalid.entries()) {
+    assert.equal((await state.run(`state-invalid-${index}`, program)).error.kind, 'exception')
+  }
+
+  const volatile = [
+    'const moduleName = "node:url"; await import(moduleName); return 1',
+    'return globalThis["Date"].now()',
+    'return Math["random"]()',
+    'return process["platform"]',
+  ]
+  for (const [index, program] of volatile.entries()) {
+    const result = await state.runDurable(`volatile-classification-${index}`, program)
+    assert.equal(result.meta.dshPtcPlus.status, 'volatile')
+  }
+})
+
+test('rejects every malformed Cordis program request and host result', async (t) => {
+  const state = fixture()
+  t.after(() => state.dispose())
+  const validFunctions = () => ({
+    cordis_inspect_list: async () => ({ providers: [] }),
+    cordis_inspect_query: async args => ({ ...args, data: null }),
+    cordis_inspect_self: async () => ({ mode: 'plugins', plugins: [] }),
+    cordis_define: async args => ({
+      pluginId: 'plugin', packageId: 'package', name: args.name, purpose: args.purpose,
+      hasHostHalf: true, hasClientHalf: false,
+    }),
+    cordis_run: async args => ({ ...args, status: 'running' }),
+    cordis_stop: async args => ({ pluginId: args.pluginId }),
+    cordis_undefine: async args => ({ pluginId: args.pluginId, wasRunning: false }),
+  })
+  const invalidPrograms = [
+    'return cordis.inspectList({})',
+    'return cordis.inspect({ platform: "bad", provider: "p", method: "m" })',
+    'return cordis.inspect({ platform: "host", provider: "", method: "m", input: null })',
+    'return cordis.inspectSelf({ packageId: "package" })',
+    'return cordis.inspectSelf({ pluginId: "" })',
+    'return cordis.define({ target: { kind: "new", prefix: "p", pluginId: "x" }, name: "n", purpose: "p", source: { host: "x" } })',
+    'return cordis.define({ target: { kind: "existing", pluginId: "p", prefix: "x" }, name: "n", purpose: "p", source: { host: "x" } })',
+    'return cordis.define({ target: { kind: "bad" }, name: "n", purpose: "p", source: { host: "x" } })',
+    'return cordis.define({ target: { kind: "new", prefix: "p" }, name: "n", purpose: "p", source: {} })',
+    'return cordis.define({ target: { kind: "new", prefix: "p" }, name: "n", purpose: "p", source: { host: 1 } })',
+    'return cordis.run({ pluginId: "p", packageId: "x", mode: "bad" })',
+    'return cordis.stop({ pluginId: "" })',
+  ]
+  for (const [index, program] of invalidPrograms.entries()) {
+    const result = await state.run(`cordis-request-invalid-${index}`, program, validFunctions())
+    assert.equal(result.error.kind, 'exception')
+  }
+
+  const invalidOutcomes = [
+    ['cordis.inspectList()', 'cordis_inspect_list', { providers: null }],
+    ['cordis.inspect({ platform: "host", provider: "p", method: "m", input: 1 })', 'cordis_inspect_query', { platform: 'client', provider: 'p', method: 'm', data: null }],
+    ['cordis.inspectSelf()', 'cordis_inspect_self', { mode: 'plugins', plugins: [], missing: undefined }],
+    ['cordis.inspectSelf()', 'cordis_inspect_self', { mode: 'plugins', invalid: () => {} }],
+    ['cordis.define({ target: { kind: "new", prefix: "p" }, name: "n", purpose: "p", source: { client: "x" } })', 'cordis_define', { pluginId: 'p', packageId: 'x', name: 'n', purpose: 'p', hasHostHalf: 'yes', hasClientHalf: false }],
+    ['cordis.run({ pluginId: "p", packageId: "x", mode: "run" })', 'cordis_run', { status: 'running', missing: undefined }],
+    ['cordis.stop({ pluginId: "p" })', 'cordis_stop', { pluginId: '' }],
+    ['cordis.undefine({ pluginId: "p" })', 'cordis_undefine', { pluginId: 'p', wasRunning: 'no' }],
+  ]
+  for (const [index, [expression, binding, outcome]] of invalidOutcomes.entries()) {
+    const functions = validFunctions()
+    functions[binding] = async () => outcome
+    const result = await state.run(`cordis-result-invalid-${index}`, `return ${expression}`, functions)
+    assert.equal(result.error.kind, 'exception')
+  }
+
+  const existing = await state.run('cordis-existing-target', `
+return cordis.define({
+  target: { kind: 'existing', pluginId: 'plugin' }, name: 'n', purpose: 'p',
+  source: { host: 'h', client: 'c' },
+})
+`, validFunctions())
+  assert.equal(existing.error, undefined)
+})
+
+test('covers plugin hook early exits and metadata installation failures', async (t) => {
+  const state = fixture()
+  t.after(() => state.dispose())
+  const execute = state.listeners.get('tools/execute')[0]
+  const result = state.listeners.get('tools/result')[0]
+  assert.equal(await execute({ name: 'other' }, async () => 'next'), 'next')
+  assert.equal(await execute({ name: 'run_code', parent: {}, agent: { id: 'a' } }, async () => 'nested'), 'nested')
+  assert.equal(await execute({ name: 'run_code', agent: {} }, async () => 'anonymous'), 'anonymous')
+  result({ name: 'other' }, {})
+  result({ name: 'run_code', parent: {}, agent: { id: 'a' } }, {})
+  result({ name: 'run_code', agent: {} }, {})
+  await state.emit('session/disposed', { id: 'absent' })
+
+  const missing = fixture()
+  t.after(() => missing.dispose())
+  missing.ctx.tools.get = () => undefined
+  await assert.rejects(() => missing.executeRun('missing-definition', 'return 1', {}, {}), /definition is unavailable/)
+
+  const noOutput = fixture()
+  t.after(() => noOutput.dispose())
+  noOutput.runCodeDefinition.output = undefined
+  await assert.rejects(() => noOutput.executeRun('missing-output', 'return 1', {}, {}), /has no output projection/)
+
+  const frozen = fixture()
+  t.after(() => frozen.dispose())
+  Object.freeze(frozen.runCodeDefinition.output)
+  await assert.rejects(() => frozen.executeRun('frozen-output', 'return 1', {}, {}), /cannot attach the session journal/)
+
+  const original = fixture()
+  original.runCodeDefinition.output.presentationMeta = () => ({ original: true })
+  await original.runDurable('original-metadata', 'return 1')
+  await original.dispose()
+  assert.deepEqual(original.runCodeDefinition.output.presentationMeta(), { original: true })
+
+  await assert.rejects(() => state.assemble({ tools: null }), /expected a tools array/)
+})
+
+test('rejects malformed direct runtime requests and hostile host errors', async (t) => {
+  const runtime = new SessionRuntime({ computeMs: 100, maxWallMs: 1_000 })
+  t.after(() => runtime.dispose())
+  const invalid = [
+    [{ program: 1, bindings: [] }, /program must be a string/],
+    [{ program: 'return 1', bindings: null }, /bindings must be an array/],
+    [{ program: 'return 1', bindings: [null] }, /invalid binding namespace/],
+    [{ program: 'return 1', bindings: [{ global: 'bad', functions: null }] }, /invalid bad functions/],
+    [{ program: 'return 1', bindings: [{ global: 'bad', functions: { call: 1 } }] }, /binding bad\.call is not a function/],
+  ]
+  for (const [index, [request, expected]] of invalid.entries()) {
+    const result = await runtime.run(`direct-invalid-${index}`, request)
+    assert.equal(result.error.kind, 'exception')
+    assert.match(result.error.message, expected)
+  }
+
+  const controller = new AbortController()
+  controller.abort('already stopped')
+  assert.deepEqual(await runtime.run('direct-aborted', {
+    program: 'return 1', bindings: [], signal: controller.signal,
+  }), { logs: [], error: { kind: 'abort', message: 'already stopped' } })
+
+  const hostile = Object.create(null)
+  Object.defineProperty(hostile, 'message', { get() { throw new Error('hidden') } })
+  hostile[Symbol.toPrimitive] = () => { throw new Error('unprintable') }
+  const thrown = await runtime.run('hostile-host-error', {
+    program: 'return api.fail({})',
+    bindings: [{ global: 'api', functions: { fail: async () => { throw hostile } } }],
+  })
+  assert.equal(thrown.error.kind, 'exception')
+  assert.match(thrown.error.message, /Unprintable error/)
+
+  for (const [index, thrownValue] of [7, '', Object.assign(function failure() {}, { message: 'function error' })].entries()) {
+    const result = await runtime.run(`host-error-shape-${index}`, {
+      program: 'return api.fail({})',
+      bindings: [{ global: 'api', functions: { fail: async () => { throw thrownValue } } }],
+    })
+    assert.equal(result.error.kind, 'exception')
+  }
+})
+
+test('handles direct runtime recovery, timeout, volatility, and lifecycle boundaries', async (t) => {
+  const timed = new SessionRuntime({ computeMs: 1_000, maxWallMs: 20 })
+  t.after(() => timed.dispose())
+  const timeout = await timed.run('wall-timeout', { program: 'await new Promise(() => {})', bindings: [] })
+  assert.equal(timeout.error.kind, 'timeout')
+  assert.match(timeout.error.message, /wall-clock ceiling/)
+
+  assert.equal(timed.markVolatile(null, 'reason'), false)
+  assert.equal(timed.markVolatile({}, ''), false)
+  assert.equal(timed.markVolatile({ id: 'absent' }, 'reason'), false)
+  timed.finalize(undefined, true)
+  timed.finalize({}, false)
+  await timed.disposeSession('absent')
+
+  const invalidHistory = new SessionRuntime()
+  t.after(() => invalidHistory.dispose())
+  const duplicate = {
+    type: 'tool/result', sourceEventSeqs: [1], data: { meta: { dshPtcPlus: {
+      version: 1, bindingMode: 'loose', status: 'noop', calls: [], operations: [], confirms: [], diagnostics: [],
+    } } },
+  }
+  const recovered = await invalidHistory.run({ id: 'invalid-history', session: { events: [duplicate, duplicate] } }, {
+    program: 'return 1', bindings: [],
+  })
+  assert.equal(recovered.error.kind, 'recovery')
+
+  const disposed = new SessionRuntime()
+  await disposed.dispose()
+  assert.deepEqual(await disposed.run('disposed', { program: 'return 1', bindings: [] }), {
+    logs: [], error: { kind: 'abort', message: 'PTC runtime disposed' },
+  })
+
+  const duringRun = new SessionRuntime({ computeMs: 1_000, maxWallMs: 1_000 })
+  const pending = duringRun.run('dispose-active', { program: 'await new Promise(() => {})', bindings: [] })
+  await duringRun.dispose()
+  assert.equal((await pending).error.kind, 'abort')
+})
+
+test('rejects every semantic replay mismatch', async (t) => {
+  const cases = [
+    {
+      name: 'recorded-success-actual-throw',
+      code: 'throw new Error("actual")',
+      completion: { kind: 'return', hasValue: false },
+    },
+    {
+      name: 'recorded-throw-actual-success',
+      code: 'void 0',
+      completion: { kind: 'throw', error: { kind: 'exception', message: 'recorded' } },
+    },
+    {
+      name: 'recorded-durable-actual-volatile',
+      code: 'void Date.now()',
+      completion: { kind: 'return', hasValue: false },
+    },
+    {
+      name: 'recorded-value-mismatch',
+      code: 'return 2',
+      completion: { kind: 'return', hasValue: true, value: encodeValue(1) },
+    },
+    {
+      name: 'recorded-extra-call',
+      code: 'void 0',
+      calls: [{
+        global: 'api', member: 'call', args: encodeValue({}), ok: true,
+        value: encodeValue(null), settle: 0,
+      }],
+      completion: { kind: 'return', hasValue: false },
+    },
+  ]
+  for (const item of cases) {
+    const session = { id: item.name, events: [] }
+    appendRunCodeEvents(session.events, item.name, item.code, { meta: { dshPtcPlus: {
+      version: 1,
+      bindingMode: 'loose',
+      status: 'durable',
+      calls: item.calls ?? [],
+      operations: [],
+      confirms: [],
+      diagnostics: [],
+      completion: item.completion,
+    } } })
+    const state = fixture()
+    t.after(() => state.dispose())
+    const result = await state.run(item.name, 'return 1', { call: async () => null }, { session })
+    assert.equal(result.error.kind, 'recovery')
+  }
+
+  const session = { id: 'recorded-call-mismatch', events: [] }
+  const code = 'return await host.invoke({ name: "call", args: { value: 1 } })'
+  appendRunCodeEvents(session.events, 'recorded-call-mismatch', code, { meta: { dshPtcPlus: {
+    version: 1,
+    bindingMode: 'loose',
+    status: 'durable',
+    calls: [{
+      global: 'host', member: 'invoke', args: encodeValue({ name: 'call', args: { value: 2 } }),
+      ok: true, value: encodeValue(null), settle: 0,
+    }],
+    operations: [], confirms: [], diagnostics: [],
+    completion: { kind: 'return', hasValue: true, value: encodeValue(null) },
+  } } })
+  const state = fixture()
+  t.after(() => state.dispose())
+  assert.equal((await state.run(session.id, 'return 1', { call: async () => null }, { session })).error.kind, 'recovery')
+})
+
+test('covers runtime worker setup and state-operation failures', async (t) => {
+  const state = fixture()
+  t.after(() => state.dispose())
+  await state.runDurable('class-redeclare', 'class ExistingClass {}\nfunction existingFunction() {}')
+  assert.equal((await state.run('class-redeclare', 'class ExistingClass {}')).error.kind, 'exception')
+  assert.equal((await state.run('class-redeclare', 'function existingFunction() {}')).error.kind, 'exception')
+  assert.equal((await state.run('array-parameter', 'function take([first, ...rest] = []) { return [first, rest] }\nreturn take([1, 2])')).error, undefined)
+
+  const volatileSave = await state.run('volatile-save-error', `
+void Date.now()
+return repl.state({ action: 'save', name: 'not-durable' })
+`)
+  assert.equal(volatileSave.error.kind, 'exception')
+
+  await state.runDurable('delete-state', `
+void await repl.state({ action: 'save', name: 'temporary' })
+`)
+  const deleted = await state.runDurable('delete-state', `
+return repl.state({ action: 'delete', name: 'temporary' })
+`)
+  assert.deepEqual(deleted.value, { action: 'delete', name: 'temporary', deleted: true })
+
+  const cloneFailure = new SessionRuntime()
+  t.after(() => cloneFailure.dispose())
+  const cloneResult = await cloneFailure.run('clone-failure', {
+    program: 'return api.call({})',
+    bindings: [{
+      global: 'api',
+      functions: { call: async () => null },
+      errorClass: { name: 'ApiError', invalid: () => {} },
+    }],
+  })
+  assert.equal(cloneResult.error.kind, 'worker-exit')
+
+  const tempKeys = ['TMPDIR', 'TEMP', 'TMP']
+  const priorTemp = Object.fromEntries(tempKeys.map(key => [key, process.env[key]]))
+  for (const key of tempKeys) process.env[key] = 'relative-temp'
+  try {
+    const invalidTemp = new SessionRuntime()
+    t.after(() => invalidTemp.dispose())
+    const result = await invalidTemp.run('invalid-temp', { program: 'return 1', bindings: [] })
+    assert.equal(result.error.kind, 'worker-exit')
+    assert.match(result.error.message, /temporary directory must be absolute/)
+  } finally {
+    for (const key of tempKeys) {
+      if (priorTemp[key] === undefined) delete process.env[key]
+      else process.env[key] = priorTemp[key]
+    }
+  }
+
+  const exiting = new SessionRuntime({ computeMs: 1_000, maxWallMs: 1_000 })
+  t.after(() => exiting.dispose())
+  const exited = await exiting.run('worker-exit', { program: 'process.reallyExit(7)', bindings: [] })
+  assert.equal(exited.error.kind, 'worker-exit')
+
+  const direct = new SessionRuntime()
+  t.after(() => direct.dispose())
+  const context = { id: 'inactive-control', callId: 'one' }
+  await direct.run(context, { program: 'return 1', bindings: [] })
+  assert.throws(() => context.kernel.controlState({ action: 'list' }), /unavailable outside a cell/)
+
+  assert.deepEqual(context.kernel.withControlBinding([], undefined, undefined), [])
+  context.kernel.completeJournal(undefined, 'noop', { logs: [] })
+  context.kernel.onMessage({}, null)
+  context.kernel.onMessage(context.kernel.worker, { type: 'ignored' })
+  context.kernel.failWorker({}, 'stale worker')
+  const savedWorker = context.kernel.worker
+  context.kernel.worker = {}
+  context.kernel.port = undefined
+  context.kernel.active = undefined
+  context.kernel.failWorker(context.kernel.worker, 'detached worker')
+  context.kernel.worker = savedWorker
+
+  const cleanupFailure = new SessionRuntime()
+  const cleanupContext = { id: 'scratch-cleanup', callId: 'one' }
+  await cleanupFailure.run(cleanupContext, { program: 'return 1', bindings: [] })
+  const cleanupDirectory = await cleanupContext.kernel.scratchReady
+  cleanupContext.kernel.scratchReady = Promise.reject(new Error('scratch unavailable'))
+  void cleanupContext.kernel.scratchReady.catch(() => {})
+  await cleanupFailure.dispose()
+  await rm(cleanupDirectory, { recursive: true, force: true })
+
+  context.kernel.execute = async () => { throw new Error('tail rejection') }
+  await assert.rejects(() => context.kernel.run({}), /tail rejection/)
+  await context.kernel.tail
+})
+
+test('covers remaining adapter defaults, no-value children, and expired leases', async (t) => {
+  const state = fixture()
+  t.after(() => state.dispose())
+  const assembly = tool => ({ sections: [], tools: [tool] })
+  const malformed = [
+    { name: 'run_code' },
+    { name: 'run_code', parameters: null },
+    { name: 'run_code', parameters: { type: 'object' } },
+    { name: 'run_code', parameters: { type: 'object', properties: {} } },
+    { name: 'run_code', parameters: { type: 'object', properties: { code: { type: 'string' } } } },
+  ]
+  for (const tool of malformed) await assert.rejects(() => state.assemble(assembly(tool)), /incompatible run_code schema/)
+
+  const cordisFunctions = {
+    cordis_inspect_list: async () => ({ providers: [() => {}] }),
+    cordis_inspect_query: async args => ({ ...args, data: null }),
+    cordis_inspect_self: async () => ({}),
+    cordis_define: async () => ({}),
+    cordis_run: async () => ({}),
+    cordis_stop: async () => ({}),
+    cordis_undefine: async () => ({}),
+  }
+  assert.equal((await state.run('cordis-nonobject', 'return cordis.inspect(null)', cordisFunctions)).error.kind, 'exception')
+  assert.equal((await state.run('cordis-nonjson', 'return cordis.inspectList()', cordisFunctions)).error.kind, 'exception')
+
+  cordisFunctions.cordis_inspect_list = async () => ({ providers: [] })
+  assert.equal((await state.run('inspect-self-plugin', 'return cordis.inspectSelf({ pluginId: "p" })', cordisFunctions)).error, undefined)
+  assert.equal((await state.run('inspect-self-empty', 'return cordis.inspectSelf({})', cordisFunctions)).error, undefined)
+  assert.equal((await state.run('inspect-self-package', 'return cordis.inspectSelf({ pluginId: "p", packageId: "x" })', cordisFunctions)).error, undefined)
+
+  const noValue = fixture({}, { upstreamRun: async () => ({ logs: [] }) })
+  t.after(() => noValue.dispose())
+  assert.deepEqual((await noValue.run('child-no-value', `
+return code.run({ code: 'void 0', description: 'No value' })
+`)).value, { logs: [] })
+
+  let expired
+  const capture = fixture({}, { upstreamRun: async request => {
+    expired = request.bindings.find(binding => binding.global === 'host').functions.invoke
+    return { logs: [] }
+  } })
+  t.after(() => capture.dispose())
+  await capture.run('capture-expired', `return code.run({ code: 'void 0', description: 'Capture' })`, {
+    echo: async value => value,
+  })
+  assert.throws(() => expired({ name: 'echo', args: null }), /lease expired/)
+
+  const execute = state.listeners.get('tools/execute')[0]
+  const invalidBindings = await execute({ name: 'run_code', callId: 'raw', agent: { id: 'raw-bindings' } }, () => (
+    state.runtime.run({ program: 'return 1', bindings: null })
+  ))
+  assert.equal(invalidBindings.error.kind, 'exception')
+
+  const missingFunctions = await execute({ name: 'run_code', callId: 'raw-2', agent: { id: 'raw-functions' } }, () => (
+    state.runtime.run({ program: 'return 1', bindings: [{ global: 'tools' }] })
+  ))
+  assert.equal(missingFunctions.error.kind, 'exception')
+
+  state.runCodeDefinition.output.presentationMeta({}, undefined)
+  await state.emit('agent/disposed', { agent: {} })
+  state.runCodeDefinition.output.presentationMeta = () => ({ replaced: true })
+})
+
+test('covers remaining AST scope and loose replacement forms', async (t) => {
+  const state = fixture()
+  t.after(() => state.dispose())
+  await state.runDurable('replacement-forms', 'let noInitializer = 1\nvar existingVar = 2')
+  assert.equal((await state.run('replacement-forms', 'let noInitializer')).error, undefined)
+  assert.equal((await state.run('replacement-forms', 'var existingVar = 3')).error, undefined)
+  const result = await state.run('ast-forms', `
+function arrayParam([head, ...tail]) { return [head, tail] }
+outer: for (const value of [1]) {
+  inner: for (;;) {
+    if (value) break inner
+    continue outer
+  }
+}
+const property = 'platform'
+void process[property]
+return arrayParam([1, 2])
+`)
+  assert.equal(result.error, undefined)
+})
+
+test('restores an inherited runtime provider without leaving an own patch', async () => {
+  const listeners = new Map()
+  const cleanups = []
+  const inheritedRun = async () => ({ logs: [] })
+  const runtime = Object.assign(Object.create({ run: inheritedRun }), {
+    language: 'typescript', isolation: 'worker-thread',
+  })
+  const definition = { name: 'run_code', output: {} }
+  const ctx = {
+    codeRuntime: runtime,
+    tools: { get: () => definition, schemas: () => [] },
+    systemPrompt: { section() {} },
+    on(name, listener) { listeners.set(name, listener) },
+    effect(register) { cleanups.push(register()) },
+  }
+  apply(ctx)
+  assert.equal(Object.hasOwn(runtime, 'run'), true)
+  for (const cleanup of cleanups.reverse()) await cleanup()
+  assert.equal(Object.hasOwn(runtime, 'run'), false)
+  assert.equal(runtime.run, inheritedRun)
 })

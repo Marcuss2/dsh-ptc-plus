@@ -18,25 +18,44 @@ const child = await code.run({ code: "return 1", description: "Evaluate generate
 
 | Program API | Host binding | 语义 |
 | --- | --- | --- |
-| `workspace.readLines({ path, offset?, limit? })` | `read({ file_path, offset?, limit? })` | 翻译为 program-native 数据契约，同时保留 native `read` 的有界、逐行语义；不会把截断窗口冒充完整文件 |
+| `workspace.readLines({ path, offset?, limit? }) -> { path, offset, lines, totalLines }` | `read({ file_path, offset?, limit? })` | 双向翻译并校验 program-native 数据契约，同时保留 native `read` 的有界、逐行语义；不会把截断窗口冒充完整文件 |
 | `code.run({ code, description })` | 插件注入或宿主已有的 `run_code` binding | 在隔离 child runtime 中执行动态源码 |
 | `host.invoke({ name, args })` | 当前 cell 中同名的未适配 host binding | 第三方和动态能力的显式兼容入口 |
+| `cordis.*` | 当前 RC7 已知 Cordis creator profile | 仅在完整且无额外未知 `cordis_*` binding 的 profile snapshot 中投影；未知/变更 profile fail-closed；数据映射、approval 与 volatile 规则见 [Full-access composition](full-access.md) |
 
 只有当前 agent 的 request bindings 中存在 `read` 时才安装 `workspace.readLines`。adapter 每个 cell 重新建立，旧 closure 不能越过 execution lease。一次 program call 只调用一次原 host binding，因此 authority、policy、approval、取消、并发调度、审计和原生 nested dispatch 内容仍由 DSH 拥有。
 
-projection 同时翻译调用名字和数据契约：程序侧使用 domain namespace、不同 member 名和 program-native 字段，避免模型把 familiar native tool grammar 预测成直接 tool call。adapter 负责映射到 DSH source capability；authority、policy、effect 和底层 completeness 事实仍只有一个来源，但 native schema 中只服务于模型 tool/UI 的形状不得泄漏为 program API。
+projection 同时翻译调用名字和完整数据契约：程序侧使用 domain namespace、不同 member 名和 program-native 字段，避免模型把 familiar native tool grammar 预测成直接 tool call。adapter 负责把 program request 映射到 DSH source capability，并把 canonical host outcome 校验、重建为 program result。即使当前 host outcome 的若干字段恰好与 program result 同名，也不得直接透传对象；否则 native 后续新增字段、展示 metadata 或不兼容实现会悄悄成为 PTC ABI。authority、policy、effect 和底层 completeness 事实仍只有一个来源，但 native schema 中只服务于模型 tool/UI 的形状不得泄漏为 program API。
+
+当前 `workspace.readLines` 的显式映射为：
+
+```text
+program request.path       -> native request.file_path
+program request.offset     -> native request.offset
+program request.limit      -> native request.limit
+
+native outcome.path        -> program result.path
+native outcome.offset      -> program result.offset
+native outcome.lines[]     -> program result.lines[] { number, text }
+native outcome.totalLines  -> program result.totalLines
+native extra/missing/invalid fields -> WorkspaceError
+```
+
+这里复用的是 DSH 的 source semantics 和受治理执行链，不是 native tool 的 wire schema。输入、结果、错误、提示、留存和展示共同组成 projection；只改名称或只改参数都不算完成。
+
+开放的 domain JSON 结果也必须投影。它可以保留官方版本化业务字段，但仍需校验为无环、无 accessor、无自定义 prototype 的 JSON tree，并重建为 detached program value；“开放”不能解释成 host object passthrough。
 
 已适配的 raw alias 不再安装或宣传：存在 `workspace.readLines` 时，程序中没有 `tools.read`。其他能力不以 `tools.<native-name>` 形式出现，而由 `host.invoke` 显式表明这是兼容投影。`run_code` 的程序内元编程入口是 `code.run`；模型直接调用的外层 transport 名仍是 `run_code`。
 
-当前不提供 `workspace.readText`。native `read` 有 line、单行字符和 byte ceiling，拼接其结果会静默得到不完整文本。完整 snapshot 需要独立 provider operation、明确的 PTC retention ceiling，以及大值 resource/blob 协议后才能加入。写入、编辑与 shell 也暂不投影；在 nested UI 能稳定保留 diff/terminal presentation 前，不以 facade 降低可审查性。
+当前不提供 `workspace.readText`。native `read` 有 line、单行字符和 byte ceiling，拼接其结果会静默得到不完整文本。完整 snapshot 需要独立 provider operation、明确的 PTC retention ceiling，以及大值 resource/blob 协议后才能加入。写入、编辑与 shell 也暂不投影；在 nested UI 能稳定保留 diff/terminal presentation 前，不以 facade 降低可审查性。full-access 也不会改变这些普通 projection 限制。
 
 ## Prompt 契约
 
 PTC Plus 用 `system-prompt/assemble` 的最终 assembly 生成 program capability SDK：
 
 - model-visible tools 仍只有 `run_code`；
-- SDK 声明实际可用的 `workspace`、`code` 和 `host` namespace；
-- 已适配 native schema、`tools.read` alias 以及 `Use the read tool` guidance 不进入严格 PTC prompt；
+- SDK 声明实际可用的 `workspace`、`code`、`host` 和条件性 `cordis` namespace；
+- 已适配 native schema、`tools.read` alias 以及 `Use the read tool` guidance 不进入严格 PTC prompt；当前已知 Cordis profile 精确匹配时，native `tool:cordis` guidance 会经过名称、调用形状和字段契约翻译后与 `cordis.*` SDK 一起保留，不匹配时整体移除；
 - `host.invoke` 列出当前 scope 可见但未适配的 capability 名称，参数与结果仍受相应 host binding 的 JSON contract 约束；
 - 错误使用 `WorkspaceError`、`CodeExecutionError` 或 `HostCapabilityError`，不把高层 program face 描述为 native `ToolCallError`。
 

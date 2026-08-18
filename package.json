@@ -24,7 +24,8 @@
     "acorn": "^8.15.0"
   },
   "scripts": {
-    "check": "node --check index.js && node --test"
+    "coverage": "node --test --experimental-test-module-mocks --experimental-test-coverage --test-coverage-include=\"index.js\" --test-coverage-include=\"internal/*.js\" --test-coverage-lines=95 --test-coverage-branches=90 --test-coverage-functions=95",
+    "check": "node --check index.js && npm run coverage"
   },
   "keywords": [
     "deepseek-harness",

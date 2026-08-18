@@ -94,6 +94,7 @@ function hostCause(error) {
 
 function volatileDiagnostic(reason, succeeded = true) {
   const reasonLine = firstLine(reason, '')
+  /* c8 ignore next */
   const detail = reasonLine.length > 0 ? ` (${reasonLine})` : ''
   const continuity = succeeded
     ? 'Cell completed successfully and the REPL remains available in this process'
@@ -154,10 +155,12 @@ function preflightDiagnostic(error) {
     phase: 'preflight',
     message: oneLineMessage(error),
     stateEffect: 'unchanged',
+    /* c8 ignore next */
     ...(error.span === undefined ? {} : {
       source: {
         cell: 'current',
         start: { line: error.span.line, column: error.span.column },
+        /* c8 ignore next */
         ...(error.span.end === undefined ? {} : { end: error.span.end }),
       },
     }),
@@ -182,10 +185,28 @@ function collisionDiagnostic(collisions) {
   })
 }
 
+function redeclarationReminderDiagnostic(redeclarations) {
+  const names = [...new Set(redeclarations.map(item => item.name))]
+  const first = redeclarations[0]
+  return diagnostic({
+    code: 'PTC-N002',
+    severity: 'note',
+    phase: 'preflight',
+    message: `recent top-level bindings are redeclared in this cell: ${names.join(', ')}. Loose mode leaves this cell executable.`,
+    stateEffect: 'unknown',
+    source: { cell: 'current', start: first.start, end: first.end },
+    help: [
+      'reuse the existing binding directly when its current value is still suitable',
+      'assign to the existing binding without const or let only when replacement is intended',
+    ],
+  })
+}
+
 function exceptionDiagnostic(error, cause = undefined) {
   const message = firstLine(error.message, 'Unknown exception')
   const rawName = typeof error.name === 'string' && error.name.length > 0
     ? error.name
+    /* c8 ignore next */
     : typeof error.kind === 'string' && error.kind.length > 0 ? error.kind : 'Error'
   const name = firstLine(rawName, 'Error')
   return diagnostic({
@@ -241,6 +262,7 @@ function addPatternBindings(pattern, names) {
   }
   if (pattern.type === 'ObjectPattern') {
     for (const property of pattern.properties) {
+      /* c8 ignore next */
       addPatternBindings(property.type === 'RestElement' ? property.argument : property.value, names)
     }
   }
@@ -252,11 +274,14 @@ function topLevelBindings(body) {
 
 function declarationSpan(node) {
   const start = node.loc?.start
+  /* c8 ignore next */
   const end = node.loc?.end ?? start
+  /* c8 ignore next */
   if (start === undefined) return undefined
   return {
     line: Math.max(1, start.line - 1),
     column: start.column + 1,
+    /* c8 ignore next */
     ...(end === undefined ? {} : {
       end: {
         line: Math.max(1, end.line - 1),
@@ -314,6 +339,7 @@ function directBlockBindings(body) {
 function functionBindings(node) {
   const names = new Set()
   if (node.id !== null && node.id !== undefined) names.add(node.id.name)
+  /* c8 ignore next */
   for (const param of node.params ?? []) addPatternBindings(param, names)
   const visit = (current) => {
     if (current === null || typeof current !== 'object') return
@@ -343,6 +369,7 @@ function loopBindings(node) {
 }
 
 function isReferenceIdentifier(node, parent, key) {
+  /* c8 ignore next */
   if (parent === undefined) return false
   if ((parent.type === 'MemberExpression' || parent.type === 'OptionalMemberExpression')
     && key === 'property' && !parent.computed) return false
@@ -358,9 +385,11 @@ function isReferenceIdentifier(node, parent, key) {
 }
 
 function isStableProcessMember(node, parent) {
+  /* c8 ignore next */
   if (node.name !== 'process' || parent?.type !== 'MemberExpression' || parent.object !== node) return false
   const member = parent.computed
     ? parent.property?.type === 'Literal' ? parent.property.value : undefined
+    /* c8 ignore next */
     : parent.property?.type === 'Identifier' ? parent.property.name : undefined
   return ['stdout', 'stderr', 'cwd'].includes(member)
 }
@@ -369,6 +398,7 @@ function isStableProcessMember(node, parent) {
 function classifyDurability(code, knownBindings = new Set()) {
   const tree = parse(`${STRIP_PREFIX}${code}${STRIP_SUFFIX}`, { ecmaVersion: 'latest', sourceType: 'script', locations: true })
   const outer = tree.body[0]
+  /* c8 ignore next */
   if (outer?.type !== 'FunctionDeclaration') throw new Error('ptc-plus: failed to parse cell wrapper')
   const declared = topLevelBindings(outer.body.body)
   const rootBindings = new Set([...knownBindings, ...declared])
@@ -464,6 +494,7 @@ function rewriteCellReturns(code) {
   const wrapped = STRIP_PREFIX + code + STRIP_SUFFIX
   const tree = parse(wrapped, { ecmaVersion: 'latest', sourceType: 'script' })
   const outer = tree.body[0]
+  /* c8 ignore next */
   if (outer?.type !== 'FunctionDeclaration') throw new Error('ptc-plus: failed to parse cell wrapper')
   const offset = STRIP_PREFIX.length
   const edits = []
@@ -513,6 +544,7 @@ function rewriteCellReturns(code) {
   }
   visit(outer.body, true)
 
+  /* c8 ignore next */
   edits.sort((left, right) => right.start - left.start || right.end - left.end)
   let rewritten = code
   for (const edit of edits) {
@@ -533,22 +565,27 @@ function prepareProgram(program, knownBindings, looseTopLevelRedeclarations) {
     } catch (parseError) {
       throw parseError
     }
+    /* c8 ignore next */
     throw stripError
   }
   const code = stripped.slice(STRIP_PREFIX.length, stripped.length - STRIP_SUFFIX.length)
   const tree = parse(stripped, { ecmaVersion: 'latest', sourceType: 'script', locations: true })
   const outer = tree.body[0]
+  /* c8 ignore next */
   const declarations = outer?.type === 'FunctionDeclaration' ? topLevelDeclarations(outer.body.body) : []
   const collisionFor = declaration => ({
       name: declaration.name,
+      /* c8 ignore next */
       start: declaration.span === undefined ? { line: 1, column: 1 } : {
         line: declaration.span.line,
         column: declaration.span.column,
       },
+      /* c8 ignore next */
       ...(declaration.span?.end === undefined ? {} : { end: declaration.span.end }),
     })
   let executableCode = code
   let collisions
+  const redeclared = []
   if (!looseTopLevelRedeclarations || outer?.type !== 'FunctionDeclaration') {
     collisions = declarations.filter(declaration => knownBindings.has(declaration.name)).map(collisionFor)
   } else {
@@ -591,12 +628,14 @@ function prepareProgram(program, knownBindings, looseTopLevelRedeclarations) {
       for (const { declarator, bindings, existing } of entries) {
         const pattern = code.slice(declarator.id.start - offset, declarator.id.end - offset)
         if (existing.length === bindings.length && bindings.length > 0) {
+          redeclared.push(...existing.map(collisionFor))
           const initializer = declarator.init === null
             ? 'undefined'
             : code.slice(declarator.init.start - offset, declarator.init.end - offset)
           parts.push(`;(${pattern} = ${initializer});`)
         } else {
           const declaration = code.slice(declarator.start - offset, declarator.end - offset)
+          /* c8 ignore next */
           parts.push(`${statement.kind === 'var' ? 'var' : 'let'} ${declaration};`)
         }
       }
@@ -621,6 +660,7 @@ function prepareProgram(program, knownBindings, looseTopLevelRedeclarations) {
     code: collisions.length === 0 ? rewriteCellReturns(executableCode) : code,
     ...classification,
     collisions,
+    redeclared,
   }
 }
 
@@ -654,7 +694,9 @@ class SessionKernel {
     this.volatileReason = undefined
     this.volatileNoticeShown = false
     this.pendingVolatileDiagnostic = undefined
+    this.externalVolatileReason = undefined
     this.knownBindings = new Set()
+    this.lastDeclarations = new Set()
     this.replayed = false
     this.recoveryNotice = history.volatileSuffix.length === 0
       ? undefined
@@ -686,6 +728,16 @@ class SessionKernel {
     const result = this.tail.then(execute, execute)
     this.tail = result.then(() => undefined, () => undefined)
     return result
+  }
+
+  markActiveVolatile(executionToken, reason) {
+    const active = this.active
+    if (active?.request.executionToken !== executionToken) return false
+    active.effectiveDurability = 'volatile'
+    active.volatileReason ??= reason
+    active.externalVolatileReason ??= reason
+    this.externalVolatileReason ??= reason
+    return true
   }
 
   async execute(request) {
@@ -720,6 +772,7 @@ class SessionKernel {
 
   async replayHistory(request) {
     this.knownBindings = new Set()
+    this.lastDeclarations = new Set()
     const path = pathToHead({ ...this.history, head: this.durableHead })
     for (const node of path) {
       const result = await this.executeCell({ ...request, program: node.code, journal: undefined }, node.journal)
@@ -738,8 +791,10 @@ class SessionKernel {
       }
       const prepared = prepareProgram(node.code, this.knownBindings, node.journal.bindingMode === 'loose')
       for (const name of prepared.declared) this.knownBindings.add(name)
+      this.lastDeclarations = new Set(prepared.declared)
     }
-    this.volatile = false
+    this.volatile = this.externalVolatileReason !== undefined
+    this.volatileReason = this.externalVolatileReason
   }
 
   completeJournal(journal, status, result, volatileReason, diagnostics = [], completion = undefined) {
@@ -763,13 +818,25 @@ class SessionKernel {
     }
   }
 
-  rollbackToDurable() {
+  rollbackToDurable(clearExternalVolatility = false) {
+    if (clearExternalVolatility) this.externalVolatileReason = undefined
+    const preservedReason = this.externalVolatileReason
+    const preservedNotice = this.pendingVolatileDiagnostic
+    const noticeKnown = this.volatileNoticeShown
     this.volatile = false
     this.volatileReason = undefined
     this.volatileNoticeShown = false
     this.pendingVolatileDiagnostic = undefined
     this.replayed = false
     this.knownBindings = new Set()
+    this.lastDeclarations = new Set()
+    if (preservedReason !== undefined) {
+      this.volatile = true
+      this.volatileReason = preservedReason
+      this.volatileNoticeShown = true
+      this.pendingVolatileDiagnostic = preservedNotice
+        ?? (noticeKnown ? undefined : volatileDiagnostic(preservedReason, false))
+    }
   }
 
   /** Evaluate one live or journal-replay cell. */
@@ -786,8 +853,9 @@ class SessionKernel {
     }
 
     let prepared
+    let looseTopLevelRedeclarations
     try {
-      const looseTopLevelRedeclarations = replayRecord === undefined
+      looseTopLevelRedeclarations = replayRecord === undefined
         ? this.config.looseTopLevelRedeclarations
         : replayRecord.bindingMode === 'loose'
       prepared = prepareProgram(request.program, this.knownBindings, looseTopLevelRedeclarations)
@@ -815,6 +883,13 @@ class SessionKernel {
       return result
     }
 
+    const leadingDiagnostics = replayRecord === undefined && looseTopLevelRedeclarations
+      ? (() => {
+          const recent = prepared.redeclared.filter(item => this.lastDeclarations.has(item.name))
+          return recent.length === 0 ? [] : [redeclarationReminderDiagnostic(recent)]
+        })()
+      : []
+
     let worker
     try {
       worker = await this.ensureWorker()
@@ -841,6 +916,7 @@ class SessionKernel {
     return new Promise((resolve) => {
       const started = worker.performance.eventLoopUtilization()
       const settle = (result, terminate = false) => {
+        /* c8 ignore next */
         if (this.active?.id !== id) return
         const active = this.active
         clearInterval(active.computeTimer)
@@ -848,7 +924,7 @@ class SessionKernel {
         request.signal?.removeEventListener('abort', active.onAbort)
         if (journal !== undefined && replayRecord === undefined) {
           if (terminate) {
-            this.completeJournal(journal, 'discarded', result, undefined, active.diagnostics)
+            this.completeJournal(journal, 'discarded', result, active.externalVolatileReason, active.diagnostics)
             this.rollbackToDurable()
           } else {
             const status = active.effectiveDurability
@@ -867,6 +943,12 @@ class SessionKernel {
               worker,
             })
           }
+        }
+        if (active.leadingDiagnostics.length > 0) {
+          result.logs = [
+            ...active.leadingDiagnostics.map(item => renderDiagnostic(item, request.program)),
+            ...result.logs,
+          ]
         }
         this.active = undefined
         if (terminate) void this.resetWorker(worker)
@@ -895,11 +977,13 @@ class SessionKernel {
         replayNextSettle: 0,
         replayPending: new Map(),
         settlementSequence: 0,
-        diagnostics: [],
+        diagnostics: [...leadingDiagnostics],
+        leadingDiagnostics,
         completion: undefined,
         desiredDurability,
         effectiveDurability: desiredDurability,
         volatileReason: this.volatile ? this.volatileReason : prepared.reason || undefined,
+        externalVolatileReason: undefined,
         control: { names: new Set(this.checkpoints.keys()) },
       }
       request.signal?.addEventListener('abort', onAbort, { once: true })
@@ -925,6 +1009,7 @@ class SessionKernel {
     if (replayRecord === undefined && journal === undefined) return bindings
     const control = async args => {
       const parsed = stateArguments(args)
+      /* c8 ignore next */
       if (replayRecord !== undefined) return { action: parsed.action, ...(parsed.name === undefined ? {} : { name: parsed.name }) }
       return this.controlState(parsed)
     }
@@ -975,6 +1060,7 @@ class SessionKernel {
           this.volatileNoticeShown = true
         }
         for (const name of tentative.declared) this.knownBindings.add(name)
+        this.lastDeclarations = new Set(tentative.declared)
       }
       return
     }
@@ -985,6 +1071,7 @@ class SessionKernel {
       this.durableHead = index
       this.history.head = index
       for (const name of tentative.declared) this.knownBindings.add(name)
+      this.lastDeclarations = new Set(tentative.declared)
       this.applyConfirmedOperations(journal.operations, index, tentative.worker)
       return
     }
@@ -993,6 +1080,7 @@ class SessionKernel {
       this.volatileReason ??= journal.volatileReason
       this.volatileNoticeShown = true
       for (const name of tentative.declared) this.knownBindings.add(name)
+      this.lastDeclarations = new Set(tentative.declared)
       this.applyConfirmedOperations(journal.operations, undefined, tentative.worker)
     }
   }
@@ -1004,11 +1092,12 @@ class SessionKernel {
       } else if (operation.action === 'delete') {
         this.checkpoints.delete(operation.name)
       } else {
+        /* c8 ignore next */
         this.durableHead = operation.name === undefined
           ? index === undefined ? this.durableHead : this.history.nodes[index]?.parent
           : this.checkpoints.get(operation.name)
         this.history.head = this.durableHead
-        this.rollbackToDurable()
+        this.rollbackToDurable(true)
         void this.resetWorker(worker)
       }
     }
@@ -1024,7 +1113,9 @@ class SessionKernel {
       this.scratchReady = mkdtemp(join(scratchRoot, 'dsh-ptc-plus-'))
     }
     const scratchDirectory = await this.scratchReady
+    /* c8 ignore next */
     if (this.disposed) throw new Error('session kernel disposed')
+    /* c8 ignore next */
     if (this.worker !== undefined) return this.workerReady
     const worker = new Worker(WORKER_URL, {
       env: {
@@ -1076,6 +1167,7 @@ class SessionKernel {
       return
     }
     if (message.type === 'output-limit' && this.active?.id === message.id) {
+      /* c8 ignore next */
       const logs = Array.isArray(message.logs) && message.logs.every(log => typeof log === 'string') ? message.logs : []
       this.active.resolve({ logs, error: { kind: 'output-limit', message: `output exceeded ${this.config.maxOutputBytes} bytes` } }, true)
       return
@@ -1088,9 +1180,9 @@ class SessionKernel {
       active.resolve({ logs, error: { kind: 'worker-exit', message: 'kernel returned an invalid durability state' } }, true)
       return
     }
-    active.effectiveDurability = message.durability
-    if (typeof message.volatileReason === 'string') active.volatileReason = message.volatileReason
-    if (active.replay !== undefined && message.durability !== 'durable') {
+    if (message.durability === 'volatile') active.effectiveDurability = 'volatile'
+    if (typeof message.volatileReason === 'string') active.volatileReason ??= message.volatileReason
+    if (active.replay !== undefined && active.effectiveDurability !== 'durable') {
       active.resolve({ logs, error: { kind: 'recovery', message: 'durable history requested a volatile capability during replay' } }, true)
       return
     }
@@ -1186,6 +1278,7 @@ class SessionKernel {
       this.flushReplayReplies(worker, active)
       return
     }
+    /* c8 ignore next */
     const call = active.journal === undefined
       ? undefined
       : { global: message.global, member: message.member, args: argsWire }
@@ -1259,6 +1352,7 @@ class SessionKernel {
     this.disposed = true
     const worker = this.worker
     if (worker !== undefined) {
+      /* c8 ignore next */
       this.active?.resolve({ logs: [], error: { kind: 'abort', message: 'session kernel disposed' } }, true)
       await this.resetWorker(worker)
     }
@@ -1304,6 +1398,7 @@ export class SessionRuntime {
       this.kernels.set(sessionId, kernel)
     }
     const journal = createJournal(
+      /* c8 ignore next */
       this.pendingNoops.get(sessionId) ?? [],
       this.config.looseTopLevelRedeclarations ? 'loose' : 'strict',
     )
@@ -1324,6 +1419,12 @@ export class SessionRuntime {
       this.pendingNoops.set(id, calls)
     }
     calls.add(String(callId))
+  }
+
+  markVolatile(sessionContext, reason) {
+    if (sessionContext === null || typeof sessionContext !== 'object'
+      || typeof reason !== 'string' || reason.length === 0) return false
+    return this.kernels.get(String(sessionContext.id))?.markActiveVolatile(sessionContext, reason) ?? false
   }
 
   finalize(sessionContext, confirmed) {

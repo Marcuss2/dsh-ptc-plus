@@ -47,11 +47,11 @@ kernel-worker.js
 └── private MessageChannel
 ```
 
-插件不注册新的模型工具。原生 `run_code` 仍是唯一模型直接调用的 Code Mode 入口；程序内部使用 `workspace`、`code` 和 `host` capability projection，契约见 [Program Capability Projection](capability-projection.md)。
+插件不注册新的模型工具。原生 `run_code` 仍是唯一模型直接调用的 Code Mode 入口；程序内部使用 `workspace`、`code`、`host` 和条件性 `cordis` capability projection，契约见 [Program Capability Projection](capability-projection.md)。
 
 ## Agent 指令
 
-系统提示首先建立执行模型，而不是罗列实现细节：模型直接发起的 `run_code` 是同一个 session REPL 的连续 cell，绝不是互相独立的脚本。随后只给出生成下一 cell 前必须知道的决策：复用已有语义 binding、默认宽松模式下顶层变量可自然重定义、通过当前 `workspace`/`code`/`host` capability 获取可重放外部输入、理解 direct Node/process capability 只改变冷恢复属性而不影响当前 live REPL，以及看到 `[PTC-...]` 后只按 `help` 修复失败部分。提示同时声明 `code.run` 可执行当前程序构造或转换的隔离源码，但不规定编辑算法。
+系统提示首先建立执行模型，而不是罗列实现细节：模型直接发起的 `run_code` 是同一个 session REPL 的连续 cell，绝不是互相独立的脚本。随后只给出生成下一 cell 前必须知道的决策：复用已有语义 binding、默认宽松模式下顶层变量可自然重定义、通过当前 SDK 声明的 `workspace`/`code`/`host`/optional `cordis` capability 获取可重放外部输入、理解 direct Node/process capability 只改变冷恢复属性而不影响当前 live REPL，以及看到 `[PTC-...]` 后只按 `help` 修复失败部分。提示同时声明 `code.run` 可执行当前程序构造或转换的隔离源码，但不规定编辑算法。
 
 提示不得要求模型探测完整 namespace、维护编号别名、记录 journal id 或重发 setup source。这些都是 runtime 的 bookkeeping，转移给模型会破坏不搬运源码、不浪费 token 和不增加往返的不变量。
 
@@ -63,7 +63,7 @@ PTC Plus 在 `system-prompt/assemble` waterfall 的 `next()` 结果上不可变�
 
 - `tools/execute`：取得 owning agent/session，并包住一次真实 dispatch；
 - `CodeRuntime.run`：将属于 `run_code` 的程序路由到 session kernel；
-- 当前 `CodeRuntime.run` request bindings：不可变投影为 `workspace`、`code` 和 `host` program namespaces；
+- 当前 `CodeRuntime.run` request bindings：不可变投影为 `workspace`、`code`、`host` 和条件性 `cordis` program namespaces；
 - `system-prompt/assemble`：不可变调整 detached `run_code` schema 与严格 PTC SDK，使模型只看到持久 cell 和 program capability 契约；
 - `run_code.output.presentationMeta`：把 tentative journal 投影到成功结果；
 - `tools/result`：观察 post-execute 与 content finalization 之后的冻结结果；
@@ -75,9 +75,11 @@ PTC Plus 在 `system-prompt/assemble` waterfall 的 `next()` 结果上不可变�
 
 ## Top-level 与 Nested run_code
 
-模型直接发起的 top-level `run_code` 进入 `SessionKernel.tail`，保持 binding continuity、journal、durable/volatile、诊断和状态管理。进入 kernel 前，PTC Plus 从本次 request 的真实可见 bindings 构造新的 `workspace`、`code` 和 `host` namespaces，并移除 raw `tools` alias。`code.run` 直接调用捕获的 upstream `CodeRuntime.run`，因此获得隔离的一次性语言环境，绝不能排入仍被父 cell 占用的同一个 kernel。
+模型直接发起的 top-level `run_code` 进入 `SessionKernel.tail`，保持 binding continuity、journal、durable/volatile、诊断和状态管理。进入 kernel 前，PTC Plus 从本次 request 的真实可见 bindings 构造新的 `workspace`、`code`、`host` 和条件性 `cordis` namespaces，并移除 raw `tools` alias。domain adapter 在 host 调用两侧分别校验并重建 program request/result；它不能因为 native outcome 当前字段碰巧同名就透传整个对象，也不能把 native UI metadata 或未来新增字段变成隐式 program ABI。`code.run` 直接调用捕获的 upstream `CodeRuntime.run`，因此获得隔离的一次性语言环境，绝不能排入仍被父 cell 占用的同一个 kernel。
 
-child 继承父 request 的当前可见 authority 与取消信号，并为每一级 child 建立新的 capability projection 与 execution lease。projection 只调用宿主已经为本次 execution 建立的 binding closure，不直接调用 tool definition、不接入私有 scheduler，也不创建 DSH child tool event。它返回与 `run_code` 一致的 `{ logs, result? }` 值，但不声称复刻原生 nested dispatch 的独立 UI、policy hook 或 start/settle event。若宿主已经提供可调用的 `run_code` binding，`code.run` 保留宿主路径而不覆盖。
+child 继承父 request 的当前可见 authority、取消信号和 owning top-level execution token，并为每一级 child 建立新的 capability projection 与 execution lease。token 只在 top-level `patchedRun` 从 `tools/execute` scope 捕获一次，递归 projection 显式传递；不能在 MessagePort callback 中重新读取 `AsyncLocalStorage`。因此任意深度 child 的 Cordis creator 都把 possible-effect boundary 归属到父 journal。projection 只调用宿主已经为本次 execution 建立的 binding closure，不直接调用 tool definition、不接入私有 scheduler，也不创建 DSH child tool event。它返回与 `run_code` 一致的 `{ logs, result? }` 值，但不声称复刻原生 nested dispatch 的独立 UI、policy hook 或 start/settle event。若宿主已经提供可调用的 `run_code` binding，`code.run` 保留宿主路径而不覆盖。
+
+full-access 不由 sandbox mode 推断。插件只识别当前 RC7 的已知 Cordis creator profile：本次 immutable binding snapshot 必须完整包含该 profile，且不能出现未知的额外 `cordis_*` closure，才建立 `cordis.*` namespace。RC7 没有公开 capability-set 版本或语义 manifest；缺项、改名或新增未知成员时整体 fail-closed，也不经 `host.invoke` 暴露任何 raw `cordis_*` alias。creator program 参数校验完成后、调用 opaque host closure 前，通过当前 execution token 建立 possible-effect volatile boundary；该边界跨 abort/timeout 的 worker rollback 保留，迟到 settlement 不归属后续 cell。官方 `tool:cordis` 行为 guidance 在 profile 匹配时翻译为 program contract，而不是只保留类型或直接删除。完整组合与 approval 归属见 [Full-access composition](full-access.md)。
 
 nested child 不创建 PTC Plus journal，也不修改父/子 REPL heap。对父 kernel 而言，`code.run` 是普通 program capability call：arguments、canonical success/error 和 settlement order 进入父 journal；冷重放从 transcript 返回记录结果，不再执行 child，因此不会重复 child tool side effect。每一级 child 都得到同样的 projection，直到配置的 `maxNestedRunCodeDepth`；超限是普通 binding error，父 REPL 仍可继续。历史源码通过通用 session-event capability 读取并在 PTC 内转换，插件不提供专用源码编辑或寻址 API。
 
@@ -103,6 +105,8 @@ cell 的执行边界不止是 `evaluate()`。返回对象的 getter/Proxy、PTC 
 DSH 每次提供完整的 `run_code.code`；本项目的输入契约是 async function body，而不是 Node 终端 REPL 的逐行命令。Node `REPLServer` 仍作为当前执行后端，因为它已经提供跨 cell lexical binding、top-level await 声明提升、dynamic import、Promise completion 和 context 复用。直接替换为自有 `vm.Context` evaluator 在理论上可以完全移除 REPL 启发式，但必须同时重写并长期维护这些语言语义；这会显著扩大插件及重放验证面，因此当前不采用。
 
 默认 `looseTopLevelRedeclarations` 只放宽跨 cell 的顶层变量声明。adapter 将首次出现的顶层 `const`/`let` 建立为 `let`；后续一个 declarator 的 binding 若全部已存在，则在原位置执行一次解构或标识符赋值，若全部为新名称则仍建立 `let`。这保留 initializer 的执行次数、declarator 顺序和新声明的 TDZ。同一 pattern 混合新旧名称、function/class 重声明和同一 cell 内语言级重复声明不猜测语义，继续以 `PTC-N001` 或 parser error 拒绝。配置设为 `false` 时恢复严格的跨 cell 冲突规则。每个 journal node 都记录实际采用的 `bindingMode`；冷重放逐 node 使用记录值，因此后来切换 profile 配置不会改变既有源码的语义。
+
+插件不能确定某个名称是否仍位于模型的 token context 中，也不以墙钟时间、event seq 差值或文本相似度猜测模型意图。宽松模式的“近期重定义”采用一个确定性代理：若当前被安全改写的名称也由前一个实际进入 evaluator、并保留 live state 的 cell 声明，则输出一条合并的 `PTC-N002` note。该 note 只提醒可直接引用已有 binding；不拒绝 cell、不撤销 initializer、不改变 completion 或 durability。任意一个已执行 cell 隔开后不再提醒；parse/preflight no-op 不会制造或清除这项邻接关系。冷恢复从 durable path 重建相同的最后声明集合，原历史 note 不在 replay 时重复输出。
 
 已知的后端冲突是：Node REPL 会把“以 `{` 开头且不以分号结束”的完整输入暂时猜成对象字面量。该猜测与 top-level-await 转换组合时，会把合法的块级 `const`/`let` 初始化误报为 syntax error。模型不得为此改变源码写法，adapter 也不得按 `{`、`await` 或声明种类增加条件分支。
 
@@ -174,6 +178,7 @@ Acorn 负责 syntax position；`@babel/code-frame` 负责源码片段、行号�
 | `PTC-C001` | `parse` | `unchanged` | Acorn/TypeScript stripping 无法产生可执行 cell；使用 cell-relative source frame |
 | `PTC-C002` | `preflight` | `unchanged` | cell 请求暴露 worker lifecycle control 的 module；在 worker 执行前拒绝 |
 | `PTC-N001` | `preflight` | `unchanged` | 严格模式或无法安全放宽的跨 cell 顶层声明冲突；在 worker 执行前报告全部冲突 |
+| `PTC-N002` | `preflight` | `unknown` | 宽松模式安全改写了前一个已执行 cell 刚声明的 binding；仅提醒直接复用，当前 cell 继续执行 |
 | `PTC-O001` | `execute` | `partially-applied` | cell 已执行但返回值超出 PTC Value V1 支持域或预算；`undefined` 等受支持 rich value 不触发该错误 |
 | `PTC-V001` | `execute` | `unknown` | durable 后缀首次使用非 journalable capability；所有已生效 live binding 继续可用，只是不再冷重放 |
 | `PTC-X001` | `execute` | `partially-applied` | 求值已开始后抛出语义异常；抛出前变更可能保留并按当前 durability 记录 |
@@ -182,6 +187,8 @@ Acorn 负责 syntax position；`@babel/code-frame` 负责源码片段、行号�
 `PTC-V001` 必须先陈述 live continuity，再陈述 durability 降级，并依据实际 execution outcome 区分 cell 成功与异常；异常时只承诺失败前已经生效的 binding/mutation 仍可用。第一条 help 是继续复用当前 live state；restore 只作为需要回到可冷恢复状态时的显式选择，并必须说明它会丢弃 volatile 后缀。该 warning 不得把 volatile 本身描述成执行失败、binding 失效或后续必须停止使用 REPL。
 
 `PTC-N001` 按源码顺序汇总所有未被宽松规则安全覆盖的冲突，并给出第一个相关声明的 cell span。严格模式拒绝所有跨 cell 重声明；默认宽松模式仍拒绝 mixed destructuring pattern 与 function/class 重声明。同一 cell 内的 JavaScript 重复声明始终由语言 parser 报告。
+
+`PTC-N002` 按源码顺序合并当前 cell 中所有相邻重定义名称，并指向第一个相关声明。它使用 `note` severity；`unknown` 只表示提醒出现时尚不预判整个 cell 的执行结果，不表示 REPL 状态异常。message 必须明确 loose mode 仍允许执行，第一条 help 必须建议在当前值仍适用时直接引用现有 binding。
 
 PTC Plus 负责 top-level `run_code` 的 parse/preflight、名称、volatility、persistence、replay divergence 和 recovery 诊断，也负责 capability projection 的 arguments、递归深度与 child runtime failure。DSH core 继续负责外层 `run_code` dispatch 以及 projection 下层 host binding 的 authority、policy、timeout/cancel 与 tool-result 诊断。社区插件不把 projection 伪装成 DSH nested dispatch，不虚构 rejected-before-dispatch、dispatched-and-failed 或 completion unknown 等不可观察事实，也不为获得这些事实修改 DSH 源码。
 
@@ -195,6 +202,7 @@ volatile       当前 live worker 是否已越过 durable frontier
 volatileReason 首次越过 frontier 的原因
 checkpoints    人类可读名称到 durable node 的映射
 knownBindings  用于下一 cell 静态分类的 REPL binding 名
+lastDeclarations 前一个实际执行并保留 live state 的 cell 所声明的 binding 名
 cwd             session header 中不可变的工作目录
 worker         当前 live REPL 缓存
 scratch        只含安全临时目录变量的 session kernel 临时目录

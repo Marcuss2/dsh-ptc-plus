@@ -285,7 +285,14 @@ export function recoverJournal(session, currentCallId) {
       continue
     }
     const journal = result.journal
-    if (journal.status === 'noop' || journal.status === 'discarded') continue
+    if (journal.status === 'noop') continue
+    if (journal.status === 'discarded') {
+      if (journal.volatileReason !== undefined) {
+        state.trusted = false
+        state.volatileSuffix.push({ seq: call.seq, code, reason: journal.volatileReason })
+      }
+      continue
+    }
     if (journal.status === 'volatile') {
       state.trusted = false
       state.volatileSuffix.push({ seq: call.seq, code, reason: journal.volatileReason ?? 'volatile cell' })

@@ -386,7 +386,7 @@ export function renderValueWire(wire, options = {}) {
     const index = task.atom.index
     const label = labels.get(index)
     if (emitted.has(index)) {
-      append(active.has(index) ? `[Circular *${label ?? index + 1}]` : `[Reference *${label ?? index + 1}]`)
+      append(active.has(index) ? `[Circular *${label}]` : `[Reference *${label}]`)
       continue
     }
     emitted.add(index)

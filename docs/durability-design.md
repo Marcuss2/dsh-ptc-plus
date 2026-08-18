@@ -45,7 +45,7 @@ PTC Plus 的正确承诺是：
 - `durable`：创建可重放 node，推进 `durableHead`；
 - `bindingMode`：记录该 cell 实际采用的顶层 binding 语义；冷重放读取每个 node 的记录值，不读取恢复时的 profile 配置；
 - `volatile`：只推进 live heap，不推进 `durableHead`；
-- `discarded`：基础设施失败，calls 和 operations 必须为空；
+- `discarded`：基础设施失败，calls 和 operations 必须为空；若 opaque external capability 已越过 possible-effect boundary，则保留 `volatileReason`，恢复时不能把它折叠为 no-op；
 - `noop`：程序未执行，calls 和 operations 必须为空；
 - `confirms`：确认此前无 journal 的 call id 没有进入 runtime；
 - `diagnostics`：本 cell 产生的封闭结构化诊断；
@@ -124,7 +124,7 @@ pre-execute -> tools/execute -> post-execute
 2. 预收集 valid journal 中的 `confirms`；
 3. 排除当前在途 call，并让已确认 no-op 的无 journal call 不改变状态；
 4. 缺失源码、缺失/损坏 journal 进入 untrusted suffix；
-5. `discarded` 和 `noop` 不改变语言状态；
+5. `noop` 与不含 `volatileReason` 的 `discarded` 不改变语言状态；带 `volatileReason` 的 `discarded` 表示 heap 已回滚但外部 effect 未知，进入 untrusted suffix；
 6. `volatile` 进入 untrusted suffix，只应用可独立持久的 delete/restore 操作；
 7. `restore` 命名状态重新建立 trusted durable head；
 8. untrusted suffix 后的首个 `durable` journal从当前 durable head 建立新分支，并清除旧 suffix；

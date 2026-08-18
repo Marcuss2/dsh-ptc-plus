@@ -32,7 +32,7 @@ PTC Plus 是纯 RC7 社区插件：只使用 DSH 已有公共扩展面，不修�
 
 ## 连续求值与诊断
 
-每次模型直接发起的 `run_code` 都是同一个 session REPL 的下一格，而不是独立脚本。顶层 binding 会跨 cell 保留。默认宽松模式允许模型再次写顶层 `const`/`let`：完整 declarator 中的名称若全部已存在就替换现值，若全部为新名称就建立持久 binding。严格模式、同一解构里混合新旧名称，以及 function/class 重声明仍在执行前报告冲突。可重放的外部输入应通过 program capability 获取；当前只读投影提供 `workspace.readLines(...)`，未适配能力使用显式 `host.invoke(...)`，动态源码使用 `code.run(...)`。直接 Node/process capability 会开启 sticky volatile 后缀，但不会禁用或丢弃当前进程中的任何 live binding。
+每次模型直接发起的 `run_code` 都是同一个 session REPL 的下一格，而不是独立脚本。顶层 binding 会跨 cell 保留。默认宽松模式允许模型再次写顶层 `const`/`let`：完整 declarator 中的名称若全部已存在就替换现值，若全部为新名称就建立持久 binding。若被替换的名称也在前一个实际执行的 cell 中声明，插件会输出一条非阻断 `PTC-N002` note，提醒模型现有 binding 可以直接复用；cell 仍按原意执行。严格模式、同一解构里混合新旧名称，以及 function/class 重声明仍在执行前报告冲突。可重放的外部输入应通过 program capability 获取；当前只读投影提供 `workspace.readLines(...)`，未适配能力使用显式 `host.invoke(...)`，动态源码使用 `code.run(...)`。直接 Node/process capability 会开启 sticky volatile 后缀，但不会禁用或丢弃当前进程中的任何 live binding。
 
 cell 始终按完整 async function body 解释，不采用 Node 终端 REPL 对 `{ ... }` 的对象字面量猜测。模型可以自然使用块作用域中的 `const`/`let`、top-level `await` 和末尾注释，无需添加分号、包装函数或遵守执行器特有的书写仪式；适配器负责无语义变化的 statement framing。
 
@@ -43,12 +43,13 @@ cell 始终按完整 async function body 解释，不采用 Node 终端 REPL 对
 | `PTC-C001` | cell syntax 无法解析 | cell 未执行，REPL 不变 |
 | `PTC-C002` | preflight 拒绝 kernel-control capability | cell 未执行，REPL 不变 |
 | `PTC-N001` | 与已有顶层 binding 冲突 | cell 未执行，REPL 不变 |
+| `PTC-N002` | 宽松模式下相邻 cell 重复声明同一 binding | 仅提醒；cell 继续执行并保留实际结果 |
 | `PTC-O001` | 返回值超出 PTC Value V1 支持域或预算 | cell 已执行；此前 binding/mutation 可能生效 |
 | `PTC-V001` | 首次进入 volatile 模式 | live binding 继续可用；该后缀不参与冷重放，cell 成败由实际执行结果单独说明 |
 | `PTC-X001` | cell 执行中的未捕获异常 | 抛出前的变更可能已经生效 |
 | `PTC-R002` | 冷恢复跳过历史 volatile/unconfirmed 后缀 | 回到最后可信 durable head |
 
-出现诊断时只按 `help:` 修复失败部分，不要重发整个 cell，也不要重建已经存在的环境。`PTC-V001` 是持久性状态通知而非执行失败；除非确实要放弃 live 后缀并回到可冷恢复状态，否则继续复用当前 binding 即可。源码位置使用无 ANSI 的 code frame；完整诊断契约见 [架构说明](docs/architecture.md#诊断契约)。
+出现诊断时只按 `help:` 修复失败部分，不要重发整个 cell，也不要重建已经存在的环境。`PTC-V001` 是持久性状态通知而非执行失败；除非确实要放弃 live 后缀并回到可冷恢复状态，否则继续复用当前 binding 即可。源码位置使用无 ANSI 的 code frame；完整诊断契约见 [架构说明](docs/architecture.md#诊断契约)。当前 RC7 的已知 Cordis creator profile 精确匹配时，程序还会获得 optional `cordis.*` full-access projection；该 profile 不是稳定 RC7 ABI，边界见 [Full-access composition](docs/full-access.md)。
 
 PTC Plus 还通过 RC7 的 `system-prompt/assemble` 公共 waterfall，把模型可见的 `run_code` schema 改写为“下一 REPL cell”语义；注册表中的原始 tool definition 保持只读，其他 schema 字段原样保留，宿主结构不兼容时 prompt assembly 直接失败而不回退到误导性的一次性程序描述。
 
@@ -75,7 +76,7 @@ PTC Plus 在每个顶层 cell 中提供 `code.run({ code, description })`。cell
 
 session log 是所有**可恢复状态**的唯一真相。复制完整日志到另一个进程或机器，可以恢复相同的 durable frontier、命名状态和工具 transcript；worker 内存与旁路文件不参与正确性。volatile 内存不会被伪装成可迁移 checkpoint。
 
-详细协议见 [Durable / Volatile 恢复协议](docs/durability-design.md)。程序能力投影见 [Program Capability Projection](docs/capability-projection.md)，rich runtime value 与持久格式见 [PTC Value Graph V1](docs/value-wire.md)。
+详细协议见 [Durable / Volatile 恢复协议](docs/durability-design.md)。程序能力投影见 [Program Capability Projection](docs/capability-projection.md)，full-access 与 Cordis creator 组合见 [Full-access composition](docs/full-access.md)，rich runtime value 与持久格式见 [PTC Value Graph V1](docs/value-wire.md)。
 
 ## 状态管理
 
@@ -186,5 +187,9 @@ install-dev.cmd headless
 ```sh
 npm run check
 ```
+
+`npm run check` 使用 Node 原生 coverage runner 执行完整测试，并对 `index.js` 与
+`internal/*.js` 设置行 95%、分支 90%、函数 95% 的回退门禁。覆盖率用于发现测试面
+退化，不要求为命中不可达实现分支而暴露私有函数、改写源码或扭曲生产代码。
 
 测试覆盖 live continuation、capability projection、durable/volatile 转换、两阶段 metadata 确认、仅凭 session log 冷恢复、host 结果 record/replay、并发结算顺序、命名状态、取消与 worker 失败，以及 PTC Value Graph 的 rich/deep value。
