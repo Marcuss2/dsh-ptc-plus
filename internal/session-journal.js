@@ -5,7 +5,8 @@ export const JOURNAL_KEY = 'dshPtcPlus'
 export const JOURNAL_VERSION = 1
 
 const STATUSES = new Set(['durable', 'volatile', 'discarded', 'noop'])
-const JOURNAL_FIELDS = new Set(['version', 'status', 'calls', 'operations', 'confirms', 'diagnostics', 'completion', 'volatileReason'])
+const BINDING_MODES = new Set(['loose', 'strict'])
+const JOURNAL_FIELDS = new Set(['version', 'bindingMode', 'status', 'calls', 'operations', 'confirms', 'diagnostics', 'completion', 'volatileReason'])
 const CALL_SUCCESS_FIELDS = new Set(['global', 'member', 'args', 'ok', 'value', 'settle'])
 const CALL_ERROR_FIELDS = new Set(['global', 'member', 'args', 'ok', 'error', 'settle'])
 const OPERATION_FIELDS = new Set(['action', 'name'])
@@ -126,6 +127,7 @@ export function normalizeJournal(value) {
     throw new Error('invalid dsh-ptc-plus journal')
   }
   assertOwnFields(value, JOURNAL_FIELDS, 'dsh-ptc-plus journal')
+  if (!BINDING_MODES.has(value.bindingMode)) throw new Error('invalid dsh-ptc-plus journal binding mode')
   const calls = normalizeCalls(value.calls)
   const operations = normalizeOperations(value.operations)
   const confirms = normalizeConfirms(value.confirms)
@@ -140,6 +142,7 @@ export function normalizeJournal(value) {
   }
   return Object.freeze({
     version: JOURNAL_VERSION,
+    bindingMode: value.bindingMode,
     status: value.status,
     calls: Object.freeze(calls),
     operations: Object.freeze(operations),
@@ -162,14 +165,17 @@ export function journalsEqual(left, right) {
 }
 
 /** Start a mutable journal for one live cell. */
-export function createJournal(confirms = []) {
-  return { version: JOURNAL_VERSION, calls: [], operations: [], confirms: [...confirms], diagnostics: [] }
+export function createJournal(confirms = [], bindingMode) {
+  if (!BINDING_MODES.has(bindingMode)) throw new TypeError('invalid dsh-ptc-plus journal binding mode')
+  return { version: JOURNAL_VERSION, bindingMode, calls: [], operations: [], confirms: [...confirms], diagnostics: [] }
 }
 
 /** Complete a call which never entered the code runtime. */
-export function createNoopJournal(result) {
+export function createNoopJournal(result, bindingMode) {
+  if (!BINDING_MODES.has(bindingMode)) throw new TypeError('invalid dsh-ptc-plus journal binding mode')
   return {
     version: JOURNAL_VERSION,
+    bindingMode,
     status: 'noop',
     calls: [],
     operations: [],

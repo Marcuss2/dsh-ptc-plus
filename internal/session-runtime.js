@@ -1,4 +1,7 @@
 import { stripTypeScriptTypes } from 'node:module'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { isAbsolute, join } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import { parse } from 'acorn'
 import { decodeJson, encodeJson } from './json-wire.js'
@@ -14,6 +17,7 @@ const DEFAULTS = Object.freeze({
   maxWallMs: 600_000,
   maxOutputBytes: 64 * 1024 * 1024,
   maxOldGenerationSizeMb: 512,
+  looseTopLevelRedeclarations: true,
 })
 const MAX_TIMER_DELAY_MS = 2_147_483_647
 const DURABLE_IMPORTS = new Set([
@@ -182,6 +186,20 @@ function exceptionDiagnostic(error, cause = undefined) {
     stateEffect: 'partially-applied',
     ...(cause === undefined ? {} : { cause }),
     help: ['inspect existing bindings and retry only the failing expression'],
+  })
+}
+
+function invalidOutputDiagnostic(detail) {
+  return diagnostic({
+    code: 'PTC-O001',
+    severity: 'error',
+    phase: 'execute',
+    message: `cell result could not cross the lossless-JSON boundary: ${firstLine(detail, 'unknown output encoding failure')}`,
+    stateEffect: 'partially-applied',
+    help: [
+      'return only null, booleans, finite numbers, strings, arrays, and plain objects',
+      'replace undefined with null or omit that property before returning',
+    ],
   })
 }
 
@@ -445,6 +463,9 @@ function resolveConfig(config) {
   if (resolved.maxWallMs > MAX_TIMER_DELAY_MS) {
     throw new TypeError(`ptc-plus: maxWallMs must not exceed ${MAX_TIMER_DELAY_MS}`)
   }
+  if (typeof resolved.looseTopLevelRedeclarations !== 'boolean') {
+    throw new TypeError('ptc-plus: looseTopLevelRedeclarations must be a boolean')
+  }
   return resolved
 }
 
@@ -515,7 +536,7 @@ function rewriteCellReturns(code) {
   return rewritten
 }
 
-function prepareProgram(program, knownBindings) {
+function prepareProgram(program, knownBindings, looseTopLevelRedeclarations) {
   if (typeof program !== 'string') throw new TypeError('ptc-plus: program must be a string')
   const wrapped = STRIP_PREFIX + program + STRIP_SUFFIX
   let stripped
@@ -533,19 +554,86 @@ function prepareProgram(program, knownBindings) {
   const tree = parse(stripped, { ecmaVersion: 'latest', sourceType: 'script', locations: true })
   const outer = tree.body[0]
   const declarations = outer?.type === 'FunctionDeclaration' ? topLevelDeclarations(outer.body.body) : []
-  const collisions = declarations
-    .filter(declaration => knownBindings.has(declaration.name))
-    .map(declaration => ({
+  const collisionFor = declaration => ({
       name: declaration.name,
       start: declaration.span === undefined ? { line: 1, column: 1 } : {
         line: declaration.span.line,
         column: declaration.span.column,
       },
       ...(declaration.span?.end === undefined ? {} : { end: declaration.span.end }),
-    }))
+    })
+  let executableCode = code
+  let collisions
+  if (!looseTopLevelRedeclarations || outer?.type !== 'FunctionDeclaration') {
+    collisions = declarations.filter(declaration => knownBindings.has(declaration.name)).map(collisionFor)
+  } else {
+    const offset = STRIP_PREFIX.length
+    const replacements = []
+    const rejected = []
+    for (const statement of outer.body.body) {
+      if (statement.type !== 'VariableDeclaration') {
+        if ((statement.type === 'FunctionDeclaration' || statement.type === 'ClassDeclaration')
+          && statement.id !== null && knownBindings.has(statement.id.name)) {
+          rejected.push({ name: statement.id.name, span: declarationSpan(statement.id) })
+        }
+        continue
+      }
+      const entries = []
+      let statementRejected = false
+      for (const declarator of statement.declarations) {
+        const bindings = []
+        addPatternDeclarations(declarator.id, bindings)
+        const existing = bindings.filter(binding => knownBindings.has(binding.name))
+        if (existing.length > 0 && existing.length < bindings.length) {
+          rejected.push(...existing)
+          statementRejected = true
+          continue
+        }
+        entries.push({ declarator, bindings, existing })
+      }
+      if (statementRejected) continue
+      if (!entries.some(entry => entry.existing.length > 0)) {
+        if (statement.kind === 'const') {
+          replacements.push({
+            start: statement.start - offset,
+            end: statement.start - offset + statement.kind.length,
+            text: 'let',
+          })
+        }
+        continue
+      }
+      const parts = []
+      for (const { declarator, bindings, existing } of entries) {
+        const pattern = code.slice(declarator.id.start - offset, declarator.id.end - offset)
+        if (existing.length === bindings.length && bindings.length > 0) {
+          const initializer = declarator.init === null
+            ? 'undefined'
+            : code.slice(declarator.init.start - offset, declarator.init.end - offset)
+          parts.push(`;(${pattern} = ${initializer});`)
+        } else {
+          const declaration = code.slice(declarator.start - offset, declarator.end - offset)
+          parts.push(`${statement.kind === 'var' ? 'var' : 'let'} ${declaration};`)
+        }
+      }
+      replacements.push({
+        start: statement.start - offset,
+        end: statement.end - offset,
+        text: parts.join('\n'),
+      })
+    }
+    collisions = rejected.map(collisionFor)
+    if (collisions.length === 0) {
+      replacements.sort((left, right) => right.start - left.start)
+      for (const replacement of replacements) {
+        executableCode = executableCode.slice(0, replacement.start)
+          + replacement.text
+          + executableCode.slice(replacement.end)
+      }
+    }
+  }
   const classification = classifyDurability(code, knownBindings)
   return {
-    code: collisions.length === 0 ? rewriteCellReturns(code) : code,
+    code: collisions.length === 0 ? rewriteCellReturns(executableCode) : code,
     ...classification,
     collisions,
   }
@@ -594,6 +682,7 @@ class SessionKernel {
     this.tail = Promise.resolve()
     this.terminations = new Set()
     this.tentatives = new WeakMap()
+    this.scratchReady = undefined
     this.disposed = false
   }
 
@@ -652,7 +741,7 @@ class SessionKernel {
           throw new Error('cell replay produced a different semantic failure')
         }
       }
-      const prepared = prepareProgram(node.code, this.knownBindings)
+      const prepared = prepareProgram(node.code, this.knownBindings, node.journal.bindingMode === 'loose')
       for (const name of prepared.declared) this.knownBindings.add(name)
     }
     this.volatile = false
@@ -699,7 +788,10 @@ class SessionKernel {
 
     let prepared
     try {
-      prepared = prepareProgram(request.program, this.knownBindings)
+      const looseTopLevelRedeclarations = replayRecord === undefined
+        ? this.config.looseTopLevelRedeclarations
+        : replayRecord.bindingMode === 'loose'
+      prepared = prepareProgram(request.program, this.knownBindings, looseTopLevelRedeclarations)
     } catch (error) {
       const result = { logs: [], error: { kind: 'exception', message: messageOf(error) } }
       const failure = error instanceof PreflightError ? preflightDiagnostic(error) : parseDiagnostic(error, request.program)
@@ -920,8 +1012,22 @@ class SessionKernel {
 
   async ensureWorker() {
     if (this.worker !== undefined) return this.workerReady
+    if (this.scratchReady === undefined) {
+      const scratchRoot = tmpdir()
+      if (!isAbsolute(scratchRoot)) {
+        throw new Error(`ptc-plus: host temporary directory must be absolute, got ${JSON.stringify(scratchRoot)}`)
+      }
+      this.scratchReady = mkdtemp(join(scratchRoot, 'dsh-ptc-plus-'))
+    }
+    const scratchDirectory = await this.scratchReady
+    if (this.disposed) throw new Error('session kernel disposed')
+    if (this.worker !== undefined) return this.workerReady
     const worker = new Worker(WORKER_URL, {
-      env: {},
+      env: {
+        TEMP: scratchDirectory,
+        TMP: scratchDirectory,
+        TMPDIR: scratchDirectory,
+      },
       execArgv: [],
       workerData: this.cwd === undefined ? {} : { cwd: this.cwd },
       resourceLimits: { maxOldGenerationSizeMb: this.config.maxOldGenerationSizeMb },
@@ -1009,13 +1115,19 @@ class SessionKernel {
       return
     }
     if (typeof message.invalidOutput === 'string') {
-      active.resolve({ logs, error: { kind: 'invalid-output', message: message.invalidOutput } })
+      const failure = invalidOutputDiagnostic(message.invalidOutput)
+      const error = { kind: 'invalid-output', message: renderDiagnostic(failure, active.request.program) }
+      active.diagnostics.push(failure)
+      active.resolve({ logs: [...logs, error.message], error })
       return
     }
     try {
       active.resolve({ logs, ...(message.value === undefined ? {} : { value: decodeJson(message.value) }) })
     } catch (error) {
-      active.resolve({ logs, error: { kind: 'invalid-output', message: messageOf(error) } })
+      const failure = invalidOutputDiagnostic(messageOf(error))
+      const invalid = { kind: 'invalid-output', message: renderDiagnostic(failure, active.request.program) }
+      active.diagnostics.push(failure)
+      active.resolve({ logs: [...logs, invalid.message], error: invalid })
     }
   }
 
@@ -1123,6 +1235,12 @@ class SessionKernel {
     }
     await Promise.all([...this.terminations])
     await this.tail
+    if (this.scratchReady !== undefined) {
+      try {
+        const scratchDirectory = await this.scratchReady
+        await rm(scratchDirectory, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
+      } catch {}
+    }
   }
 }
 
@@ -1156,7 +1274,10 @@ export class SessionRuntime {
       kernel = new SessionKernel(this.config, history, cwd)
       this.kernels.set(sessionId, kernel)
     }
-    const journal = createJournal(this.pendingNoops.get(sessionId) ?? [])
+    const journal = createJournal(
+      this.pendingNoops.get(sessionId) ?? [],
+      this.config.looseTopLevelRedeclarations ? 'loose' : 'strict',
+    )
     const result = await kernel.run({ ...request, journal })
     if (typeof sessionContext === 'object' && sessionContext !== null) {
       sessionContext.journal = journal

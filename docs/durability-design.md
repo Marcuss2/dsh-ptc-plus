@@ -26,6 +26,7 @@ PTC Plus 的正确承诺是：
 ```ts
 {
   version: 1,
+  bindingMode: "loose" | "strict",
   status: "durable" | "volatile" | "discarded" | "noop",
   calls: HostCall[],
   operations: StateOperation[],
@@ -42,6 +43,7 @@ PTC Plus 的正确承诺是：
 字段含义：
 
 - `durable`：创建可重放 node，推进 `durableHead`；
+- `bindingMode`：记录该 cell 实际采用的顶层 binding 语义；冷重放读取每个 node 的记录值，不读取恢复时的 profile 配置；
 - `volatile`：只推进 live heap，不推进 `durableHead`；
 - `discarded`：基础设施失败，calls 和 operations 必须为空；
 - `noop`：程序未执行，calls 和 operations 必须为空；
@@ -52,7 +54,7 @@ PTC Plus 的正确承诺是：
 
 journal、diagnostic、source、cause、call、operation、completion 和 completion error 都使用封闭字段集合；未知、symbol 或非枚举自有字段会使 journal 无效。只有 `args` 和 `value` 是开放的 lossless-JSON 数据。诊断结构、source frame 依赖和稳定代码见[架构说明](architecture.md#诊断契约)。
 
-当前实现只定义并接受本文这一种 `version: 1` schema；同一版本不存在其他历史形状或兼容迁移。包括 `diagnostics` 在内的必需字段缺失时 journal 必须失效，不能静默补默认值，否则会削弱最终持久值与 tentative journal 的严格一致性确认。
+当前实现只定义并接受本文这一种 `version: 1` schema；同一版本不存在其他历史形状或兼容迁移。包括 `bindingMode`、`diagnostics` 在内的必需字段缺失时 journal 必须失效，不能静默补默认值，否则会削弱最终持久值与 tentative journal 的严格一致性确认。profile 后续切换宽松/严格模式只影响新 cell，历史 node 始终按自身记录的模式重放。
 
 ## Host Transcript
 

@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import { access } from 'node:fs/promises'
+import { isAbsolute } from 'node:path'
 import test from 'node:test'
 import { apply } from '../index.js'
 import { normalizeJournal } from '../internal/session-journal.js'
@@ -240,11 +242,14 @@ test('presents one coherent persistent REPL contract to the model', async (t) =>
   )
   assert.match(guidance, /session-bound REPL/)
   assert.match(guidance, /Reuse existing top-level bindings and do not resend setup source/)
-  assert.match(guidance, /Redeclaring an existing top-level name fails before execution/)
+  assert.match(guidance, /Repeated top-level `const`\/`let` variable declarations replace existing bindings/)
   assert.match(guidance, /Direct non-journalable Node\/process access changes only cold recovery/)
   assert.match(guidance, /Follow `\[PTC-\.\.\.\]` `help:` lines and retry only the failing part/)
   assert.match(guidance, /tools\.run_code\(\{ code, description \}\).*returns `\{ logs, result\? \}`/)
   assert.match(guidance, /historical source may be read through available session-event tools/i)
+  const strict = fixture({ looseTopLevelRedeclarations: false })
+  t.after(() => strict.dispose())
+  assert.match(strict.sections[0].text({}), /Redeclaring an existing top-level name fails before execution/)
   state.ctx.tools.get = () => undefined
   assert.equal(state.sections[0].text({}), '')
 })
@@ -314,6 +319,7 @@ test('leaves absent run_code assemblies unchanged and rejects incompatible schem
 test('accepts only the single current journal schema', () => {
   assert.throws(() => normalizeJournal({
     version: 1,
+    bindingMode: 'loose',
     status: 'durable',
     calls: [],
     operations: [],
@@ -323,7 +329,7 @@ test('accepts only the single current journal schema', () => {
 })
 
 test('preflights every cross-cell binding collision with one actionable diagnostic', async (t) => {
-  const state = fixture()
+  const state = fixture({ looseTopLevelRedeclarations: false })
   t.after(() => state.dispose())
 
   await state.runDurable('collision-diagnostic', 'let executed = 0\nconst fs = 1\nconst base = 2')
@@ -358,6 +364,119 @@ test('preflights every cross-cell binding collision with one actionable diagnost
   assert.deepEqual(await state.run('collision-diagnostic', 'return { executed, fs, base }'), {
     logs: [],
     value: { executed: 0, fs: 1, base: 2 },
+  })
+})
+
+test('replaces repeated top-level variables in default loose mode and cold-replays them', async (t) => {
+  const events = []
+  const session = { id: 'loose-redeclarations', events }
+  const first = fixture()
+  t.after(() => first.dispose())
+
+  const setupCode = `
+const repeatedValue = 40
+const { repeatedLabel } = { repeatedLabel: 'first' }
+`
+  const setup = await first.runDurable(session.id, setupCode, {}, { session })
+  assert.equal(setup.isError, false)
+  appendRunCodeEvents(events, 'loose-setup', setupCode, setup)
+
+  const replaceCode = `
+const repeatedValue = repeatedValue + 1, addedAfterReplace = repeatedValue
+const { repeatedLabel } = { repeatedLabel: repeatedLabel + '-second' }
+return { repeatedValue, addedAfterReplace, repeatedLabel }
+`
+  const replaced = await first.runDurable(session.id, replaceCode, {}, { session })
+  assert.deepEqual(replaced.value, {
+    repeatedValue: 41,
+    addedAfterReplace: 41,
+    repeatedLabel: 'first-second',
+  })
+  appendRunCodeEvents(events, 'loose-replace', replaceCode, replaced)
+  await first.dispose()
+
+  const restored = fixture()
+  t.after(() => restored.dispose())
+  assert.deepEqual(await restored.run(session.id, `
+return { repeatedValue, addedAfterReplace, repeatedLabel }
+`, {}, { session }), {
+    logs: [],
+    value: {
+      repeatedValue: 41,
+      addedAfterReplace: 41,
+      repeatedLabel: 'first-second',
+    },
+  })
+})
+
+test('preserves declaration TDZ while loosening new top-level const bindings', async (t) => {
+  const state = fixture()
+  t.after(() => state.dispose())
+
+  assert.deepEqual(await state.run('loose-tdz', `
+const first = (() => {
+  try { return typeof second }
+  catch (error) { return error.name }
+})(), second = 1
+return { first, second }
+`), {
+    logs: [],
+    value: { first: 'ReferenceError', second: 1 },
+  })
+})
+
+test('replays each journal node with its recorded binding mode', async (t) => {
+  const looseEvents = []
+  const looseSession = { id: 'recorded-loose-mode', events: looseEvents }
+  const looseWriter = fixture()
+  const looseFirstCode = 'const switchedBinding = 1'
+  const looseFirst = await looseWriter.runDurable(looseSession.id, looseFirstCode, {}, { session: looseSession })
+  appendRunCodeEvents(looseEvents, 'loose-mode-first', looseFirstCode, looseFirst)
+  const looseSecondCode = 'const switchedBinding = switchedBinding + 1'
+  const looseSecond = await looseWriter.runDurable(looseSession.id, looseSecondCode, {}, { session: looseSession })
+  appendRunCodeEvents(looseEvents, 'loose-mode-second', looseSecondCode, looseSecond)
+  assert.equal(looseSecond.meta.dshPtcPlus.bindingMode, 'loose')
+  await looseWriter.dispose()
+
+  const strictReader = fixture({ looseTopLevelRedeclarations: false })
+  t.after(() => strictReader.dispose())
+  assert.deepEqual(await strictReader.run(looseSession.id, 'return switchedBinding', {}, { session: looseSession }), {
+    logs: [],
+    value: 2,
+  })
+
+  const strictEvents = []
+  const strictSession = { id: 'recorded-strict-mode', events: strictEvents }
+  const strictWriter = fixture({ looseTopLevelRedeclarations: false })
+  const strictCode = 'const strictHistoryBinding = 3'
+  const strictResult = await strictWriter.runDurable(strictSession.id, strictCode, {}, { session: strictSession })
+  appendRunCodeEvents(strictEvents, 'strict-mode-cell', strictCode, strictResult)
+  assert.equal(strictResult.meta.dshPtcPlus.bindingMode, 'strict')
+  await strictWriter.dispose()
+
+  const looseReader = fixture()
+  t.after(() => looseReader.dispose())
+  assert.deepEqual(await looseReader.run(strictSession.id, 'return strictHistoryBinding', {}, { session: strictSession }), {
+    logs: [],
+    value: 3,
+  })
+})
+
+test('rejects a loose destructuring declarator that mixes existing and new bindings', async (t) => {
+  const state = fixture()
+  t.after(() => state.dispose())
+  await state.run('loose-mixed-pattern', 'const existingPatternValue = 1')
+
+  const result = await state.run('loose-mixed-pattern', `
+const { existingPatternValue, newPatternValue } = { existingPatternValue: 2, newPatternValue: 3 }
+`)
+  assert.equal(result.error.kind, 'exception')
+  assert.match(result.error.message, /error\[PTC-N001\]: top-level bindings already exist: existingPatternValue/)
+  assert.deepEqual(await state.run('loose-mixed-pattern', `
+return { existingPatternValue, newPatternType: typeof newPatternValue }
+`), {
+    logs: [],
+    value: { existingPatternValue: 1, newPatternType: 'undefined' },
   })
 })
 
@@ -716,9 +835,14 @@ test('reports runtime exceptions and invalid output without hanging the kernel',
   assert.equal(thrown.error.kind, 'exception')
   assert.match(thrown.error.message, /boom/)
 
-  const invalid = await state.run('session-a', 'return () => 1')
-  assert.equal(invalid.error.kind, 'invalid-output')
-  assert.match(invalid.error.message, /not lossless JSON/)
+  const invalid = await state.executeRun('session-a', 'return { temp: undefined }', {}, {})
+  assert.equal(invalid.raw.error.kind, 'invalid-output')
+  assert.match(invalid.raw.error.message, /^error\[PTC-O001\]: cell result could not cross the lossless-JSON boundary:/)
+  assert.match(invalid.raw.error.message, /value at \$\.temp is not lossless JSON: undefined/)
+  assert.match(invalid.raw.error.message, /state: partially-applied/)
+  assert.match(invalid.raw.error.message, /help: replace undefined with null or omit that property before returning/)
+  assert.equal(invalid.result.meta.dshPtcPlus.status, 'durable')
+  assert.deepEqual(invalid.result.meta.dshPtcPlus.diagnostics.map(item => item.code), ['PTC-O001'])
   assert.deepEqual(await state.run('session-a', 'return 6'), { logs: [], value: 6 })
 })
 
@@ -931,6 +1055,41 @@ test('uses the session header cwd without inheriting the host process cwd', asyn
   assert.equal(unrecorded.meta.dshPtcPlus.status, 'volatile')
   assert.equal(unrecorded.meta.dshPtcPlus.volatileReason, 'process.cwd')
   assert.match(unrecordedRun.raw.logs[0], /PTC Plus status: volatile \(process\.cwd\)/)
+})
+
+test('provides an isolated absolute scratch directory without inheriting host environment', async (t) => {
+  const state = fixture()
+  t.after(() => state.dispose())
+
+  const result = await state.run('session-scratch', `
+const osForScratch = await import('node:os')
+return {
+  directory: osForScratch.tmpdir(),
+  temp: process.env.TEMP,
+  tmp: process.env.TMP,
+  tmpdir: process.env.TMPDIR,
+  hasSystemRoot: process.env.SystemRoot !== undefined,
+}
+`)
+  assert.equal(isAbsolute(result.value.directory), true)
+  assert.equal(result.value.directory.includes('undefined'), false)
+  assert.equal(result.value.temp, result.value.directory)
+  assert.equal(result.value.tmp, result.value.directory)
+  assert.equal(result.value.tmpdir, result.value.directory)
+  assert.equal(result.value.hasSystemRoot, false)
+  await access(result.value.directory)
+
+  const other = await state.run('session-scratch-other', `
+const otherScratchOs = await import('node:os')
+return otherScratchOs.tmpdir()
+`)
+  assert.equal(isAbsolute(other.value), true)
+  assert.notEqual(other.value, result.value.directory)
+  await access(other.value)
+
+  await state.dispose()
+  await assert.rejects(access(result.value.directory))
+  await assert.rejects(access(other.value))
 })
 
 test('rejects kernel-control modules through the global require view', async (t) => {
@@ -1635,6 +1794,7 @@ test('fails recovery when replay hits an infrastructure timeout', async (t) => {
     meta: {
       dshPtcPlus: {
         version: 1,
+        bindingMode: 'loose',
         status: 'durable',
         calls: [],
         operations: [],
@@ -1702,4 +1862,8 @@ test('rejects unsupported runtimes and invalid limits', () => {
     ...base,
     codeRuntime: { language: 'typescript', run() {} },
   }, { maxNestedRunCodeDepth: 0 }), /maxNestedRunCodeDepth must be a positive safe integer/)
+  assert.throws(() => apply({
+    ...base,
+    codeRuntime: { language: 'typescript', run() {} },
+  }, { looseTopLevelRedeclarations: 'yes' }), /looseTopLevelRedeclarations must be a boolean/)
 })

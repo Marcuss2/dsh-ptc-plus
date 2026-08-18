@@ -22,10 +22,15 @@ export const name = 'ptc-plus'
 /** Services required by the plugin. */
 export const inject = ['tools', 'codeRuntime', 'systemPrompt']
 
-const REPL_GUIDANCE = `\`run_code\` evaluates consecutive top-level cells in one session-bound persistent REPL.
+function replGuidance(looseTopLevelRedeclarations) {
+  const redeclaration = looseTopLevelRedeclarations
+    ? 'Repeated top-level `const`/`let` variable declarations replace existing bindings; reuse a name naturally when recomputing it.'
+    : 'Redeclaring an existing top-level name fails before execution, so reuse it or place one-off declarations inside a block.'
+  return `\`run_code\` evaluates consecutive top-level cells in one session-bound persistent REPL.
 
 ## session-bound REPL
-Reuse existing top-level bindings and do not resend setup source. Redeclaring an existing top-level name fails before execution, so reuse it or place one-off declarations inside a block. Use the current global \`tools.*\`; it is rebound for every cell, so never retain an individual tool function. Direct non-journalable Node/process access changes only cold recovery; live bindings remain usable. Follow \`[PTC-...]\` \`help:\` lines and retry only the failing part. Use \`tools.run_code({ code, description })\` to execute source constructed or transformed by this cell in an isolated child environment; it returns \`{ logs, result? }\`. Historical source may be read through available session-event tools and edited with ordinary TypeScript.`
+Reuse existing top-level bindings and do not resend setup source. ${redeclaration} Use the current global \`tools.*\`; it is rebound for every cell, so never retain an individual tool function. Direct non-journalable Node/process access changes only cold recovery; live bindings remain usable. Follow \`[PTC-...]\` \`help:\` lines and retry only the failing part. Use \`tools.run_code({ code, description })\` to execute source constructed or transformed by this cell in an isolated child environment; it returns \`{ logs, result? }\`. Historical source may be read through available session-event tools and edited with ordinary TypeScript.`
+}
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -96,6 +101,7 @@ export function apply(ctx, config = {}) {
     throw new TypeError('ptc-plus: maxNestedRunCodeDepth must be a positive safe integer')
   }
   const { maxNestedRunCodeDepth: _nestedDepth, ...sessionConfig } = config
+  const looseTopLevelRedeclarations = config.looseTopLevelRedeclarations ?? true
   const scope = new AsyncLocalStorage()
   const sessions = new SessionRuntime(sessionConfig)
   const runtime = ctx.codeRuntime
@@ -187,7 +193,9 @@ export function apply(ctx, config = {}) {
   ctx.systemPrompt.section({
     name: 'tools:ptc-plus-repl',
     order: 98,
-    text: context => ctx.tools.get(RUN_CODE, context.scope) === undefined ? '' : REPL_GUIDANCE,
+    text: context => ctx.tools.get(RUN_CODE, context.scope) === undefined
+      ? ''
+      : replGuidance(looseTopLevelRedeclarations),
   })
 
   ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {

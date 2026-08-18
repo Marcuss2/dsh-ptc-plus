@@ -101,7 +101,7 @@ cell 的执行边界不止是 `evaluate()`。返回对象的 getter/Proxy、loss
 
 DSH 每次提供完整的 `run_code.code`；本项目的输入契约是 async function body，而不是 Node 终端 REPL 的逐行命令。Node `REPLServer` 仍作为当前执行后端，因为它已经提供跨 cell lexical binding、top-level await 声明提升、dynamic import、Promise completion 和 context 复用。直接替换为自有 `vm.Context` evaluator 在理论上可以完全移除 REPL 启发式，但必须同时重写并长期维护这些语言语义；这会显著扩大插件及重放验证面，因此当前不采用。
 
-默认 `looseTopLevelRedeclarations` 只放宽跨 cell 的顶层变量声明。adapter 将首次出现的顶层 `const`/`let` 建立为 `let`；后续一个 declarator 的 binding 若全部已存在，则在原位置执行一次解构或标识符赋值，若全部为新名称则仍建立 `let`。这保留 initializer 的执行次数和 declarator 顺序，并使原始源码在冷重放时得到同一转换。同一 pattern 混合新旧名称、function/class 重声明和同一 cell 内语言级重复声明不猜测语义，继续以 `PTC-N001` 或 parser error 拒绝。配置设为 `false` 时恢复严格的跨 cell 冲突规则。
+默认 `looseTopLevelRedeclarations` 只放宽跨 cell 的顶层变量声明。adapter 将首次出现的顶层 `const`/`let` 建立为 `let`；后续一个 declarator 的 binding 若全部已存在，则在原位置执行一次解构或标识符赋值，若全部为新名称则仍建立 `let`。这保留 initializer 的执行次数、declarator 顺序和新声明的 TDZ。同一 pattern 混合新旧名称、function/class 重声明和同一 cell 内语言级重复声明不猜测语义，继续以 `PTC-N001` 或 parser error 拒绝。配置设为 `false` 时恢复严格的跨 cell 冲突规则。每个 journal node 都记录实际采用的 `bindingMode`；冷重放逐 node 使用记录值，因此后来切换 profile 配置不会改变既有源码的语义。
 
 已知的后端冲突是：Node REPL 会把“以 `{` 开头且不以分号结束”的完整输入暂时猜成对象字面量。该猜测与 top-level-await 转换组合时，会把合法的块级 `const`/`let` 初始化误报为 syntax error。模型不得为此改变源码写法，adapter 也不得按 `{`、`await` 或声明种类增加条件分支。
 
@@ -172,7 +172,7 @@ Acorn 负责 syntax position；`@babel/code-frame` 负责源码片段、行号�
 | --- | --- | --- | --- |
 | `PTC-C001` | `parse` | `unchanged` | Acorn/TypeScript stripping 无法产生可执行 cell；使用 cell-relative source frame |
 | `PTC-C002` | `preflight` | `unchanged` | cell 请求暴露 worker lifecycle control 的 module；在 worker 执行前拒绝 |
-| `PTC-N001` | `preflight` | `unchanged` | 当前固定名称 runtime 检测到跨 cell 顶层声明冲突；在 worker 执行前报告全部冲突 |
+| `PTC-N001` | `preflight` | `unchanged` | 严格模式或无法安全放宽的跨 cell 顶层声明冲突；在 worker 执行前报告全部冲突 |
 | `PTC-O001` | `execute` | `partially-applied` | cell 已执行但返回值无法通过 lossless-JSON boundary；指出具体路径并建议使用 `null` 或省略 `undefined` 字段 |
 | `PTC-V001` | `execute` | `unknown` | durable 后缀首次使用非 journalable capability；所有已生效 live binding 继续可用，只是不再冷重放 |
 | `PTC-X001` | `execute` | `partially-applied` | 求值已开始后抛出语义异常；抛出前变更可能保留并按当前 durability 记录 |
