@@ -39,6 +39,10 @@ test('keeps an upstream preset ahead of a colliding package preset', () => {
   assert.deepEqual(mergePresetRosters(upstream, additions), [upstream[0], additions[1]])
 })
 
+test('is inert when the host profile has no preset roster', () => {
+  assert.doesNotThrow(() => applyRoster({ get() { return undefined } }))
+})
+
 test('becomes a passthrough when a later roster decorator owns teardown', async () => {
   const effects = []
   const service = { async list() { return [{ id: 'standard' }] } }

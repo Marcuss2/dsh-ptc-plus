@@ -7,6 +7,7 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { jsonSchemaToTs } from '@deepseek-ai/dsh-tools'
 import { SessionRuntime } from './internal/session-runtime.js'
 import { JOURNAL_KEY, journalsEqual, withJournal } from './internal/session-journal.js'
 import { decodeValue, encodeValue, isPlainJsonTree } from './internal/value-wire.js'
@@ -45,7 +46,7 @@ function replGuidance(looseTopLevelRedeclarations, durableReplay) {
   return `\`run_code\` evaluates consecutive top-level cells in one session-bound persistent REPL.
 
 ## session-bound REPL
-Reuse existing top-level bindings and do not resend setup source. ${redeclaration}${recovery} Use the current SDK-declared capability globals such as \`workspace\`, \`code\`, \`host\`, and optional \`cordis\`; they are rebound for every cell, so never retain an individual capability function. Direct non-journalable Node/process access changes only cold recovery; live bindings remain usable. Follow \`[PTC-...]\` \`help:\` lines and retry only the failing part. Use \`code.run({ code, description })\` to execute source constructed or transformed by this cell in an isolated child environment; it returns \`{ logs, result? }\`. Historical source may be read through available session-event capabilities and edited with ordinary TypeScript.`
+Reuse existing top-level bindings and do not resend setup source. ${redeclaration}${recovery} A cell is a program: batch related independent observations in one cell, filter and summarize them in TypeScript, and stop once the user's question is answered instead of making one cell per file or directory. When orientation or context is needed, use one cell to read and return a small set of known authoritative entry documents and relevant manifests together; do not repeat a read in a later cell. If an earlier cell declared a binding, reuse it even when that value was not returned; do not redeclare it merely to print or inspect it. Use only known or previously discovered paths; do not guess documentation files, invent filenames, or inventory the repository without a concrete need. Do not guess a \`readLines\` offset: use the returned \`totalLines\` and request a next window only when its offset is below that value. Keep only values intended for later reuse as top-level bindings; put one-off intermediates in a block or return the awaited expression directly. Call the current SDK-declared capability globals such as \`repl\`, \`workspace\`, \`code\`, \`host\`, and optional \`cordis\` directly. They are reserved and rebound for every cell: never declare, destructure, alias, assign, or retain a capability namespace or one of its functions. Direct non-journalable Node/process access changes only cold recovery; live bindings remain usable. Follow \`[PTC-...]\` \`help:\` lines and retry only the failing part. Use \`code.run({ code, description })\` to execute source constructed or transformed by this cell in an isolated child environment; it returns \`{ logs, result? }\`. Historical source may be read through available session-event capabilities and edited with ordinary TypeScript.`
 }
 
 function isRecord(value) {
@@ -249,6 +250,25 @@ All Cordis operations below are methods on the optional \`cordis\` namespace ins
 ${text}`
 }
 
+function adaptGlobGuidance(value) {
+  if (typeof value !== 'string') {
+    throw new Error('ptc-plus: incompatible glob guidance; expected rendered text')
+  }
+  const text = value
+    .replaceAll('Use the glob tool', 'Use `workspace.findFiles`')
+    .replaceAll('glob tool', '`workspace.findFiles`')
+    .replace(
+      /A pattern with no "\/" matches basenames at any depth, so "\*" matches every file in the tree rather than its top level\./,
+      'A pattern with no "/" matches only the selected root; use a focused subdirectory or filename pattern for deeper searches.',
+    )
+  if (/\bglob tool\b|pattern with no "\/" matches basenames at any depth/i.test(text)) {
+    throw new Error('ptc-plus: incompatible glob guidance; native API reference remains')
+  }
+  return `# Workspace file discovery
+
+${text}`
+}
+
 function adaptRunCodeSchema(tool) {
   const parameters = tool.parameters
   const properties = isRecord(parameters) ? parameters.properties : undefined
@@ -349,6 +369,36 @@ function readLinesResult(value) {
     return { number, text }
   })
   return { path, offset, lines: projectedLines, totalLines }
+}
+
+function findFilesArguments(value) {
+  exactObject(value, new Set(['pattern', 'root']), 'workspace.findFiles')
+  if (typeof value.pattern !== 'string' || value.pattern.trim().length === 0) {
+    throw new TypeError('workspace.findFiles pattern must be a non-empty string')
+  }
+  if (value.root !== undefined && (typeof value.root !== 'string' || value.root.trim().length === 0)) {
+    throw new TypeError('workspace.findFiles root must be a non-empty string when given')
+  }
+  return {
+    pattern: value.pattern.includes('/') ? value.pattern : `/${value.pattern}`,
+    ...(value.root === undefined ? {} : { path: value.root }),
+  }
+}
+
+function findFilesResult(value) {
+  const label = 'workspace.findFiles host result'
+  exactObject(value, new Set(['root', 'paths']), label)
+  const root = dataField(value, 'root', label)
+  const paths = dataField(value, 'paths', label)
+  if (typeof root !== 'string' || root.length === 0) throw new TypeError(`${label} root must be a non-empty string`)
+  if (!Array.isArray(paths)) throw new TypeError(`${label} paths must be an array`)
+  const files = paths.map((path, index) => {
+    if (typeof path !== 'string' || path.length === 0) {
+      throw new TypeError(`${label} paths[${index}] must be a non-empty string`)
+    }
+    return path
+  })
+  return { root, files }
 }
 
 function nonEmptyString(value, label) {
@@ -505,21 +555,99 @@ function namespace(global, functions, errorName, memberNameProperty) {
   }
 }
 
-function capabilitySdk(names) {
-  const available = new Set(names)
+function oneLineText(value) {
+  return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : ''
+}
+
+function indentType(value, prefix = '  ') {
+  return String(value).split('\n').map(line => `${prefix}${line}`).join('\n')
+}
+
+function hostCapabilityReference(name) {
+  return `\`host.invoke\` capability ${JSON.stringify(name)}`
+}
+
+function adaptNativeCapabilityReferences(value, names) {
+  if (typeof value !== 'string' || names.length === 0) return value
+  let text = value.replace(/\bgoal tools\b/gi, match => match.endsWith('s') ? 'goal capabilities' : 'goal capability')
+  const ordered = [...new Set(names.filter(name => name !== RUN_CODE))]
+    .sort((left, right) => right.length - left.length)
+  for (const name of ordered) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const reference = hostCapabilityReference(name)
+    text = text
+      .replace(new RegExp(`\\btools\\s*\\.\\s*${escaped}\\b`, 'g'), reference)
+      .replace(new RegExp(`\`${escaped}\``, 'g'), reference)
+    if (name.includes('_')) {
+      text = text.replace(new RegExp(`(?<![\\w"'])${escaped}(?![\\w"'])`, 'g'), reference)
+    } else {
+      text = text
+        .replace(new RegExp(`\\b((?:call|use|using|with|via|through)\\s+(?:the\\s+)?)${escaped}(?:\\s+tool)?\\b`, 'gi'),
+          (_match, lead) => `${lead}${reference}`)
+        .replace(new RegExp(`\\b${escaped}\\s+tool\\b`, 'gi'), reference)
+        .replace(new RegExp(`\\btool\\s+${escaped}\\b`, 'gi'), reference)
+    }
+  }
+  return text
+}
+
+function adaptTypeComments(value, names) {
+  let inComment = false
+  return String(value).split('\n').map((line) => {
+    if (line.includes('/**')) inComment = true
+    const adapted = inComment ? adaptNativeCapabilityReferences(line, names) : line
+    if (line.includes('*/')) inComment = false
+    return adapted
+  }).join('\n')
+}
+
+function hostCapabilityTypes(schemas, hasCordis) {
+  const entries = schemas
+    .filter(schema => typeof schema?.name === 'string' && schema.name !== RUN_CODE)
+    .filter(schema => !(hasCordis && isCordisNativeName(schema.name)))
+    .sort((left, right) => left.name.localeCompare(right.name))
+  const names = entries.map(schema => schema.name)
+  if (entries.length === 0) return 'interface HostCapabilityArgs {}\ntype HostCapabilityName = keyof HostCapabilityArgs'
+  const fields = entries.map(schema => {
+    const type = adaptTypeComments(jsonSchemaToTs(schema.parameters ?? {}), names)
+    const description = adaptNativeCapabilityReferences(oneLineText(schema.description), names)
+    const comment = description.length === 0 ? '' : `  /** ${description.replaceAll('*/', '*\\/') } */\n`
+    return `${comment}  ${JSON.stringify(schema.name)}: ${indentType(type, '    ')};`
+  })
+  return `interface HostCapabilityArgs {\n${fields.join('\n')}\n}\ntype HostCapabilityName = keyof HostCapabilityArgs`
+}
+
+function capabilitySdk(schemas) {
+  const available = new Set(schemas.map(schema => schema?.name).filter(name => typeof name === 'string'))
   const hasCordis = supportsCordisProfile(available)
-  const compatibility = [...available]
-    .filter(name => name !== RUN_CODE && !(hasCordis && isCordisNativeName(name)))
-    .sort()
-  const hostNames = compatibility.length === 0 ? 'never' : compatibility.map(JSON.stringify).join(' | ')
-  const workspace = available.has('read')
-    ? `interface WorkspaceLine { number: number; text: string }
-interface WorkspaceLines { path: string; offset: number; lines: WorkspaceLine[]; totalLines: number }
-declare class WorkspaceError extends Error { readonly operation: "readLines" }
+  const hostTypes = hostCapabilityTypes(schemas, hasCordis)
+  const workspaceTypes = []
+  const workspaceMembers = []
+  const workspaceOperations = []
+  if (available.has('read')) {
+    workspaceTypes.push('interface WorkspaceLine { number: number; text: string }\ninterface WorkspaceLines { path: string; offset: number; lines: WorkspaceLine[]; totalLines: number }')
+    workspaceMembers.push('  readLines(args: { path: string; offset?: number; limit?: number }): Promise<WorkspaceLines>')
+    workspaceOperations.push('"readLines"')
+  }
+  if (available.has('glob')) {
+    workspaceTypes.push('interface WorkspaceFiles { root: string; files: string[] }')
+    workspaceMembers.push('  findFiles(args: { pattern: string; root?: string }): Promise<WorkspaceFiles>')
+    workspaceOperations.push('"findFiles"')
+  }
+  const workspace = workspaceMembers.length === 0
+    ? ''
+    : `${workspaceTypes.join('\n')}
+declare class WorkspaceError extends Error { readonly operation: ${workspaceOperations.join(' | ')} }
 declare const workspace: {
-  readLines(args: { path: string; offset?: number; limit?: number }): Promise<WorkspaceLines>
+${workspaceMembers.join('\n')}
 }`
-    : ''
+  const workspaceGuidance = []
+  if (available.has('read')) {
+    workspaceGuidance.push('For file text, prefer `workspace.readLines` instead of routing the native `read` capability through `host.invoke`: `const page = await workspace.readLines({ path, limit: 200 }); return { text: page.lines.map(line => line.text).join("\\n"), totalLines: page.totalLines }`. It accepts a regular file path, not a directory. Use only a known or previously discovered path; do not probe guessed documentation files. The result includes `totalLines`: never guess an offset or request a window beyond it. When context is needed, read a small set of authoritative entry documents together in one cell, then stop when they answer the question; do not repeat a read in a later cell. `workspace.readLines` is intentionally bounded and never claims to return a complete file.')
+  }
+  if (available.has('glob')) {
+    workspaceGuidance.push('For targeted file discovery, use `workspace.findFiles` instead of a shell; it returns files rather than directories, and directory groupings can be derived from those paths in TypeScript. Use a narrow root-level name pattern or one focused subdirectory pattern only after a concrete gap is identified. Do not inventory the repository or use a broad recursive pattern merely to gain context; prefer known entry documents and stop when the evidence is sufficient.')
+  }
   const cordis = hasCordis
     ? `type CordisJson = HostJson
 declare class CordisError extends Error { readonly operation: "inspectList" | "inspect" | "inspectSelf" | "define" | "run" | "stop" | "undefine" }
@@ -540,10 +668,23 @@ declare const cordis: {
     : ''
   return `## Program capabilities
 
-Only \`run_code\` is model-callable. Inside a cell, use these program APIs; do not emit native tool calls or \`tools.*\` expressions. Capability objects are rebound for each cell.
+Only \`run_code\` is model-callable. Inside a cell, use these program APIs; do not emit native tool calls or \`tools.*\` expressions. Capability objects are rebound for each cell. Any prose reference to a \`host.invoke\` capability \`"name"\` means \`host.invoke({ name: "name", args })\` with the matching \`HostCapabilityArgs\` entry.
 
 \`\`\`ts
 type HostJson = null | boolean | number | string | HostJson[] | { [key: string]: HostJson }
+type JsonValue = HostJson
+type ReplStateResult =
+  | { names: string[]; mode: "durable" | "volatile"; volatileReason?: string }
+  | { action: "save"; name: string; saved: true }
+  | { action: "restore"; name?: string; restored: true }
+  | { action: "delete"; name: string; deleted: true }
+declare const repl: {
+  state(args:
+    | { action: "list" }
+    | { action: "save" | "delete"; name: string }
+    | { action: "restore"; name?: string }
+  ): Promise<ReplStateResult>
+}
 ${workspace}
 ${cordis}
 
@@ -552,14 +693,14 @@ declare const code: {
   run(args: { code: string; description: string }): Promise<{ logs: string[]; result?: HostJson }>
 }
 
-type HostCapabilityName = ${hostNames}
+${hostTypes}
 declare class HostCapabilityError extends Error { readonly operation: "invoke" }
 declare const host: {
-  invoke(call: { name: HostCapabilityName; args: HostJson }): Promise<HostJson>
+  invoke<Name extends HostCapabilityName>(call: { name: Name; args: HostCapabilityArgs[Name] }): Promise<HostJson>
 }
 \`\`\`
 
-\`workspace.readLines\` is intentionally bounded and never claims to return a complete file. \`cordis\` exists only when the exact known Cordis binding profile is present. \`host.invoke\` is the explicit compatibility path for other unadapted capabilities.`
+${workspaceGuidance.join(' ')}${workspaceGuidance.length === 0 ? '' : ' '}\`cordis\` exists only when the exact known Cordis binding profile is present. \`host.invoke\` is the explicit compatibility path for other unadapted capabilities.`
 }
 
 /** Register the session-bound REPL runtime. */
@@ -626,16 +767,21 @@ export function apply(ctx, config = {}) {
     }
 
     const projected = request.bindings.filter(binding => !['tools', 'workspace', 'cordis', 'code', 'host'].includes(binding?.global))
+    const workspaceFunctions = {}
     if (typeof functions.read === 'function') {
-      projected.push(namespace(
-        'workspace',
-        { readLines: async value => {
-          ensureLease()
-          return readLinesResult(await functions.read(readLinesArguments(value)))
-        } },
-        'WorkspaceError',
-        'operation',
-      ))
+      workspaceFunctions.readLines = async value => {
+        ensureLease()
+        return readLinesResult(await functions.read(readLinesArguments(value)))
+      }
+    }
+    if (typeof functions.glob === 'function') {
+      workspaceFunctions.findFiles = async value => {
+        ensureLease()
+        return findFilesResult(await functions.glob(findFilesArguments(value)))
+      }
+    }
+    if (Object.keys(workspaceFunctions).length > 0) {
+      projected.push(namespace('workspace', workspaceFunctions, 'WorkspaceError', 'operation'))
     }
     const functionNames = Reflect.ownKeys(functions).filter(key => typeof key === 'string')
     const hasCordis = supportsCordisProfile(functionNames)
@@ -811,7 +957,7 @@ export function apply(ctx, config = {}) {
       ? ctx.tools.schemas(context.scope)
       : []
     const names = schemas.map(schema => schema?.name).filter(name => typeof name === 'string')
-    const hasRead = names.includes('read')
+    const hasGlob = names.includes('glob')
     const hasCordis = supportsCordisProfile(names)
     const hasCordisGuidance = assembly.sections?.some(section => section?.name === 'tool:cordis') === true
     if (hasCordis && !hasCordisGuidance) {
@@ -823,13 +969,17 @@ export function apply(ctx, config = {}) {
       sections: !strictPtc || !Array.isArray(assembly.sections)
         ? assembly.sections
         : assembly.sections.flatMap((section) => {
-            if (hasRead && section?.name === 'tool:read') return []
             if (section?.name === 'tool:cordis') {
               return hasCordis ? [{ ...section, text: adaptCordisGuidance(section.text) }] : []
             }
-            return [section?.name === 'tools:sdk'
-              ? { ...section, text: capabilitySdk(names) }
-              : section]
+            if (section?.name === 'tool:glob') {
+              return hasGlob ? [{ ...section, text: adaptGlobGuidance(section.text) }] : []
+            }
+            if (typeof section?.name === 'string' && section.name.startsWith('tool:')
+              && names.includes(section.name.slice('tool:'.length))) return []
+            if (section?.name === 'tools:sdk') return [{ ...section, text: capabilitySdk(schemas) }]
+            const text = adaptNativeCapabilityReferences(section?.text, names)
+            return text === '' && typeof section?.text === 'string' ? [] : [{ ...section, ...(text === section?.text ? {} : { text }) }]
           }),
     }
   })

@@ -34,7 +34,7 @@ scheduler，也不伪造 session event。当前实现不增加模型可直接调
 
 ## 连续求值与诊断
 
-每次模型直接发起的 `run_code` 都是同一个 session REPL 的下一格，而不是独立脚本。顶层 binding 会跨 cell 保留。默认宽松模式允许模型再次写顶层 `const`/`let`：完整 declarator 中的名称若全部已存在就替换现值，若全部为新名称就建立持久 binding。若被替换的名称也在前一个实际执行的 cell 中声明，插件会输出一条非阻断 `PTC-N002` note，提醒模型现有 binding 可以直接复用；cell 仍按原意执行。严格模式、同一解构里混合新旧名称，以及 function/class 重声明仍在执行前报告冲突。可重放的外部输入应通过 program capability 获取；当前只读投影提供 `workspace.readLines(...)`，未适配能力使用显式 `host.invoke(...)`，动态源码使用 `code.run(...)`。typed `cordis.*` 的 Plugin/Package/Fiber 领域 effect 会随 journal 重建；Client approval、异步 settlement 和 raw `host.invoke(cordis_*)` 仍会开启 sticky volatile 后缀，但不会禁用或丢弃当前进程中的任何 live binding。
+每次模型直接发起的 `run_code` 都是同一个 session REPL 的下一格，而不是独立脚本。顶层 binding 会跨 cell 保留。默认宽松模式允许模型再次写顶层 `const`/`let`：完整 declarator 中的名称若全部已存在就替换现值，若全部为新名称就建立持久 binding。若被替换的名称也在前一个实际执行的 cell 中声明，插件会输出一条非阻断 `PTC-N002` note，提醒模型现有 binding 可以直接复用；cell 仍按原意执行。严格模式、同一解构里混合新旧名称，以及 function/class 重声明仍在执行前报告冲突。可重放的外部输入应通过 program capability 获取；当前 workspace 投影提供 `readLines(...)` 与 `findFiles(...)`，未适配能力使用显式 `host.invoke(...)`，动态源码使用 `code.run(...)`。typed `cordis.*` 的 Plugin/Package/Fiber 领域 effect 会随 journal 重建；Client approval、异步 settlement 和 raw `host.invoke(cordis_*)` 仍会开启 sticky volatile 后缀，但不会禁用或丢弃当前进程中的任何 live binding。
 
 cell 始终按完整 async function body 解释，不采用 Node 终端 REPL 对 `{ ... }` 的对象字面量猜测。模型可以自然使用块作用域中的 `const`/`let`、top-level `await` 和末尾注释，无需添加分号、包装函数或遵守执行器特有的书写仪式；适配器负责无语义变化的 statement framing。
 
@@ -53,7 +53,7 @@ cell 始终按完整 async function body 解释，不采用 Node 终端 REPL 对
 
 出现诊断时只按 `help:` 修复失败部分，不要重发整个 cell，也不要重建已经存在的环境。`PTC-V001` 是持久性状态通知而非执行失败；除非确实要放弃 live 后缀并回到可冷恢复状态，否则继续复用当前 binding 即可。源码位置使用无 ANSI 的 code frame；完整诊断契约见 [架构说明](docs/architecture.md#诊断契约)。插件安装后提供随插件共同出现和消失的“全能模式” system preset：完整继承当前官方创造模式能力，附加 Code/PTC 与 `danger-full-access / never`。已知 Cordis contract 使用 `cordis.*` 强类型翻译，其余当前可见 binding 仍可通过 `host.invoke` 使用；边界见 [Full-access composition](docs/full-access.md)。
 
-PTC Plus 还通过 RC7 的 `system-prompt/assemble` 公共 waterfall，把模型可见的 `run_code` schema 改写为“下一 REPL cell”语义；注册表中的原始 tool definition 保持只读，其他 schema 字段原样保留，宿主结构不兼容时 prompt assembly 直接失败而不回退到误导性的一次性程序描述。
+PTC Plus 还通过 RC7 的 `system-prompt/assemble` 公共 waterfall，把模型可见的 `run_code` schema 改写为“下一 REPL cell”语义；注册表中的原始 tool definition 保持只读，其他 schema 字段原样保留。严格 PTC 的 compatibility SDK 从当前公开 tool schema 生成每个 capability 的参数形状，并移除 native tool guidance，避免模型因看见 `read`/`write` 语法而跳回直接调用；宿主结构不兼容时 prompt assembly 直接失败而不回退到误导性的一次性程序描述。
 
 ## 源码元编程
 
@@ -201,6 +201,16 @@ frontier 恢复。
 ```sh
 npm run check
 ```
+
+### Windows real-model acceptance (expensive, opt-in)
+
+The default check never contacts a model. To run the manual end-to-end acceptance against the installed Windows DSH headless runner, use:
+
+```sh
+npm run test:expensive
+```
+
+This packs and installs the current checkout into the `headless` profile, enables the profile's official Code/PTC entry through `DSH_TOOLS_MODE=code`, pins the preferred model through a temporary overlay, runs `介绍本项目` from this repository as the workspace, and keeps the complete stdout/stderr, decompressed session log, and analysis report under `artifacts/expensive/<run>/`. The test fails on any tool error, unmatched tool call/result, native tool bypass, nested shell or host-I/O workaround, repository-wide `**/*` scan for orientation, blocking PTC diagnostic, contradictory native-tool prompt guidance, wrong workspace, or incomplete turn. Non-blocking notes such as `PTC-N002` are recorded in the report and do not fail the acceptance. It is intentionally not part of `npm run check`; invoke it explicitly when a real Windows DSH + model credential is available.
 
 `npm run check` 使用 Node 原生 coverage runner 串行执行测试文件，避免并发子进程退出时
 丢失覆盖率数据；单个测试文件内的异步行为不受影响。它对 `index.js` 与 `internal/*.js`

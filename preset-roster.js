@@ -6,8 +6,6 @@ const PRESET_ROOT = Object.freeze({
   trust: 'system',
 })
 
-export const inject = ['agentPresets']
-
 export function mergePresetRosters(upstream, additions) {
   const ids = new Set(upstream.map(preset => preset.id))
   return [...upstream, ...additions.filter(preset => !ids.has(preset.id))]
@@ -15,7 +13,8 @@ export function mergePresetRosters(upstream, additions) {
 
 /** Add package-owned presets while leaving discovery and mounting with RC7. */
 export function apply(ctx) {
-  const service = ctx.agentPresets
+  const service = typeof ctx.get === 'function' ? ctx.get('agentPresets') : ctx.agentPresets
+  if (service === undefined) return
   const ownList = Object.getOwnPropertyDescriptor(service, 'list')
   const upstreamList = service.list.bind(service)
   let active = true

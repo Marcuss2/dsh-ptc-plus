@@ -30,6 +30,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.1",
+    "@deepseek-ai/dsh-tools": "0.1.0-rc.7",
     "@deepseek-ai/cordis-plugin-include": "1.0.6",
     "@deepseek-ai/dsh-agent-presets": "0.1.0-rc.7",
     "@deepseek-ai/dsh-agent-tool-presentation": "0.1.0-rc.7",
@@ -37,6 +38,7 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.1",
+    "@deepseek-ai/dsh-tools": "0.1.0-rc.7",
     "@deepseek-ai/cordis-plugin-include": "1.0.6",
     "@deepseek-ai/dsh-agent-presets": "0.1.0-rc.7",
     "@deepseek-ai/dsh-agent-tool-presentation": "0.1.0-rc.7",
@@ -44,7 +46,8 @@
   },
   "scripts": {
     "coverage": "node --test --experimental-test-module-mocks --experimental-test-coverage --test-concurrency=1 --test-coverage-include=\"index.js\" --test-coverage-include=\"internal/*.js\" --test-coverage-lines=100 --test-coverage-branches=95 --test-coverage-functions=100",
-    "check": "node --check index.js && node --check preset-roster.js && node --check omnipotent-preset.js && npm run coverage"
+    "check": "node --check index.js && node --check preset-roster.js && node --check omnipotent-preset.js && npm run coverage",
+    "test:expensive": "node scripts/expensive-headless-acceptance.mjs"
   },
   "keywords": [
     "deepseek-harness",

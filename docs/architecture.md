@@ -47,15 +47,23 @@ kernel-worker.js
 └── private MessageChannel
 ```
 
-插件不注册新的模型工具。原生 `run_code` 仍是唯一模型直接调用的 Code Mode 入口；程序内部使用 `workspace`、`code`、`host` 和条件性 `cordis` capability projection，契约见 [Program Capability Projection](capability-projection.md)。
+每次执行注入的 namespace global 及其 error class 名称是 runtime 保留 binding；`repl` 也始终保留。
+宽松重定义不适用于这些名称，顶层声明会在执行前按 binding collision 拒绝。其他名称若保存 capability
+namespace 或 member closure，只能在创建它的 execution lease 内使用；提示词因此要求直接引用每格重绑
+的 global，而不是把短租约 authority 写入持久 heap。保留名称从当前 request bindings 动态取得，不写死
+官方 capability roster。
+
+插件不注册新的模型工具。原生 `run_code` 仍是唯一模型直接调用的 Code Mode 入口；程序内部使用 `workspace`、`code`、`host` 和条件性 `cordis` capability projection，契约见 [Program Capability Projection](capability-projection.md)。`host` compatibility SDK 从公开 `ctx.tools.schemas(scope)` 生成按 capability name 分派的参数类型，不再把 native 参数退化为一个无结构的 `HostJson`；这仍是参数提示，不替代 native execution validation。
 
 ## Agent 指令
 
 系统提示首先建立执行模型，而不是罗列实现细节：模型直接发起的 `run_code` 是同一个 session REPL 的连续 cell，绝不是互相独立的脚本。随后只给出生成下一 cell 前必须知道的决策：复用已有语义 binding、默认宽松模式下顶层变量可自然重定义、通过当前 SDK 声明的 `workspace`/`code`/`host`/optional `cordis` capability 获取可重放外部输入、理解 direct Node/process capability 只改变冷恢复属性而不影响当前 live REPL，以及看到 `[PTC-...]` 后只按 `help` 修复失败部分。提示同时声明 `code.run` 可执行当前程序构造或转换的隔离源码，但不规定编辑算法。
 
-提示不得要求模型探测完整 namespace、维护编号别名、记录 journal id 或重发 setup source。这些都是 runtime 的 bookkeeping，转移给模型会破坏不搬运源码、不浪费 token 和不增加往返的不变量。
+提示还必须落实“programmatic”而不只是“可写代码”：相关且独立的观察应在一个 cell 中批量执行，并在 TypeScript 内过滤、组合和裁剪；只有后续确实会复用的值才进入顶层 binding，一次性中间量放在块作用域或直接返回。需要建立上下文时先联合读取少量已知权威入口文档与相关 manifest，已有证据足够时停止，不为了制造仓库清单而逐目录增加 `run_code` 往返。
 
-PTC Plus 在 `system-prompt/assemble` waterfall 的 `next()` 结果上不可变替换 model-visible `run_code` 的 tool description、`code.description` 和 `description.description`，其余字段全部保留。严格 PTC assembly 还以当前 scope 的可见 schemas 生成 program capability SDK，删除已适配 native guidance，并且不宣传 raw `tools.*` alias。该 listener 不修改注册表 definition。若 assembly 存在 `run_code` 但缺少预期的 object schema 或两个 string properties，则以 `ptc-plus: incompatible run_code schema` 失败，不能静默恢复 DSH 的 one-shot wording。PTC guidance section 使用 order 98，在 core order 99 的 Code Mode collapse 之前组装。
+提示不得要求模型探测完整 namespace、维护编号别名、记录 journal id 或重发 setup source。这些都是 runtime 的 bookkeeping，转移给模型会破坏不搬运源码、不浪费 token 和不增加往返的不变量。严格 PTC assembly 同时移除当前可见 native tool 的 guidance section；只有经过 program contract 翻译的 Cordis guidance 可以保留，避免模型看到 native tool 语法后跳回直接调用。
+
+PTC Plus 在 `system-prompt/assemble` waterfall 的 `next()` 结果上不可变替换 model-visible `run_code` 的 tool description、`code.description` 和 `description.description`，其余字段全部保留。严格 PTC assembly 还以当前 scope 的可见 schemas 生成 program capability SDK，移除 native tool guidance，并且不宣传 raw `tools.*` alias。该 listener 不修改注册表 definition。若 assembly 存在 `run_code` 但缺少预期的 object schema 或两个 string properties，则以 `ptc-plus: incompatible run_code schema` 失败，不能静默恢复 DSH 的 one-shot wording。PTC guidance section 使用 order 98，在 core order 99 的 Code Mode collapse 之前组装。
 
 ## RC7 公共扩展面
 
@@ -64,10 +72,16 @@ PTC Plus 在 `system-prompt/assemble` waterfall 的 `next()` 结果上不可变�
 - `tools/execute`：取得 owning agent/session，并包住一次真实 dispatch；
 - `CodeRuntime.run`：将属于 `run_code` 的程序路由到 session kernel；
 - 当前 `CodeRuntime.run` request bindings：不可变投影为 `workspace`、`code`、`host` 和条件性 `cordis` program namespaces；
-- `system-prompt/assemble`：不可变调整 detached `run_code` schema 与严格 PTC SDK，使模型只看到持久 cell 和 program capability 契约；
+- `system-prompt/assemble`：不可变调整 detached `run_code` schema 与严格 PTC SDK，使模型只看到持久 cell 和 program capability 契约；SDK 的 compatibility 参数来自当前公开 tool schema；
 - `run_code.output.presentationMeta`：把 tentative journal 投影到成功结果；
 - `tools/result`：观察 post-execute 与 content finalization 之后的冻结结果；
 - 标准 `tool/call` 与 `tool/result.meta`：提供持久日志。
+
+### Tool-call canonicalization boundary
+
+PTC Plus 不在当前 RC7 公共扩展面上拦截模型已经生成、但 Code Mode collapse 已拒绝的 `read`、`write` 或其他 native tool call。`tools/execute` 发生在该拒绝之后；在这里 monkey-patch dispatch 只能改变执行结果，不能同时改写 assistant tool-call、session `tool/call`、调用树和 durable replay，反而会制造不可恢复的审计分裂。
+
+因此当前版本只通过 capability projection 和通用 prompt contract 引导模型生成 `run_code`。未来若 RC7 提供位于 assistant response 落盘前的规范化 waterfall，插件可以在该公共边界实现保守白名单 canonicalization：保持同一 `callId`，把原始请求作为不可见 provenance，并将改写后的 `run_code` 交回同一治理与 journal 管线。该能力必须是显式配置项且默认开启；在获得这个公共 seam 之前，插件不伪造开关、不 patch DSH 私有实现，也不把未完成的兼容修复写成模型契约。
 
 错误结果由 `tools/execute` around hook 附加同一 journal。插件卸载时恢复原 runtime method 和 metadata projector。
 

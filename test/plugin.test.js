@@ -291,6 +291,8 @@ test('presents one coherent persistent REPL contract to the model', async (t) =>
   )
   assert.match(guidance, /session-bound REPL/)
   assert.match(guidance, /Reuse existing top-level bindings and do not resend setup source/)
+  assert.match(guidance, /batch related independent observations in one cell/)
+  assert.match(guidance, /one-off intermediates in a block/)
   assert.match(guidance, /Repeated top-level `const`\/`let` variable declarations replace existing bindings/)
   assert.match(guidance, /non-blocking `\[PTC-N002\]` note after an adjacent redeclaration/)
   assert.match(guidance, /Direct non-journalable Node\/process access changes only cold recovery/)
@@ -354,11 +356,51 @@ test('immutably adapts only the model-visible run_code schema wording', async (t
   assert.equal(adapted.tools[1].parameters.properties.description.maxLength, 80)
 })
 
-test('assembles one strict PTC capability grammar without the adapted native read face', async (t) => {
+test('assembles one strict PTC capability grammar with translated workspace faces', async (t) => {
   const state = fixture({}, {
     schemas: [
-      { name: 'read', description: 'Native read.', parameters: { type: 'object', properties: {} } },
-      { name: 'echo', description: 'Echo.', parameters: { type: 'object', properties: {} } },
+      {
+        name: 'read',
+        description: 'Native read.',
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            file_path: { type: 'string' },
+            offset: { type: 'integer' },
+          },
+          required: ['file_path'],
+        },
+      },
+      {
+        name: 'echo',
+        description: 'Echo.',
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: { message: { type: 'string' } },
+          required: ['message'],
+        },
+      },
+      {
+        name: 'glob',
+        description: 'Find files by path pattern.',
+        parameters: {
+          type: 'object',
+          properties: { pattern: { type: 'string' }, path: { type: 'string' } },
+          required: ['pattern'],
+        },
+      },
+      { name: 'get_goal', parameters: { type: 'object', properties: {} } },
+      {
+        name: 'update_goal',
+        parameters: {
+          type: 'object',
+          properties: { goal_id: { type: 'string', description: 'Exact id returned by get_goal.' } },
+          required: ['goal_id'],
+        },
+      },
+      { name: 'job_output', parameters: { type: 'object', properties: { job_id: { type: 'string' } } } },
     ],
   })
   t.after(() => state.dispose())
@@ -366,6 +408,15 @@ test('assembles one strict PTC capability grammar without the adapted native rea
     sections: [
       { name: 'tools:code-only', text: 'Only run_code is direct.' },
       { name: 'tool:read', text: 'Use the read tool.' },
+      { name: 'tool:echo', text: 'Use the echo tool.' },
+      {
+        name: 'tool:glob',
+        text: 'Use the glob tool — not shell find — to discover files. A pattern with no "/" matches basenames at any depth, so "*" matches every file in the tree rather than its top level.',
+      },
+      {
+        name: 'rules',
+        text: 'Use the read tool when inspecting files. Call get_goal before update_goal. Collect with job_output. Use goal tools for long-running work.\nKeep this rule.',
+      },
       { name: 'tools:sdk', text: 'declare const tools: unknown' },
     ],
     contexts: [],
@@ -375,13 +426,58 @@ test('assembles one strict PTC capability grammar without the adapted native rea
   const adapted = await state.assemble(assembly, { scope: { id: 'strict-agent' } })
   assert.deepEqual(adapted.tools.map(tool => tool.name), ['run_code'])
   assert.equal(adapted.sections.some(section => section.name === 'tool:read'), false)
+  assert.equal(adapted.sections.some(section => section.name === 'tool:echo'), false)
+  assert.match(adapted.sections.find(section => section.name === 'tool:glob').text, /Use `workspace\.findFiles`.*not shell find/)
+  assert.doesNotMatch(adapted.sections.find(section => section.name === 'tool:glob').text, /glob tool/)
+  assert.match(adapted.sections.find(section => section.name === 'tool:glob').text, /pattern with no "\/" matches only the selected root/)
+  assert.equal(adapted.sections.some(section => section.name === 'rules'), true)
+  const rules = adapted.sections.find(section => section.name === 'rules').text
+  assert.doesNotMatch(rules, /read tool|Call get_goal|before update_goal|with job_output/i)
+  assert.match(rules, /`host\.invoke` capability "read"/)
+  assert.match(rules, /`host\.invoke` capability "get_goal"/)
+  assert.match(rules, /`host\.invoke` capability "update_goal"/)
+  assert.match(rules, /`host\.invoke` capability "job_output"/)
+  assert.match(rules, /goal capabilities/)
   const sdk = adapted.sections.find(section => section.name === 'tools:sdk').text
   assert.match(sdk, /declare const workspace:/)
+  assert.match(sdk, /declare const repl:/)
+  assert.match(sdk, /action: "save" \| "delete"; name: string/)
+  assert.match(sdk, /names: string\[\]; mode: "durable" \| "volatile"/)
   assert.match(sdk, /readLines\(args: \{ path: string; offset\?: number; limit\?: number \}\)/)
+  assert.match(sdk, /findFiles\(args: \{ pattern: string; root\?: string \}\): Promise<WorkspaceFiles>/)
+  assert.match(sdk, /narrow root-level name pattern/)
+  assert.match(sdk, /never guess an offset/)
+  assert.match(sdk, /return \{ text: page\.lines\.map\(line => line\.text\)\.join\("\\n"\), totalLines: page\.totalLines \}/)
+  assert.match(sdk, /accepts a regular file path, not a directory/)
+  assert.match(sdk, /read a small set of authoritative entry documents together in one cell/)
   assert.match(sdk, /declare const code:/)
   assert.match(sdk, /declare const host:/)
-  assert.match(sdk, /type HostCapabilityName = "echo" \| "read"/)
-  assert.doesNotMatch(sdk, /declare const tools:|tools\.read|Use the read tool/)
+  assert.match(sdk, /interface HostCapabilityArgs/)
+  assert.match(sdk, /"echo"/)
+  assert.match(sdk, /"read"/)
+  assert.match(sdk, /"glob"/)
+  assert.match(sdk, /Exact id returned by `host\.invoke` capability "get_goal"/)
+  assert.match(sdk, /file_path: string/)
+  assert.match(sdk, /message: string/)
+  assert.match(sdk, /type HostCapabilityName = keyof HostCapabilityArgs/)
+  assert.doesNotMatch(sdk, /declare const tools:|tools\.read|Use the read tool|returned by get_goal/)
+})
+
+test('fails closed on incompatible native glob guidance', async (t) => {
+  const state = fixture({}, { schemas: [{ name: 'glob' }] })
+  t.after(() => state.dispose())
+  const base = {
+    contexts: [], variables: {}, tools: [state.runCodeDefinition],
+    sections: [{ name: 'tools:sdk', text: 'native sdk' }],
+  }
+  await assert.rejects(state.assemble({
+    ...base,
+    sections: [{ name: 'tool:glob', text: null }, ...base.sections],
+  }), /incompatible glob guidance; expected rendered text/)
+  await assert.rejects(state.assemble({
+    ...base,
+    sections: [{ name: 'tool:glob', text: 'Use the Glob tool.' }, ...base.sections],
+  }), /incompatible glob guidance; native API reference remains/)
 })
 
 test('advertises cordis only for the exact known creator binding profile', async (t) => {
@@ -427,7 +523,8 @@ test('advertises cordis only for the exact known creator binding profile', async
   const partialProjection = await partial.assemble(assembly(partial))
   const partialSdk = partialProjection.sections.find(section => section.name === 'tools:sdk').text
   assert.doesNotMatch(partialSdk, /declare const cordis:/)
-  assert.match(partialSdk, /type HostCapabilityName = "cordis_define"/)
+  assert.match(partialSdk, /type HostCapabilityName = keyof HostCapabilityArgs/)
+  assert.match(partialSdk, /"cordis_define"/)
   assert.match(partialSdk, /"cordis_inspect_query"/)
   assert.match(partialSdk, /"cordis_run"/)
   assert.equal(partialProjection.sections.some(section => section.name === 'tool:cordis'), false)
@@ -444,7 +541,7 @@ test('advertises cordis only for the exact known creator binding profile', async
   const futureProjection = await future.assemble(assembly(future))
   const futureSdk = futureProjection.sections.find(section => section.name === 'tools:sdk').text
   assert.doesNotMatch(futureSdk, /declare const cordis:/)
-  assert.match(futureSdk, /type HostCapabilityName = "cordis_define"/)
+  assert.match(futureSdk, /type HostCapabilityName = keyof HostCapabilityArgs/)
   assert.match(futureSdk, /"cordis_future"/)
   assert.equal(futureProjection.sections.some(section => section.name === 'tool:cordis'), false)
 
@@ -576,6 +673,19 @@ return { repeatedValue, addedAfterReplace, repeatedLabel }
       addedAfterReplace: 41,
       repeatedLabel: 'first-second',
     },
+  })
+})
+
+test('keeps injected capability namespaces reserved in loose mode', async (t) => {
+  const state = fixture()
+  t.after(() => state.dispose())
+
+  const observed = await state.run('reserved-capability-binding', 'const { host } = globalThis')
+  assert.equal(observed.error?.kind, 'exception')
+  assert.match(observed.error?.message, /error\[PTC-N001\]: top-level bindings already exist: host/)
+  assert.deepEqual(await state.run('reserved-capability-binding', 'return typeof host.invoke'), {
+    logs: [],
+    value: 'function',
   })
 })
 
@@ -781,17 +891,27 @@ test('projects read and compatibility bindings through one governed host call', 
       calls.push(['echo', args])
       return args
     },
+    async glob(args) {
+      calls.push(['glob', args])
+      return { root: args.path ?? '.', paths: ['README.md', 'docs/architecture.md'] }
+    },
   }
   const observed = await state.executeRun('capability-projection', `
 const page = await workspace.readLines({ path: 'src/a.ts', offset: 2, limit: 1 })
+const found = await workspace.findFiles({ pattern: 'docs/**/*.md', root: '.' })
+const allReadmes = await workspace.findFiles({ pattern: 'README.md' })
+const rootFiles = await workspace.findFiles({ pattern: '*' })
 const nativePage = await host.invoke({ name: 'read', args: { file_path: 'src/raw.ts', limit: 1 } })
 const echoed = await host.invoke({ name: 'echo', args: { value: 7 } })
-return { page, nativePage, echoed, rawTools: typeof tools }
+return { page, found, allReadmes, rootFiles, nativePage, echoed, rawTools: typeof tools }
 `, functions, {})
   assert.deepEqual(observed.raw, {
     logs: [],
     value: {
       page: { path: 'src/a.ts', offset: 2, lines: [{ number: 2, text: 'line' }], totalLines: 3 },
+      found: { root: '.', files: ['README.md', 'docs/architecture.md'] },
+      allReadmes: { root: '.', files: ['README.md', 'docs/architecture.md'] },
+      rootFiles: { root: '.', files: ['README.md', 'docs/architecture.md'] },
       nativePage: { path: 'src/raw.ts', offset: 1, lines: [{ number: 2, text: 'line' }], totalLines: 3 },
       echoed: { value: 7 },
       rawTools: 'undefined',
@@ -799,11 +919,17 @@ return { page, nativePage, echoed, rawTools: typeof tools }
   })
   assert.deepEqual(calls, [
     ['read', { file_path: 'src/a.ts', offset: 2, limit: 1 }],
+    ['glob', { pattern: 'docs/**/*.md', path: '.' }],
+    ['glob', { pattern: '/README.md' }],
+    ['glob', { pattern: '/*' }],
     ['read', { file_path: 'src/raw.ts', limit: 1 }],
     ['echo', { value: 7 }],
   ])
   assert.deepEqual(observed.result.meta.dshPtcPlus.calls.map(call => [call.global, call.member]), [
     ['workspace', 'readLines'],
+    ['workspace', 'findFiles'],
+    ['workspace', 'findFiles'],
+    ['workspace', 'findFiles'],
     ['host', 'invoke'],
     ['host', 'invoke'],
   ])
@@ -2963,7 +3089,7 @@ test('rejects unsupported runtimes and invalid limits', () => {
   }, { durableReplay: 'yes' }), /durableReplay must be a boolean/)
 })
 
-test('rejects malformed projected adapter requests and read results', async (t) => {
+test('rejects malformed projected adapter requests and workspace results', async (t) => {
   const state = fixture()
   t.after(() => state.dispose())
   const programs = [
@@ -2971,12 +3097,17 @@ test('rejects malformed projected adapter requests and read results', async (t) 
     'return workspace.readLines({ path: "" })',
     'return workspace.readLines({ path: "a", offset: 0 })',
     'return workspace.readLines({ path: "a", limit: 1.5 })',
+    'return workspace.findFiles(null)',
+    'return workspace.findFiles({ pattern: "" })',
+    'return workspace.findFiles({ pattern: "*", root: "" })',
+    'return workspace.findFiles({ pattern: "*", extra: true })',
     'return host.invoke({ name: "", args: {} })',
     'return host.invoke({ name: "missing", args: {} })',
   ]
   for (const [index, program] of programs.entries()) {
     const observed = await state.run(`adapter-invalid-${index}`, program, {
       read: async () => ({ path: 'a', offset: 1, lines: [], totalLines: 0 }),
+      glob: async () => ({ root: '.', paths: [] }),
     })
     assert.equal(observed.error.kind, 'exception')
   }
@@ -2993,6 +3124,21 @@ test('rejects malformed projected adapter requests and read results', async (t) 
     const observed = await state.run(`read-result-invalid-${index}`, 'return workspace.readLines({ path: "a" })', {
       read: async () => outcome,
     })
+    assert.equal(observed.error.kind, 'exception')
+  }
+
+  const globOutcomes = [
+    { root: '', paths: [] },
+    { root: '.', paths: null },
+    { root: '.', paths: [''] },
+    { root: '.', paths: [], extra: true },
+  ]
+  for (const [index, outcome] of globOutcomes.entries()) {
+    const observed = await state.run(
+      `glob-result-invalid-${index}`,
+      'return workspace.findFiles({ pattern: "README.md" })',
+      { glob: async () => outcome },
+    )
     assert.equal(observed.error.kind, 'exception')
   }
 })

@@ -558,7 +558,17 @@ function rewriteCellReturns(code) {
   return rewritten
 }
 
-function prepareProgram(program, knownBindings, looseTopLevelRedeclarations) {
+function reservedBindingNames(bindings) {
+  const names = new Set(['repl'])
+  if (!Array.isArray(bindings)) return names
+  for (const namespace of bindings) {
+    if (typeof namespace?.global === 'string') names.add(namespace.global)
+    if (typeof namespace?.errorClass?.name === 'string') names.add(namespace.errorClass.name)
+  }
+  return names
+}
+
+function prepareProgram(program, knownBindings, looseTopLevelRedeclarations, reservedBindings = new Set()) {
   if (typeof program !== 'string') throw new TypeError('ptc-plus: program must be a string')
   const wrapped = STRIP_PREFIX + program + STRIP_SUFFIX
   let stripped
@@ -588,6 +598,16 @@ function prepareProgram(program, knownBindings, looseTopLevelRedeclarations) {
       /* c8 ignore next */
       ...(declaration.span?.end === undefined ? {} : { end: declaration.span.end }),
     })
+  const reserved = declarations.filter(declaration => reservedBindings.has(declaration.name))
+  if (reserved.length > 0) {
+    const classification = classifyDurability(code, knownBindings)
+    return {
+      code,
+      ...classification,
+      collisions: reserved.map(collisionFor),
+      redeclared: [],
+    }
+  }
   let executableCode = code
   let collisions
   const redeclared = []
@@ -829,7 +849,12 @@ class SessionKernel {
             throw new Error('cell replay produced a different semantic failure')
           }
         }
-        const prepared = prepareProgram(node.code, this.knownBindings, node.journal.bindingMode === 'loose')
+        const prepared = prepareProgram(
+          node.code,
+          this.knownBindings,
+          node.journal.bindingMode === 'loose',
+          reservedBindingNames(request.bindings),
+        )
         for (const name of prepared.declared) this.knownBindings.add(name)
         this.lastDeclarations = new Set(prepared.declared)
       }
@@ -909,7 +934,12 @@ class SessionKernel {
       looseTopLevelRedeclarations = replayRecord === undefined
         ? this.config.looseTopLevelRedeclarations
         : replayRecord.bindingMode === 'loose'
-      prepared = prepareProgram(request.program, this.knownBindings, looseTopLevelRedeclarations)
+      prepared = prepareProgram(
+        request.program,
+        this.knownBindings,
+        looseTopLevelRedeclarations,
+        reservedBindingNames(request.bindings),
+      )
     } catch (error) {
       const result = { logs: [], error: { kind: 'exception', message: messageOf(error) } }
       const failure = error instanceof PreflightError ? preflightDiagnostic(error) : parseDiagnostic(error, request.program)
