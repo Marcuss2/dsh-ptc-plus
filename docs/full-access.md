@@ -13,7 +13,7 @@ ptc
 omnipotent
   = Code/PTC presentation
   + danger-full-access / never
-  + official Cordis inspect/creator bindings
+  + deduplicated standard / Cordis / minimal tool union
   + Host/Client Cordis runner and Inspect Providers
 ```
 
@@ -28,10 +28,21 @@ service 实现。decorator 卸载时仅在包装仍归自己所有时恢复原�
 decorator 不再组合，附加 discovery 不再存在，因此
 `omnipotent` 与插件一起出现、一起消失，不向 `$DSH_HOME/.agent-presets` 写旁路副本。
 
-`omnipotent` 不复制当前 RC7 的长 roster。它在 mount 时通过公开
-`agentPresets.resolve("cordis")` 取得当前官方创造模式 composition，以只读 Include 完整继承，
-再插入 Code/PTC presentation。这样官方 preset 增减工具、skills 或 runner 时，全能模式自动获得
-同一集合，不维护易漂移的源码副本。该 preset 的 scoped plugin 在 agent 创建及空 session 切入时
+`omnipotent` 不复制、解析或二次 mount 当前 RC7 的长 roster。它在 mount 时通过公开
+`agentPresets.mount(ctx, "cordis")` 让全能 standing composition 加入官方创造模式的唯一 standing mount。父链因而是
+`cordis -> omnipotent -> agent`，且由宿主 `agentPresets` service 持有真实 scope 实例；社区插件不直接导入 `dsh-scope`，避免开发链接安装与打包安装产生不同模块实例后读不到宿主 scope 标记。因此官方
+工具、prompt、skills 和 scoped listeners 原位继承，进程级 Cordis Inspect Provider 不会被重复注册；
+无论此前空 session 来自 `standard`、`code` 还是 `cordis`，切换都复用同一个官方 standing mount。
+全能 scope 自身只调用 `tools.presentAs("code")` 选择 Code/PTC presentation。随后通过公开
+`agentPresets.standingKeyFor()` 为官方 `cordis`、
+`standard`、`minimal` standing composition 取得 scope，以 `tools.schemas(scope)` 和
+`tools.get(name, scope)` 动态读取真实 definition；同时以已继承的官方 `cordis` scope 作为可见基线，
+按 tool name 去重后只注册缺项。省略 `tools.get`/`tools.schemas` 的
+scope 参数表示全局视图，绝不能用来判断当前 preset 是否已继承同名 scoped definition。创造模式优先，
+标准模式补充，极简模式只补充尚未出现的工具；不解析 YAML、不维护工具名表，也不根据测试 fixture
+猜 schema。这样官方 preset 增减工具时，全能模式及下一次 prompt 的 capability SDK 自动取得新集合。
+这些 standing mount 不创建 agent、session 或 turn；tool definition 的执行 closure 仍由原官方 plugin
+拥有，DSH policy/scheduler 仍是唯一 dispatch 路径。该 preset 的 scoped plugin 在 agent 创建及空 session 切入时
 调用官方 `permissionPresets.set(session, "danger-full-access")`，把 sandbox 与 approval 原子设置为
 `danger-full-access / never`。权限事实仍按 RC7 约定写入 session log；插件移除不会伪造逆向日志。
 

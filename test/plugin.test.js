@@ -312,6 +312,45 @@ test('presents one coherent persistent REPL contract to the model', async (t) =>
   assert.equal(state.sections[0].text({}), '')
 })
 
+test('canonicalizes hallucinated native and program tool calls before dispatch', async (t) => {
+  const state = fixture({}, {
+    schemas: [
+      { name: 'read', parameters: { type: 'object' } },
+      { name: 'write', parameters: { type: 'object' } },
+      { name: 'skill', parameters: { type: 'object' } },
+    ],
+  })
+  t.after(() => state.dispose())
+  const session = { id: 'canonical-session' }
+  await state.assemble({
+    sections: [], contexts: [], variables: {}, tools: [state.runCodeDefinition],
+  }, { agent: { id: 'agent', session }, scope: { id: 'scope' } })
+  const source = [{
+    type: 'tool-call-delta', index: 0, id: 'phantom', name: 'host.invoke',
+    argumentsDelta: JSON.stringify({ name: 'skill', args: { name: 'example-skill' } }),
+  }]
+  const stream = state.listeners.get('llm/stream')[0]
+  const result = []
+  for await (const chunk of stream({
+    sessionId: session.id,
+    tools: [{ name: 'run_code' }],
+  }, async function* () { yield* source })) result.push(chunk)
+  assert.equal(result[0].name, 'run_code')
+  assert.equal(result[0].id, 'phantom')
+  const args = JSON.parse(result[0].argumentsDelta)
+  assert.match(args.code, /host\.invoke/)
+})
+
+test('can disable tool-call canonicalization without changing the stream', async (t) => {
+  const state = fixture({ canonicalizeToolCalls: false })
+  t.after(() => state.dispose())
+  const stream = state.listeners.get('llm/stream')[0]
+  const source = [{ type: 'tool-call-delta', index: 0, id: 'raw', name: 'read', argumentsDelta: '{}' }]
+  const result = []
+  for await (const chunk of stream({ sessionId: 'disabled', tools: [{ name: 'run_code' }] }, async function* () { yield* source })) result.push(chunk)
+  assert.deepEqual(result, source)
+})
+
 test('immutably adapts only the model-visible run_code schema wording', async (t) => {
   const state = fixture()
   t.after(() => state.dispose())
@@ -3087,6 +3126,10 @@ test('rejects unsupported runtimes and invalid limits', () => {
     ...base,
     codeRuntime: { language: 'typescript', run() {} },
   }, { durableReplay: 'yes' }), /durableReplay must be a boolean/)
+  assert.throws(() => apply({
+    ...base,
+    codeRuntime: { language: 'typescript', run() {} },
+  }, { canonicalizeToolCalls: 'yes' }), /canonicalizeToolCalls must be a boolean/)
 })
 
 test('rejects malformed projected adapter requests and workspace results', async (t) => {

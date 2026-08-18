@@ -51,9 +51,11 @@ cell 始终按完整 async function body 解释，不采用 Node 终端 REPL 对
 | `PTC-X001` | cell 执行中的未捕获异常 | 抛出前的变更可能已经生效 |
 | `PTC-R002` | 冷恢复跳过历史 volatile/unconfirmed 后缀 | 回到最后可信 durable head |
 
-出现诊断时只按 `help:` 修复失败部分，不要重发整个 cell，也不要重建已经存在的环境。`PTC-V001` 是持久性状态通知而非执行失败；除非确实要放弃 live 后缀并回到可冷恢复状态，否则继续复用当前 binding 即可。源码位置使用无 ANSI 的 code frame；完整诊断契约见 [架构说明](docs/architecture.md#诊断契约)。插件安装后提供随插件共同出现和消失的“全能模式” system preset：完整继承当前官方创造模式能力，附加 Code/PTC 与 `danger-full-access / never`。已知 Cordis contract 使用 `cordis.*` 强类型翻译，其余当前可见 binding 仍可通过 `host.invoke` 使用；边界见 [Full-access composition](docs/full-access.md)。
+出现诊断时只按 `help:` 修复失败部分，不要重发整个 cell，也不要重建已经存在的环境。`PTC-V001` 是持久性状态通知而非执行失败；除非确实要放弃 live 后缀并回到可冷恢复状态，否则继续复用当前 binding 即可。源码位置使用无 ANSI 的 code frame；完整诊断契约见 [架构说明](docs/architecture.md#诊断契约)。插件安装后提供随插件共同出现和消失的“全能模式” system preset：完整继承当前官方创造模式，并从官方创造、标准、极简 standing scope 动态提取、按名称去重其真实 tool definitions，附加 Code/PTC 与 `danger-full-access / never`；不维护工具名或 schema 副本。已知 Cordis contract 使用 `cordis.*` 强类型翻译，其余当前可见 binding 仍可通过 `host.invoke` 使用；边界见 [Full-access composition](docs/full-access.md)。
 
 PTC Plus 还通过 RC7 的 `system-prompt/assemble` 公共 waterfall，把模型可见的 `run_code` schema 改写为“下一 REPL cell”语义；注册表中的原始 tool definition 保持只读，其他 schema 字段原样保留。严格 PTC 的 compatibility SDK 从当前公开 tool schema 生成每个 capability 的参数形状，并移除 native tool guidance，避免模型因看见 `read`/`write` 语法而跳回直接调用；宿主结构不兼容时 prompt assembly 直接失败而不回退到误导性的一次性程序描述。
+
+在严格 PTC 请求中，插件还通过 RC7 公共 `llm/stream` waterfall 做保守的 tool-call canonicalization（`canonicalizeToolCalls: true`，可关闭）。如果模型仍把当前 session 确实可见的 native capability，或程序内的 `host.invoke`、`workspace.*`、`code.run`、`repl.state` 错当成外层工具，插件会在 assistant message 落盘和 dispatch 前将其改写为同一 `callId` 的 block-scoped `run_code` cell。canonicalizer 使用当前 `ctx.tools.schemas(scope)` 的完整动态 schema 映射，不内置官方工具名或参数副本；native 参数原样进入 `host.invoke`，因此官方新增工具和字段自动适配。仅精确匹配当前 `read`/`glob` program contract 的请求升级为已翻译的 `workspace.*`，不匹配时仍无损透传。这样 UI、session log、调用树和 REPL 都只看到规范化后的程序事实；未知工具、不完整参数、非法 JSON 或非严格 PTC 请求不会被猜测或吞掉。
 
 ## 源码元编程
 
@@ -209,6 +211,8 @@ The default check never contacts a model. To run the manual end-to-end acceptanc
 ```sh
 npm run test:expensive
 ```
+
+Set `DSH_PTC_ACCEPTANCE_PRESET=omnipotent` to run the same gate against the package-owned full-access preset; the default is the official `code` preset.
 
 This packs and installs the current checkout into the `headless` profile, enables the profile's official Code/PTC entry through `DSH_TOOLS_MODE=code`, pins the preferred model through a temporary overlay, runs `介绍本项目` from this repository as the workspace, and keeps the complete stdout/stderr, decompressed session log, and analysis report under `artifacts/expensive/<run>/`. The test fails on any tool error, unmatched tool call/result, native tool bypass, nested shell or host-I/O workaround, repository-wide `**/*` scan for orientation, blocking PTC diagnostic, contradictory native-tool prompt guidance, wrong workspace, or incomplete turn. Non-blocking notes such as `PTC-N002` are recorded in the report and do not fail the acceptance. It is intentionally not part of `npm run check`; invoke it explicitly when a real Windows DSH + model credential is available.
 

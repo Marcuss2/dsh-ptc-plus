@@ -1,8 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { pathToFileURL } from 'node:url'
-import { Include } from '@deepseek-ai/cordis-plugin-include'
-import { apply as applyOmnipotent } from '../omnipotent-preset.js'
+import { apply as applyOmnipotent, composeOmnipotent, projectOfficialToolUnion } from '../omnipotent-preset.js'
 import { apply as applyRoster, mergePresetRosters } from '../preset-roster.js'
 
 test('adds one package-owned system preset through the official dynamic roster', async () => {
@@ -22,7 +20,7 @@ test('adds one package-owned system preset through the official dynamic roster',
   })), [{
     id: 'omnipotent',
     name: '全能模式',
-    description: '完整继承当前官方创造模式能力，并以 PTC REPL 和无审批全权限运行。',
+    description: '动态合并官方标准、创造和极简模式工具，并以 PTC REPL 和无审批全权限运行。',
     order: 5,
     trust: 'system',
     broken: undefined,
@@ -60,12 +58,36 @@ test('becomes a passthrough when a later roster decorator owns teardown', async 
 test('mounts the current official Cordis composition as code with full permission', async () => {
   const listeners = new Map()
   const permissionCalls = []
-  let mounted
+  const registered = []
+  const presentationCalls = []
+  const mounted = []
+  const scopes = Object.fromEntries(['omnipotent', 'cordis', 'standard', 'minimal'].map(id => [id, { id }]))
+  const names = {
+    omnipotent: ['read', 'cordis_define'],
+    cordis: ['read', 'cordis_define'],
+    standard: ['read', 'write'],
+    minimal: ['run_code', 'bash', 'str_replace_editor'],
+  }
   const ctx = {
     agentPresets: {
-      async resolve(id) {
-        assert.equal(id, 'cordis')
-        return { id, path: '/official/cordis/agent.cordis.yml' }
+      async mount(target, id) {
+        mounted.push([target, id])
+      },
+      async standingKeyFor(id) { return scopes[id] },
+    },
+    tools: {
+      schemas(scope) { return names[scope.id].map(name => ({ name })) },
+      get(name, scope) {
+        if (scope === undefined) return undefined
+        return names[scope.id].includes(name) ? { name, source: scope.id } : undefined
+      },
+      register(definition) {
+        registered.push(definition)
+        return () => {}
+      },
+      presentAs(mode) {
+        presentationCalls.push(mode)
+        return () => {}
       },
     },
     permissionPresets: {
@@ -76,24 +98,14 @@ test('mounts the current official Cordis composition as code with full permissio
     on(name, listener) {
       listeners.set(name, listener)
     },
-    async plugin(plugin, config) {
-      mounted = { plugin, config }
-    },
   }
 
-  await applyOmnipotent(ctx)
-  assert.equal(mounted.plugin.prototype instanceof Include, true)
-  assert.equal(mounted.plugin.prototype.write(), undefined)
-  assert.deepEqual(mounted.config, {
-    path: pathToFileURL('/official/cordis/agent.cordis.yml').href,
-    patches: [{
-      insert: [{
-        id: 'tool-presentation',
-        name: '@deepseek-ai/dsh-agent-tool-presentation',
-        config: { mode: 'code' },
-      }],
-    }],
-  })
+  await composeOmnipotent(ctx)
+  assert.deepEqual(mounted, [[ctx, 'cordis']])
+  assert.deepEqual(presentationCalls, ['code'])
+  assert.deepEqual(registered.map(definition => definition.name), [
+    'write', 'bash', 'str_replace_editor',
+  ])
 
   const createdSession = { id: 'created' }
   listeners.get('agent/created')({ agent: { session: createdSession } })
@@ -121,12 +133,40 @@ test('mounts the current official Cordis composition as code with full permissio
   ])
 })
 
-test('refuses to mount a broken official Cordis preset', async () => {
-  const ctx = {
-    agentPresets: { resolve: async () => ({ broken: 'invalid composition' }) },
-    permissionPresets: {},
-    on() { throw new Error('listeners must not register') },
-    plugin() { throw new Error('composition must not mount') },
-  }
-  await assert.rejects(applyOmnipotent(ctx), /official cordis preset is broken: invalid composition/)
+test('fails closed when an official schema cannot resolve its definition', async () => {
+  const scopes = { cordis: {}, standard: {}, minimal: {} }
+  await assert.rejects(projectOfficialToolUnion({
+    agentPresets: { async standingKeyFor(id) { return scopes[id] } },
+    tools: {
+      schemas(scope) { return scope === scopes.cordis ? [{ name: 'missing' }] : [] },
+      get() { return undefined },
+      register() { throw new Error('must not register an unresolved definition') },
+    },
+  }, {}), /official cordis tool schema "missing" has no definition/)
+})
+
+test('does not duplicate definitions already visible through the inherited scope', async () => {
+  const scope = { id: 'cordis' }
+  const definition = { name: 'read', source: 'existing' }
+  const registered = []
+  await projectOfficialToolUnion({
+    agentPresets: { async standingKeyFor() { return scope } },
+    tools: {
+      schemas(requestedScope) {
+        return requestedScope === scope ? [{ name: 'read' }] : []
+      },
+      get(name, requestedScope) {
+        return requestedScope === scope ? { name, source: 'official' } : definition
+      },
+      register(value) { registered.push(value); return () => {} },
+    },
+  }, scope)
+  assert.deepEqual(registered, [])
+})
+
+test('fails closed when the official composition cannot join the preset context', async () => {
+  const failure = new Error('unscoped composition')
+  await assert.rejects(applyOmnipotent({
+    agentPresets: { async mount() { throw failure } },
+  }), error => error === failure)
 })

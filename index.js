@@ -11,6 +11,7 @@ import { jsonSchemaToTs } from '@deepseek-ai/dsh-tools'
 import { SessionRuntime } from './internal/session-runtime.js'
 import { JOURNAL_KEY, journalsEqual, withJournal } from './internal/session-journal.js'
 import { decodeValue, encodeValue, isPlainJsonTree } from './internal/value-wire.js'
+import { canonicalizeToolCallStream } from './internal/tool-call-canonicalizer.js'
 
 const RUN_CODE = 'run_code'
 const DEFAULT_MAX_NESTED_RUN_CODE_DEPTH = 8
@@ -34,7 +35,7 @@ const RUN_CODE_DESCRIPTION_DESCRIPTION = 'Short active-voice summary of what thi
 export const name = 'ptc-plus'
 
 /** Services required by the plugin. */
-export const inject = ['tools', 'codeRuntime', 'systemPrompt']
+export const inject = ['tools', 'codeRuntime', 'systemPrompt', 'llm']
 
 function replGuidance(looseTopLevelRedeclarations, durableReplay) {
   const redeclaration = looseTopLevelRedeclarations
@@ -713,7 +714,15 @@ export function apply(ctx, config = {}) {
   if (!Number.isSafeInteger(maxNestedRunCodeDepth) || maxNestedRunCodeDepth < 1) {
     throw new TypeError('ptc-plus: maxNestedRunCodeDepth must be a positive safe integer')
   }
-  const { maxNestedRunCodeDepth: _nestedDepth, ...sessionConfig } = config
+  const {
+    maxNestedRunCodeDepth: _nestedDepth,
+    canonicalizeToolCalls: _canonicalizeToolCalls,
+    ...sessionConfig
+  } = config
+  const canonicalizeToolCalls = config.canonicalizeToolCalls ?? true
+  if (typeof canonicalizeToolCalls !== 'boolean') {
+    throw new TypeError('ptc-plus: canonicalizeToolCalls must be a boolean')
+  }
   const looseTopLevelRedeclarations = config.looseTopLevelRedeclarations ?? true
   const scope = new AsyncLocalStorage()
   const sessions = new SessionRuntime({
@@ -733,6 +742,7 @@ export function apply(ctx, config = {}) {
   const upstreamRun = runtime.run
   const patchedDefinitions = new Map()
   const pending = new WeakMap()
+  const canonicalSessions = new Map()
 
   const projectBindings = (request, depth, executionToken, inheritedTools = undefined) => {
     const lease = { active: true }
@@ -956,8 +966,17 @@ export function apply(ctx, config = {}) {
     const schemas = strictPtc && typeof ctx.tools.schemas === 'function'
       ? ctx.tools.schemas(context.scope)
       : []
-    const names = schemas.map(schema => schema?.name).filter(name => typeof name === 'string')
-    const hasGlob = names.includes('glob')
+    const nativeSchemas = new Map(
+      schemas
+        .filter(schema => typeof schema?.name === 'string' && schema.name !== RUN_CODE)
+        .map(schema => [schema.name, schema]),
+    )
+    const assemblySession = context?.agent?.session?.id ?? context?.session?.id ?? context?.agent?.id
+    if (strictPtc && assemblySession !== undefined) {
+      canonicalSessions.set(String(assemblySession), nativeSchemas)
+    }
+    const names = [...nativeSchemas.keys()]
+    const hasGlob = nativeSchemas.has('glob')
     const hasCordis = supportsCordisProfile(names)
     const hasCordisGuidance = assembly.sections?.some(section => section?.name === 'tool:cordis') === true
     if (hasCordis && !hasCordisGuidance) {
@@ -982,6 +1001,17 @@ export function apply(ctx, config = {}) {
             return text === '' && typeof section?.text === 'string' ? [] : [{ ...section, ...(text === section?.text ? {} : { text }) }]
           }),
     }
+  })
+
+  ctx.on('llm/stream', (options, next) => {
+    if (!canonicalizeToolCalls || options?.sessionId === undefined) return next()
+    const nativeSchemas = canonicalSessions.get(String(options.sessionId))
+    if (nativeSchemas === undefined) return next()
+    return canonicalizeToolCallStream(next(), {
+      enabled: true,
+      tools: options.tools,
+      nativeSchemas,
+    })
   })
 
   ctx.on('tools/execute', (exec, next) => {
@@ -1020,9 +1050,12 @@ export function apply(ctx, config = {}) {
   })
 
   ctx.on('agent/disposed', ({ agent }) => {
+    const id = sessionId(agent)
+    if (id !== undefined) canonicalSessions.delete(id)
     return sessions.disposeSession(sessionId(agent) ?? String(agent.id))
   })
   ctx.on('session/disposed', (session) => {
+    canonicalSessions.delete(String(session.id))
     return sessions.disposeSession(String(session.id))
   })
 
@@ -1037,6 +1070,7 @@ export function apply(ctx, config = {}) {
       else output.presentationMeta = original
     }
     patchedDefinitions.clear()
+    canonicalSessions.clear()
     await sessions.dispose()
   }, 'ptc-plus session runtime teardown')
 }

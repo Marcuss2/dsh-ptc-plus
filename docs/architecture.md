@@ -79,9 +79,7 @@ PTC Plus 在 `system-prompt/assemble` waterfall 的 `next()` 结果上不可变�
 
 ### Tool-call canonicalization boundary
 
-PTC Plus 不在当前 RC7 公共扩展面上拦截模型已经生成、但 Code Mode collapse 已拒绝的 `read`、`write` 或其他 native tool call。`tools/execute` 发生在该拒绝之后；在这里 monkey-patch dispatch 只能改变执行结果，不能同时改写 assistant tool-call、session `tool/call`、调用树和 durable replay，反而会制造不可恢复的审计分裂。
-
-因此当前版本只通过 capability projection 和通用 prompt contract 引导模型生成 `run_code`。未来若 RC7 提供位于 assistant response 落盘前的规范化 waterfall，插件可以在该公共边界实现保守白名单 canonicalization：保持同一 `callId`，把原始请求作为不可见 provenance，并将改写后的 `run_code` 交回同一治理与 journal 管线。该能力必须是显式配置项且默认开启；在获得这个公共 seam 之前，插件不伪造开关、不 patch DSH 私有实现，也不把未完成的兼容修复写成模型契约。
+PTC Plus 也使用 RC7 已有的 `llm/stream` 公共 waterfall 做模型输出规范化。仅在本次 request 的 model-visible tools 恰好只有 `run_code`、且当前 session 的公开 schema 已知时，插件才把模型错误抬到 tool 层的 program capability，或当前 schema 中确实存在的任意 native capability，改写成一个 block-scoped `run_code` cell。canonicalizer 使用 prompt assembly 同一时刻从 `ctx.tools.schemas(scope)` 截取的完整 schema 映射；不维护 native 名称、参数字段或 schema 副本。native 参数先经过 lossless JSON 解析，再原样进入 `host.invoke({ name, args })`，因此官方新增工具和新增字段无需插件升级；只有 `read`/`glob` 参数仍精确匹配当前已实现的 program contract 时才升级为 `workspace.readLines`/`workspace.findFiles`，否则同样走原样透传。`host.invoke`、`workspace.*`、`code.run` 和 `repl.state` 幻肢也按各自封闭参数契约转回 cell。原始 `callId`、chunk index、assistant message、`tool/call` 和后续 journal 全部沿用同一条规范化事实；成功改写后删除该响应的 opaque provider `finish.replayState`，因为它描述的是改写前的 provider 内容，不能作为规范化 assistant message 的签名事实；RC7 在下一轮将该条历史按 provider-neutral 内容恢复。未改写的 stream 完整保留 provider replay state。源码内带一条简短注释，让下一轮模型看到正确的 PTC 形状。参数必须完整且能通过 JSON 解析，program capability 不得有额外字段；未知工具、不完整参数和非严格 PTC 请求原样放行。`canonicalizeToolCalls` 是显式配置项，默认开启；关闭时 stream 完全不变。插件不 patch DSH 私有 scheduler、不伪造事件，也不把转换失败伪装成成功。
 
 错误结果由 `tools/execute` around hook 附加同一 journal。插件卸载时恢复原 runtime method 和 metadata projector。
 
@@ -105,8 +103,12 @@ Cordis creator profile 时建立强类型 `cordis.*` namespace；未知或变化
 settlement、部分失败或结果转换失败仍进入 volatile。该 replay adapter 是插件自己的公开 binding
 适配，不修改 DSH scheduler 或伪造 tool event。官方 `tool:cordis` 行为 guidance 在 profile
 匹配时翻译为 program
-contract，而不是只保留类型或直接删除。插件拥有的 `omnipotent` system preset 通过只读 Include
-继承当前官方 `cordis` composition，附加 Code/PTC presentation，并在 scoped lifecycle 中选择
+contract，而不是只保留类型或直接删除。插件拥有的 `omnipotent` system preset 通过
+`agentPresets.mount(ctx, "cordis")` 让全能 standing composition 加入唯一挂载的官方 `cordis` standing scope，不复制或二次 mount 官方 composition；父链由宿主 service 建立，插件不直接导入可能与宿主分裂实例的 `dsh-scope`；
+工具、prompt、skills 和 scoped listeners 因而共享官方事实，进程级 provider 不会重复注册。它再从官方
+`cordis`、`standard`、`minimal` standing scope
+动态提取 tool definition，并以已继承的官方 `cordis` scope 作为可见基线去重后只补缺项；省略 scope 的全局
+registry view 不参与 scoped 重复判断。该 preset 附加 Code/PTC presentation，并在 scoped lifecycle 中选择
 `danger-full-access` permission preset。它通过可逆 decorator 向官方动态 `agentPresets.list()`
 追加包内 system discovery，不替换 provider、不写用户 preset 目录；完整组合见
 [Full-access composition](full-access.md)。

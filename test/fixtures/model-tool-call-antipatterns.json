@@ -1,0 +1,15 @@
+{
+  "source": "redacted-real-dsh-session",
+  "cases": [
+    {
+      "outerName": "host.invoke",
+      "arguments": { "name": "skill", "args": { "name": "example-skill" } },
+      "observedError": "UNKNOWN_TOOL"
+    },
+    {
+      "outerName": "host.invoke",
+      "arguments": { "name": "todo_write", "args": { "todos": [] } },
+      "observedError": "UNKNOWN_TOOL"
+    }
+  ]
+}

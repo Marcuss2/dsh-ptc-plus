@@ -8,6 +8,10 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const runId = new Date().toISOString().replaceAll(':', '').replaceAll('.', '-')
 const artifactRoot = join(repoRoot, 'artifacts', 'expensive', runId)
 const task = '介绍本项目'
+const agentPreset = process.env.DSH_PTC_ACCEPTANCE_PRESET ?? 'code'
+if (!['code', 'omnipotent'].includes(agentPreset)) {
+  throw new Error('DSH_PTC_ACCEPTANCE_PRESET must be code or omnipotent')
+}
 const wslRepoRoot = repoRoot
 const windowsRepoRoot = windowsPath(repoRoot)
 
@@ -285,6 +289,7 @@ function inspectLog(events) {
 
   return {
     session: { id: header?.id, cwd: header?.cwd, createdAt: header?.createdAt },
+    acceptancePreset: agentPreset,
     model: requestHeader?.config,
     prompt: {
       chars: system.length,
@@ -327,6 +332,7 @@ function reportMarkdown(report) {
     `- task: ${task}`,
     `- session: ${report.session.id ?? 'missing'}`,
     `- cwd: ${report.session.cwd ?? 'missing'}`,
+    `- requested agent preset: ${report.acceptancePreset}`,
     `- model: ${report.model?.provider ?? 'missing'}/${report.model?.model ?? 'missing'}`,
     `- events: ${report.eventCount}`,
     `- run_code calls/results: ${report.toolCallCount}/${report.toolResultCount}`,
@@ -363,6 +369,9 @@ const sessionsRoot = join(dshHome, 'sessions')
 const before = await snapshotLogs(sessionsRoot)
 const overlay = join(artifactRoot, 'code-preset.patch.yml')
 await writeFile(overlay, [
+  '- id: agent-presets',
+  '  config:',
+  `    default: ${agentPreset}`,
   '- id: settings',
   '  disabled: true',
   '- id: agent-default-model',
