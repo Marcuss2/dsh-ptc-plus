@@ -14,7 +14,7 @@ PTC Plus 把 DSH Code Mode 的顶层 `run_code` 变成与 session 绑定的连�
 
 主入口接管模型直接发起的顶层 `run_code`，并在 session-bound strict Code Mode 的模型 wire 上固定投影
 `edit_run_code` transport。非 agent runtime call、嵌套 DSH dispatch 以及其他 tool 继续走
-上游实现。插件卸载时恢复原 `CodeRuntime.run` 与 `presentationMeta`。
+上游实现。插件卸载时恢复仍由自己持有的 `CodeRuntime.run` 与 `presentationMeta` 属性；若外层插件仍持有旧 wrapper，已卸载 wrapper 会透明委托原 provider，不会恢复已释放的 session 状态。
 
 严格 Code Mode request 始终按固定顺序向模型暴露 `[run_code, edit_run_code]`。若模型仍生成当前 scope
 已知的顶层 native tool call，`llm/stream` middleware 会在 assistant chunk 持久化前把它规范为

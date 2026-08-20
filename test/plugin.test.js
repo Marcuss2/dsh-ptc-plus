@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { access, rm } from 'node:fs/promises'
 import { isAbsolute } from 'node:path'
 import test from 'node:test'
-import { apply } from '../index.js'
+import { apply, Config } from '../index.js'
 import { normalizeJournal } from '../internal/session-journal.js'
 import { SessionRuntime } from '../internal/session-runtime.js'
 import { decodeValue, encodeValue, renderValueWire } from '../internal/value-wire.js'
@@ -2790,6 +2790,77 @@ test('delegates non-agent runtime calls and restores the provider on teardown', 
 
   await state.dispose()
   assert.notEqual(state.runtime.run, patched)
+  assert.deepEqual(await state.runtime.run({ program: 'return 2', bindings: [] }), {
+    logs: ['upstream'],
+    value: 'upstream',
+  })
+})
+
+test('exports a Cordis config schema with validated runtime defaults', async () => {
+  const defaults = await Config['~standard'].validate({})
+  assert.deepEqual(defaults, {
+    value: {
+      computeMs: 60_000,
+      maxWallMs: 600_000,
+      maxOutputBytes: 64 * 1024 * 1024,
+      maxOldGenerationSizeMb: 512,
+      maxValueNodes: 100_000,
+      maxValueEdges: 1_000_000,
+      maxValueArrayLength: 1_000_000,
+      maxValueBigIntDigits: 100_000,
+      maxNestedRunCodeDepth: 8,
+      canonicalizeToolCalls: true,
+      looseTopLevelRedeclarations: true,
+      durableReplay: true,
+    },
+  })
+  const invalid = await Config['~standard'].validate({ maxWallMs: 0 })
+  assert.equal(invalid.issues.length, 1)
+  assert.deepEqual(invalid.issues[0].path, ['maxWallMs'])
+})
+
+test('retired runtime and metadata wrappers stay transparent across outer wrapper teardown', async () => {
+  const state = fixture()
+  await state.run('composition', 'return 1')
+  const ptcRun = state.runtime.run
+  const ptcPresentation = state.runCodeDefinition.output.presentationMeta
+  const outerRun = request => ptcRun(request)
+  const outerPresentation = (args, value) => ptcPresentation(args, value)
+  state.runtime.run = outerRun
+  state.runCodeDefinition.output.presentationMeta = outerPresentation
+
+  await state.dispose()
+  assert.equal(state.runtime.run, outerRun)
+  assert.equal(state.runCodeDefinition.output.presentationMeta, outerPresentation)
+  assert.deepEqual(await state.runtime.run({ program: 'return 2', bindings: [] }), {
+    logs: ['upstream'],
+    value: 'upstream',
+  })
+  assert.equal(state.runCodeDefinition.output.presentationMeta({}, undefined), undefined)
+
+  state.runtime.run = ptcRun
+  state.runCodeDefinition.output.presentationMeta = ptcPresentation
+  assert.deepEqual(await state.runtime.run({ program: 'return 3', bindings: [] }), {
+    logs: ['upstream'],
+    value: 'upstream',
+  })
+  assert.equal(state.runCodeDefinition.output.presentationMeta({}, undefined), undefined)
+})
+
+test('restores providers normally when an outer wrapper unloads first', async () => {
+  const state = fixture()
+  await state.run('composition', 'return 1')
+  const ptcRun = state.runtime.run
+  const ptcPresentation = state.runCodeDefinition.output.presentationMeta
+  state.runtime.run = request => ptcRun(request)
+  state.runCodeDefinition.output.presentationMeta = (args, value) => ptcPresentation(args, value)
+
+  state.runtime.run = ptcRun
+  state.runCodeDefinition.output.presentationMeta = ptcPresentation
+  await state.dispose()
+
+  assert.notEqual(state.runtime.run, ptcRun)
+  assert.equal(state.runCodeDefinition.output.presentationMeta, undefined)
   assert.deepEqual(await state.runtime.run({ program: 'return 2', bindings: [] }), {
     logs: ['upstream'],
     value: 'upstream',

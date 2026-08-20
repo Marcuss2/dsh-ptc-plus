@@ -1,26 +1,25 @@
 # Publishing
 
-本仓库具备 DSH Cordis plugin 的包结构：`package.json` 声明 `dsh.bundle.patch`、repository URL、semver、files whitelist 与 disclosure；`cordis.patch.yml` 只插入 `dsh-ptc-plus`。插件不 import DSH/Cordis npm modules，运行能力由宿主按 `inject` 装配，因此不声明会让 profile-local 安装器产生缺失警告的虚假 peer dependencies。远程仓库是否公开必须在发布时核验，不能从 package metadata 推断。
+本仓库是普通 DSH bundle：`package.json` 声明 `dsh.bundle.patch`、入口、依赖、Node 范围和发布白名单，`cordis.patch.yml` 只插入 `dsh-ptc-plus`。运行时依赖由 npm 包声明，DSH/Cordis service 则由宿主按 `inject` 装配，不声明虚假的 peer dependency。
 
 ## Release checklist
 
-1. 运行 `npm run check`、`git diff --check`、Markdown link check 和 `npm pack --dry-run`。
-2. 记录 `dsh --version`，在 Windows DSH profile 安装 pack 后的 tarball，再执行 `dsh --profile <name> --dump-config`，确认只有 `ptc-plus` row 被插入；切换 prerelease 版本后重新执行这一步。
-3. 在明确授权模型消耗后运行 `npm run test:expensive`，检查并发真实 Code Mode 场景、native
-   `tools.*`、capability explorer、nested `code.run`、Node full-access volatile 路径、journal 和解码值。
-   每次运行使用随机夹具且不自动重试；发布证据保留 run 根目录的 `summary.md` 与各场景报告。
-4. 在 README 中加入真实 DSH Web 会话截图或短 GIF；不得使用 mock、空 placeholder 或插件并不存在的设置 UI。
-5. 确认 npm 包名未被占用，版本高于已发布版本，并检查 package tarball 不含 artifacts、凭据或本地路径。
-6. 公开仓库并推送发布 commit/tag；为仓库设置必需的 `dsh-plugin` topic，可选增加 `dsh`、`deepseek-harness`、`cordis-plugin`、`code-mode` 和 `repl`。
+1. 在 Node `22.19.0` 与 Node 24.x 上运行 `npm ci` 和 `npm run check`；Node 24.x 还应覆盖 Windows、Linux 与 macOS。仓库 CI 定义同一矩阵。
+2. 运行 `npm audit`、`npx publint`、`git diff --check`、Markdown local-link check 和 `npm pack --dry-run --json`。确认 tarball 只包含发布白名单内的运行时代码、文档和展示资产，不含凭据、本地路径、开发脚本或测试夹具，并从 tarball 安装到空目录执行 ESM import smoke。
+3. 记录 `dsh --version`。分别从 npm 包、固定 Git commit、源码 checkout 和 tarball 安装到临时 profile，再执行 `dsh --profile <profile> --dump-config`，确认只新增 `ptc-plus` row。切换 DSH prerelease 后重新验证。
+4. 在 Windows 与 Linux CLI/Web 实机启动临时 profile。macOS 由原生 runner 验证 CLI/Web；Windows 与 macOS Desktop 从托盘打开当前 profile 的 DSH Terminal 安装，重启 Desktop 后做一次 Code Mode smoke。Desktop 当前发布平台不包括 Linux。
+5. 只有在明确授权模型消耗后才运行 `npm run test:expensive` 与 `npm run test:ab`。发布结论以结构化测试结果为准，不把一次模型样本推广为普遍保证。
+6. 确认 npm 包名可用、待发布版本高于 registry 版本、README 截图来自真实 DSH 会话，并核对 repository、homepage、bugs、license 与 `dsh-plugin` topic。
+7. 最后检查 `npm pack --json` 的名称、版本、大小与文件列表，再创建并推送 release commit/tag，随后发布同一 commit 产生的 tarball。
 
-远程设置、npm registry 状态、截图和发布凭据不属于仓库可自动证明的事实，发布者必须在每次 release 时重新核验。
+远程仓库、registry、签名凭据、目标平台运行状态和模型额度都属于发布时事实，不能由本地 manifest 推断。
 
-## Disclosure
+## Permission disclosure
 
-插件本身不连接云服务、不读取 API key、不持有外部 endpoint，状态保留范围为当前 DSH session。它允许模型代码在当前 DSH/OS profile 授权范围内使用 native tools、filesystem、process、network 与 child process；这些是执行权限，不应被 `cloud: false` 或 `offlineMode: true` 隐藏。`code.run` 使用隔离 child runtime 与 scratch，不合并父 REPL heap。
+PTC Plus 自身不配置外部 endpoint，也不读取 API key。它让模型代码使用当前 request 的 DSH native tools，并在 worker 进程和操作系统实际允许时直接使用 Node.js filesystem、process、network 与 child process API。DSH 负责 native-tool policy；ambient Node/OS access 不经过该 policy。worker thread 是生命周期隔离，不是恶意代码安全沙箱。
 
-机器可读 disclosure 以 `package.json` 为事实源。权限或数据行为变化时必须先更新实现与该字段，再发布新版本。
+DSH `0.1.0-rc.8` 未定义供 bundle 使用的机器可读 permission-disclosure contract，因此这些权限边界记录在人类可读文档中。
 
 ## Client UI
 
-`0.1.0` 不提供 Client UI。发布截图使用 DSH Web 的真实 Code Mode REPL；重新评估条件见 [Client UI](client-ui.md)。
+`0.1.0` 不提供 Client UI。发布截图使用 DSH Web 或 Desktop 中真实的 Code Mode surface；重新评估条件见 [Client UI](client-ui.md)。

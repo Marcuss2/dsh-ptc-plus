@@ -7,6 +7,7 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks'
+import Schema from '@deepseek-ai/schemastery'
 import { SessionRuntime } from './internal/session-runtime.js'
 import { JOURNAL_KEY, journalsEqual, normalizeJournal, withJournal } from './internal/session-journal.js'
 import {
@@ -24,6 +25,7 @@ import {
 const RUN_CODE = 'run_code'
 const EDIT_RUN_CODE = 'edit_run_code'
 const DEFAULT_MAX_NESTED_RUN_CODE_DEPTH = 8
+const MAX_TIMER_DELAY_MS = 2_147_483_647
 const PLUGIN_PROGRAM_GLOBALS = new Set(['capabilities', 'code', 'repl'])
 const REPAIRABLE_DIAGNOSTICS = new Set(['PTC-C001', 'PTC-C002', 'PTC-N001'])
 const RUN_CODE_TOOL_DESCRIPTION = 'Evaluate the next TypeScript cell in this session-bound persistent REPL. Earlier top-level bindings remain available, so this call extends the current environment instead of creating a fresh one. Use `code` for the async-function body and `description` for its short UI summary. Only printed or returned values are output. Successful image-bearing subtool results are attached after the cell.'
@@ -34,6 +36,35 @@ const CODE_TRANSPORT_INSTRUCTION = '`run_code` and `edit_run_code` are the only 
 
 /** Plugin name used by loader diagnostics. */
 export const name = 'ptc-plus'
+
+/** Runtime limits and behavior exposed to Cordis configuration. */
+export const Config = Schema.object({
+  computeMs: Schema.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(60_000)
+    .description('Maximum synchronous CPU time for one cell, in milliseconds.'),
+  maxWallMs: Schema.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(600_000)
+    .description('Maximum elapsed time for one cell, in milliseconds.'),
+  maxOutputBytes: Schema.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(64 * 1024 * 1024)
+    .description('Maximum encoded result and rendered output size in bytes.'),
+  maxOldGenerationSizeMb: Schema.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(512)
+    .description('V8 old-generation memory limit for each session worker, in MiB.'),
+  maxValueNodes: Schema.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(100_000)
+    .description('Maximum nodes in one PTC value graph.'),
+  maxValueEdges: Schema.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(1_000_000)
+    .description('Maximum edges in one PTC value graph.'),
+  maxValueArrayLength: Schema.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(1_000_000)
+    .description('Maximum declared length of one encoded array.'),
+  maxValueBigIntDigits: Schema.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(100_000)
+    .description('Maximum decimal digits in one encoded BigInt.'),
+  maxNestedRunCodeDepth: Schema.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
+    .default(DEFAULT_MAX_NESTED_RUN_CODE_DEPTH)
+    .description('Maximum recursive code.run depth.'),
+  canonicalizeToolCalls: Schema.boolean().default(true)
+    .description('Lower known top-level native tool calls into strict Code Mode cells.'),
+  looseTopLevelRedeclarations: Schema.boolean().default(true)
+    .description('Allow complete top-level const and let declarators to replace existing bindings.'),
+  durableReplay: Schema.boolean().default(true)
+    .description('Reconstruct durable cells from the session log after a worker restart.'),
+})
 
 /** Services required by the plugin. */
 export const inject = ['tools', 'codeRuntime', 'systemPrompt', 'llm']
@@ -224,6 +255,7 @@ export function apply(ctx, config = {}) {
   const pending = new WeakMap()
   const canonicalRequests = new WeakMap()
   const canonicalSessions = new Map()
+  let active = true
 
   const projectBindings = (request, depth, executionToken, inheritedTools = undefined) => {
     const lease = { active: true }
@@ -324,6 +356,7 @@ export function apply(ctx, config = {}) {
     const output = definition.output
     const original = output.presentationMeta
     const patched = (args, value) => {
+      if (!active) return original === undefined ? undefined : original(args, value)
       const base = original === undefined ? undefined : original(args, value)
       const current = scope.getStore()
       return current?.journal === undefined ? base : withJournal(base, current.journal)
@@ -342,6 +375,7 @@ export function apply(ctx, config = {}) {
   }
 
   const patchedRun = function (request) {
+    if (!active) return upstreamRun.call(runtime, request)
     const current = scope.getStore()
     if (current === undefined) return upstreamRun.call(runtime, request)
     const projected = projectBindings(request, 0, current)
@@ -473,6 +507,7 @@ export function apply(ctx, config = {}) {
   })
 
   ctx.effect(() => async () => {
+    active = false
     if (runtime.run === patchedRun) {
       if (ownRun === undefined) delete runtime.run
       else Object.defineProperty(runtime, 'run', ownRun)

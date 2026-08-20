@@ -1,218 +1,217 @@
 # dsh-ptc-plus
 
-> A session-bound, agent-native REPL for DSH Code Mode.
+English | [简体中文](README.zh.md)
 
-> **非官方社区项目。** 本项目由个人独立开发和维护，与 DeepSeek / DSH 官方没有隶属或背书关系。
+![dsh-ptc-plus banner](assets/dsh-ptc-plus-banner.webp)
 
-PTC Plus 把模型直接发起的 DSH Code Mode `run_code` 变成连续的 TypeScript REPL。后续 cell
-直接使用已经建立的变量、函数、模块和计算结果，不需要搬运此前源码。
+A session-bound REPL and transport-recovery layer for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) TypeScript Code Mode.
+
+> [!NOTE]
+> This is an unofficial, independently maintained community plugin. It is not affiliated with or endorsed by DeepSeek or the DSH project.
+
+PTC Plus lets the model extend one live program across consecutive `run_code` cells, reuse earlier bindings, call the current DSH typed capabilities, and recover common Code Mode transport mistakes without making ordinary tasks noisier.
+
+![A rejected long TypeScript cell repaired and executed with edit_run_code](assets/ptc-plus-repair.png)
+
+In this DSH Web session, `edit_run_code` repaired a one-character error in a rejected cell and ran it without resending the full source.
+
+## What the Model Gets
+
+- **Persistent cells**: variables, functions, modules, and computed values remain available to later `run_code` calls in the same session.
+- **Native typed capabilities**: the cell receives the DSH `tools.*` bindings already authorized for the current request; PTC Plus does not copy their schemas, results, approval rules, or dispatch logic.
+- **Silent transport recovery**: a known top-level native tool call emitted in strict Code Mode is lowered to an equivalent `run_code` cell before it is persisted. Valid calls keep the same DSH validation and execution path and do not add a warning or retry turn.
+- **Local repair for rejected source**: `edit_run_code` replaces one exact fragment in the latest eligible pre-execution rejection and immediately runs the repaired cell, so a small syntax mistake does not require the model to regenerate a long program.
+- **Durable and live recovery**: deterministic work and recorded capability results can be replayed after a worker restart; direct Node or operating-system input remains usable in the live process and is marked `volatile` instead of being falsely replayed.
+- **Program-native exploration and control**: `capabilities.tree/find/inspect`, `repl.state`, and isolated `code.run` are available inside cells without introducing a generic reflection bus.
+
+Successful ordinary cells produce no PTC warning or note. The first transition to `volatile` is recorded in the journal but is also silent; diagnostics are reserved for actionable failures and cold-recovery loss.
+
+## Measured Results
+
+A paired A/B run used `opencode-go/deepseek-v4-flash`, DSH `0.1.0-rc.8`, strict Code Mode, and `danger-full-access`: 7 ordinary task families, 2 replicates, and 28 sessions. The plugin setting was the only difference between each pair.
+
+| Metric | PTC Plus | Baseline |
+| --- | ---: | ---: |
+| Blind-review score | **105 / 126** | 91 / 126 |
+| Model calls | **57** | 71 |
+| Top-level tool-call errors | **1** | 19 |
+| Deterministic task outcomes | **10 pass / 0 fail / 4 unscored** | 9 pass / 1 fail / 4 unscored |
+| PTC warnings | 0 | 0 |
+| Token traffic per session (median) | **43,509.5** | 48,916.5 |
+| Paired sessions with lower traffic | **11 / 14** | 3 / 14 |
+
+Token traffic is input + cache read + cache write + output tokens. The table reports this run, not a general benchmark; it covers one model and two replicates per task.
+
+## Installation
+
+Requirements:
+
+- Node.js `^22.19.0 || >=24.0.0`;
+- an existing DSH installation with TypeScript Code Mode;
+- DSH CLI `0.1.0-rc.8` is the currently verified integration version.
+
+Install into the profile that actually runs your DSH surface. Replace `<profile>` with that profile name; do not assume that a profile named `default` is active.
+
+### npm
+
+For a release available from the npm registry, install it with:
+
+```sh
+dsh plugin --profile <profile> add dsh-ptc-plus@0.1.0
+dsh --profile <profile> --dump-config
+```
+
+If the selected version is not available from the registry, use a pinned Git revision, a source checkout, or a tarball.
+
+### Pinned Git revision
+
+The package ships runnable JavaScript, so a Git install does not require a build script. Replace `COMMIT_SHA` with a reviewed commit:
+
+```sh
+dsh plugin --profile <profile> add github:muyuanjin/dsh-ptc-plus#COMMIT_SHA
+dsh --profile <profile> --dump-config
+```
+
+### Source checkout
+
+```sh
+git clone https://github.com/muyuanjin/dsh-ptc-plus.git
+cd dsh-ptc-plus
+dsh plugin --profile <profile> add .
+dsh --profile <profile> --dump-config
+```
+
+When the DSH CLI itself runs from a `deepseek-harness` source checkout, invoke the same operation through its launcher:
+
+```sh
+pnpm dsh plugin --profile <profile> add /absolute/path/to/dsh-ptc-plus
+pnpm dsh --profile <profile> --dump-config
+```
+
+### Tarball
+
+From a source checkout:
+
+```sh
+npm pack
+dsh plugin --profile <profile> add ./dsh-ptc-plus-0.1.0.tgz
+dsh --profile <profile> --dump-config
+```
+
+Windows development checkouts can instead use the content-addressed snapshot installer. Its argument is the target profile and defaults to `web` when omitted:
+
+```bat
+scripts\install-dev.cmd headless
+```
+
+### DSH Desktop
+
+On Windows or macOS, choose **Open DSH Terminal** from the Desktop tray. Bare plugin commands in that terminal target the active profile, so install the registry package or an absolute tarball path without guessing its profile name:
+
+```sh
+dsh plugin add dsh-ptc-plus@0.1.0
+dsh --dump-config
+```
+
+If the selected version is not available from the registry, install an absolute tarball path from this terminal instead:
+
+```sh
+dsh plugin add /absolute/path/to/dsh-ptc-plus-0.1.0.tgz
+dsh --dump-config
+```
+
+Restart DSH Desktop after installation. Linux Desktop is not a current DSH Desktop release target; use DSH CLI/Web on Linux.
+
+## Usage
+
+There is no separate command or UI to enter the REPL. Use DSH Code Mode normally; each direct `run_code` call becomes the next cell in the session environment.
 
 ```ts
 // Cell 1
-function parseSessionLine(line: string) {
+const rows = ['{"id":1}', '{"id":2}']
+function parseRow(line) {
   return JSON.parse(line)
 }
 ```
 
 ```ts
 // Cell 2
-import { readFile } from "node:fs/promises"
-const text = await readFile("logs/session.jsonl", "utf8")
-return text.split("\n").filter(Boolean).map(parseSessionLine).length
+const records = rows.map(parseRow)
+return records.reduce((sum, record) => sum + record.id, 0)
 ```
 
-这里复用的是 live environment，不是源码副本、hash 引用或再次转义的代码字符串。
+The second cell directly uses `rows` and `parseRow`; their source is not copied into another tool argument or regenerated by the model.
 
-## 定位与边界
-
-本插件是个人维护的社区实验插件，只使用 DSH 的公共扩展面，不修改或 fork DSH，不接入
-私有 scheduler，也不伪造 session event。
-
-`danger-full-access` 是一等运行方式：模型可以使用 DSH 原生 typed `tools.*`，以及它熟悉的
-Node、进程、shell 和生态 SDK。PTC Plus 不复制这些 API，不维护工具参数或结果适配表，也不实现
-第二套跨平台权限系统。native tool 的权限、审批、sandbox 与调度仍由 DSH 和当前 profile 负责；
-直接 Node access 的 confinement 由 worker 进程与操作系统负责。
-
-其他 profile 只保留当前 request 实际提供的 capability；缺失能力明确失败，不由插件模拟。
-PTC Plus 的 worker thread 是 REPL 生命周期隔离，不是恶意代码安全边界，因此更窄的 tool view
-不能被解释为对 Node ambient API 的额外安全承诺。
-
-这组边界落实为四个用户可观察约束：
-
-- 后续 cell 直接引用已有 binding，不搬运源码；
-- 既有代码不作为另一个工具参数中的源码字符串；
-- 普通继续求值仍只需一次 `run_code`；
-- 能复用原生强类型接口时，不增加反射总线、命令 DSL 或权限抽象。
-
-## 与 DSH 的集成
-
-插件通过 `dsh.bundle.patch` 指向的 `cordis.patch.yml` 挂载到 DSH profile。它接管模型直接发起的
-顶层 `run_code`，并在严格 Code Mode 的模型 wire 上固定提供 `edit_run_code`；其他 tool、
-非 agent runtime call 和嵌套调度保留上游行为。
-
-插件提供：
-
-- **session REPL**：跨 cell 保留顶层 binding；
-- **结构化诊断**：`[PTC-...]` 文本由 journal 中的封闭诊断结构确定性投影；
-- **durable / volatile 恢复**：精确重放可信历史，保留但不自动重放不可证明的副作用；
-- **原生 capability**：保留 DSH 当前 request 的 typed bindings，并为每个 cell 建立统一 lease；
-- **静默入口纠错**：把严格 Code Mode 中误发的已知顶层 tool call 包装为等价 `run_code` cell；
-- **描述性探索**：`capabilities.tree/find/inspect` 描述 live tool schema，不授予权限或调用能力；
-- **状态控制**：`repl.state` 管理 durable 命名状态；
-- **源码元编程**：`code.run` 在隔离 child environment 中执行动态源码。
-- **被拒绝 cell 的局部编辑**：`edit_run_code` 用一次精确替换修复未执行的长 cell，避免模型重发全文。
-
-插件保留 DSH 原有 tool schema、guidance、参数、canonical result、错误和 policy 语义。它只在严格
-Code Mode SDK 后追加 `repl`、`capabilities` 与 `code` 的类型声明，并把 `run_code` 描述改为连续
-REPL 语义。
-
-如果模型仍在严格 Code Mode request 中误发了当前 agent scope 已知的顶层 native tool call，
-插件会在写入 assistant message 前静默改写为一个调用 `tools[name]` 的 `run_code` cell。原始 JSON
-参数文本进入 cell 后才由 `JSON.parse` 解析，正式参数验证、dispatch、结果和错误仍由同一个 DSH
-tool contract 决定；插件不显示额外 warning/note，也不要求模型先失败再重试。call id、block index、
-usage 和 finish reason 保持不变，已失效的 provider replay metadata 会被丢弃。未知、畸形或内部不一致
-的调用不猜测修复，仍交给宿主诊断。该恢复默认开启，可用 `canonicalizeToolCalls: false` 关闭。
-
-## 连续求值
-
-每个顶层 `run_code` 都是同一 session kernel 的下一格。cell 按完整 async function body 解释，
-支持块作用域、top-level `await` 和普通控制流 `return`。
-
-默认宽松模式允许再次声明顶层 `const`/`let`：一个完整 declarator 的名称全部已存在时替换现值，
-全部为新名称时建立新 binding。宽松重声明是普通 REPL 操作，不产生诊断。严格模式、同一解构中
-混合新旧名称，以及 function/class 重声明会在执行前报告冲突。
-
-能力 namespace 及其 member 只在当前 cell lease 内有效。不要把 `tools`、`capabilities`、`repl`、
-`code` 或其中的函数保存到后续 cell；cell 结束后调用会得到 `PTC execution lease expired`。
-
-常见诊断：
-
-| Code | 含义 | 状态影响 |
-| --- | --- | --- |
-| `PTC-C001` | cell syntax 无法解析 | 未执行，REPL 不变 |
-| `PTC-C002` | preflight 拒绝 kernel-control import | 未执行，REPL 不变 |
-| `PTC-N001` | 顶层 binding 冲突 | 未执行，REPL 不变 |
-| `PTC-O001` | 返回值不受支持或超过 value budget | 已执行；此前 mutation 可能生效 |
-| `PTC-X001` | 未捕获运行异常 | 抛出前的 mutation 可能生效 |
-| `PTC-R002` | 冷恢复跳过 volatile/unconfirmed 后缀 | 回到最后可信 durable head |
-
-普通成功 cell 不产生 PTC warning/note。进入 volatile 只记录在 journal 的 `status` 和
-`volatileReason` 中；只有真实执行失败或 cold recovery 已跳过历史状态时才向模型显示可行动诊断。
-
-## Capability 使用
-
-cell 直接调用当前 SDK 声明的 `tools.*`。不同结果可能是完整值、有界窗口、增量、开放世界查询
-或未知完整性；模型/UI 的文本裁剪与程序收到的 canonical value 也是两个不同契约。
-
-当前 DSH `tools.read` 契约返回有界 inspection window，不是无损整文件 API；PTC capability
-metadata 缺少 owner 注解时仍会诚实显示 `unknown`，不会根据工具名补写这一事实。需要无损整文件
-计算时，在 `danger-full-access` 下使用 `node:fs/promises.readFile` 或流式文件 API。直接 Node/OS
-I/O 不经过 tool transcript，因此会让当前 live 后缀进入 `volatile`；当前进程仍可继续使用已有 binding。
-
-按需探索当前 tool view：
+Native DSH tools remain available through the typed SDK inside the cell:
 
 ```ts
 const roots = await capabilities.tree()
-const matches = await capabilities.find("session")
+const matches = await capabilities.find('session')
 return capabilities.inspect({
   symbols: matches.slice(0, 8).map(item => item.symbol),
   budget: 8,
 })
 ```
 
-explorer 不调用 capability、不读取隐藏服务，也不发起模型请求。CodeRuntime request 已携带的
-owner-provided program namespace 会原样保留并共享 cell lease；PTC Plus 不翻译其领域契约。当前
-公共 CodeRuntime request 没有用于发现额外服务的跨插件 registry，非 tool API 不由插件猜测或
-通过名称反射暴露。owner namespace 若与插件保留的 `capabilities`、`code` 或 `repl` 同名，request
-会明确失败，而不是静默覆盖或合并两套实现。
+`capabilities.*` is read-only metadata. Capability calls remain on the typed `tools.*` members declared by DSH.
 
-## 源码元编程
+Strict Code Mode exposes `run_code` followed by `edit_run_code` on every request. `edit_run_code` accepts `old_string` and `new_string`, requires one exact match, and applies only to the latest eligible cell rejected before execution. It cannot retry runtime failures or cells with possible effects.
 
-`code.run({ code, description })` 在隔离 child environment 中执行动态源码，返回
-`{ logs, result? }`。child 继承当前 request 的 tool view 与取消信号，但不读取或合并父 REPL
-binding。父 journal 把它作为 program binding call 记录；调用正常结算后，cold replay 返回 recorded
-result，不重新执行 child。若取消、超时或 worker failure 发生在调用结算前，journal 保留
-`code.run` unknown-effect 边界并回到最近 durable frontier。相同的 pending/settled 规则适用于
-所有 program binding，不按 capability 名称特判。
+## Compatibility and Permissions
 
-`edit_run_code({ old_string, new_string })` 只编辑同一未结束 turn 中最近一个确定在执行前被拒绝的
-`run_code` cell。`old_string` 必须非空、与 `new_string` 不同，并在原 cell 中恰好出现一次。
-替换完成后立即以官方 `run_code` 执行完整结果；模型只需生成变化片段。
+| Component | Current contract |
+| --- | --- |
+| DeepSeek Harness | Verified with CLI `0.1.0-rc.8`; prerelease upgrades require revalidation |
+| Code runtime | DSH TypeScript Code Mode; cells currently use modern JavaScript syntax |
+| Node.js | `^22.19.0 || >=24.0.0` |
+| CLI/Web platforms | Windows DSH `0.1.0-rc.8` profile install and Linux package runtime verified locally; macOS is a CI target |
+| DSH Desktop | Uses the active profile on current Windows/macOS releases; restart after installation |
+| Recommended permission mode | `danger-full-access` |
+| Client UI | None; the product surface is the normal DSH conversation and Code Mode cards |
 
-可编辑对象必须有 `noop` journal，且诊断为 `PTC-C001`、`PTC-C002` 或 `PTC-N001`。
-任何已进入 runtime 的 cell、运行时异常、超时、取消或未确定 effect 都不可编辑重跑，避免重复副作用。
-同一 turn 中后续的调查 cell 不会擦除该目标；修复后的 cell 一旦实际执行，目标即被消费。
-目标或替换不合法时，调用返回 `{ edited: false, reason }`，不产生 PTC warning。
+`danger-full-access` is the first-class experience. The model can combine DSH native typed tools with familiar Node.js filesystem, process, network, child-process, and ecosystem APIs when the active DSH profile and operating system permit them.
 
-严格 Code Mode 的每个 request 都按固定顺序暴露 `[run_code, edit_run_code]`；是否存在可编辑 cell 不改变
-tool name、schema、顺序或提示，以保持 provider cache 稳定。`edit_run_code` 不注册为 DSH native tool；
-插件在 assistant message 持久化前将它确定性 lower 为官方 `run_code`，完整修复后源码依然进入
-session log，正式 validation、执行、journal 与结果投影不旁路。它不提供 cell ID、行号、
-replace-all、多 patch、自动修复或 runtime retry。
+DSH remains the owner of native-tool scope, policy, approval, cancellation, sandboxing, and scheduling. PTC Plus does not implement a second cross-platform permission system, shell registry, or tool adapter table. Direct Node and operating-system access is governed by the worker process and host OS, not by a narrower DSH tool list.
 
-该顶层入口是临时 transport 便利，用于缓解局部字符错误导致长源码全量重发的模型成本，不是第二套
-编辑 DSL。理想终点是 PTC 与 tool transport 统一，已发出的结构化程序可被原生局部修正；达到该条件后应
-删除此入口，而不是扩展它的语法。`code.run` 仍是 cell 内执行独立动态源码的 program binding，递归深度由
-`maxNestedRunCodeDepth` 限制。
+Other permission profiles degrade to the capabilities actually present in the request. Missing native capabilities fail through their normal contract, and direct ambient access may be unavailable or restricted by the host. The plugin does not simulate missing authority.
 
-## Durable / Volatile
+The worker thread isolates the REPL lifecycle; it is not a malicious-code security sandbox.
 
-| 状态 | 当前进程 | 冷恢复 |
+## Runtime Model
+
+Each top-level `run_code` is parsed as the body of an async function using modern JavaScript syntax. Top-level bindings survive across cells, block scope and top-level `await` work normally, and `return` produces the cell result.
+
+The default loose binding mode lets a complete top-level `const` or `let` declarator replace existing names. New declarators create bindings. Mixed new/existing destructuring, function/class redeclaration, or any redeclaration in strict mode is rejected before execution.
+
+All capability namespaces are leased to one cell. Captured `tools`, `capabilities`, `repl`, `code`, or member functions expire when that cell ends, preventing stale authority from being retained in later cells.
+
+### Durable and Volatile State
+
+| State | Live process | Cold recovery |
 | --- | --- | --- |
-| `durable` | 正常继续求值 | 从 session log 重放，recorded capability result 不重新 dispatch |
-| `volatile` | 保留完整 live REPL | 跳过该后缀，回到最后 durable frontier |
+| `durable` | Continues normally | Replays source and recorded capability results without redispatching effects |
+| `volatile` | Keeps the complete live REPL | Skips the volatile suffix and restores the last durable frontier |
 
-确定性计算、受支持的 Node 模块和被 journal 记录的 capability result 可以推进 durable head。
-未记录的 Node/OS 输入、时钟、随机数、timer 和其他不可证明资源进入 sticky volatile。
-只有显式 restore、worker 重建或进程重启会丢弃该 live 后缀。
+Deterministic computation, supported Node modules, and settled program-binding results can advance the durable head. Unrecorded filesystem/process/network input, time, randomness, timers, and other ambient state make the live suffix sticky `volatile`.
 
-session log 是可恢复状态的唯一事实源；worker heap 与旁路文件不属于可迁移 checkpoint。详细协议见
-[Durable / Volatile 恢复协议](docs/durability-design.md)。
+`repl.state` can list the current mode and save, restore, or delete named durable states. State operations commit with the current cell and do not require another model turn.
 
-## 状态管理
+### Diagnostics
 
-```ts
-await repl.state({ action: "list" })
-await repl.state({ action: "save", name: "before-refactor" })
-await repl.state({ action: "restore" })
-await repl.state({ action: "restore", name: "before-refactor" })
-await repl.state({ action: "delete", name: "before-refactor" })
-```
+| Code | Meaning | State effect |
+| --- | --- | --- |
+| `PTC-C001` | The cell cannot be parsed | Not executed; REPL unchanged |
+| `PTC-C002` | Preflight rejected a kernel-control import | Not executed; REPL unchanged |
+| `PTC-N001` | Top-level binding conflict | Not executed; REPL unchanged |
+| `PTC-O001` | Unsupported or over-budget output | Cell executed; earlier mutations may exist |
+| `PTC-X001` | Uncaught runtime exception | Mutations before the throw may exist |
+| `PTC-R002` | Cold recovery skipped a volatile or unconfirmed suffix | Restored the last durable frontier |
 
-- 名称匹配 `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`；
-- `list` 返回 `{ names, mode, volatileReason? }`；
-- `save` 只在 durable cell 中提交；
-- 无名称 `restore` 回到本 cell 之前的 durable head；
-- 操作与当前 `run_code` journal 一次提交，不增加模型往返。
+Unknown, malformed, or internally inconsistent top-level tool calls remain on the DSH host diagnostic path.
 
-## 安装
+## Configuration
 
-要求 Node.js `>=22.19`。当前集成验收版本是 DSH CLI `0.1.0-rc.8`；DSH 仍处于 prerelease，切换
-版本后应重新执行下述安装检查与项目验证。从本仓库目录安装：
-
-```sh
-dsh plugin --profile default add .
-dsh --profile default --dump-config
-```
-
-从 `deepseek-harness` 源码 checkout 安装：
-
-```sh
-pnpm dsh plugin --profile default add ../dsh-ptc-plus
-pnpm dsh --profile default --dump-config
-```
-
-Windows 本地开发可以运行 `scripts\install-dev.cmd`。脚本用 `npm pack` 创建基于内容 hash 的不可变
-快照，再安装到目标 profile；默认 profile 是 `web`：
-
-```bat
-scripts\install-dev.cmd headless
-```
-
-可用 `DSH_PROFILE` 指定默认 profile。快照位于
-`%DSH_HOME%\plugin-snapshots\dsh-ptc-plus\`；未设置 `DSH_HOME` 时使用用户目录下的 `.dsh`。
-
-配置示例中的值也是当前默认值：
+The bundle patch inserts one `ptc-plus` row. These are the current defaults:
 
 ```yaml
 - id: ptc-plus
@@ -232,67 +231,47 @@ scripts\install-dev.cmd headless
     durableReplay: true
 ```
 
-`durableReplay: false` 是恢复故障的显式逃生开关：新 kernel 忽略历史 REPL heap，实际求值的 cell
-都以 volatile 运行，但当前进程仍保留连续 binding。它不删除已有 session log。
+`durableReplay: false` is an explicit recovery escape hatch. New kernels ignore historical REPL state and evaluated cells remain live-only, while bindings still persist in the current process. It does not delete the session log.
 
-## 当前限制
+## Limits
 
-- 只支持 `codeRuntime.language === "typescript"`；
-- durable import allowlist 是 `node:assert`、`node:buffer`、`node:querystring`、
-  `node:string_decoder`、`node:stream`、`node:url`、`node:util` 和 `node:zlib`；
-- `node:path` 和 allowlist 之外的动态 import 会进入 volatile；
-- 直接 import/require `node:worker_threads` 与 `node:cluster` 会被拒绝；
-- `process.exit`、`process.abort` 与 `process.kill` 在 REPL worker 中会被拒绝；
-- worker 只继承 session cwd 与独立 scratch 对应的 `TEMP`、`TMP`、`TMPDIR`，不继承宿主环境；
-- durable 恢复使用 journal 全量重放，没有压缩 checkpoint 或 worker LRU 驱逐；
-- 插件没有自有 Client UI。
+- Although DSH identifies the runtime as `typescript`, PTC Plus currently parses cells with Acorn. Type annotations, interfaces, enums, JSX, decorators, and other syntax that is not valid modern JavaScript are rejected before execution.
+- `tools.read` is a bounded inspection-window API in the verified DSH version, not a lossless whole-file API. In `danger-full-access`, use `node:fs/promises.readFile` or streams for whole-file computation; direct I/O makes the live suffix `volatile`.
+- Native capability results may be complete values, explicit windows, incremental values, or open-world query results. PTC Plus preserves the typed canonical contract and does not infer completeness from a tool name.
+- The durable import allowlist is `node:assert`, `node:buffer`, `node:querystring`, `node:string_decoder`, `node:stream`, `node:url`, `node:util`, and `node:zlib`; other Node imports remain usable but make the cell volatile.
+- Direct `node:worker_threads` and `node:cluster` imports, plus `process.exit`, `process.abort`, and `process.kill`, are rejected inside the REPL worker.
+- Cold recovery replays the journal from the session log. There are no compressed checkpoints or worker-LRU eviction.
+- DSH services or plugin APIs that are not exposed as a native tool or an owner-provided program binding are not made callable through name-based reflection.
 
-架构与协议文档：
+## Documentation
 
 - [Architecture](docs/architecture.md)
 - [Capability Surface](docs/capability-projection.md)
 - [Program Data Plane](docs/program-data-plane.md)
+- [Durable / Volatile Recovery](docs/durability-design.md)
 - [PTC Value Graph V1](docs/value-wire.md)
 - [Publishing](docs/publishing.md)
 
-## 验证
+## Development
+
+Install dependencies and run the default non-model gate:
 
 ```sh
+npm install
 npm run check
 ```
 
-该命令显式检查入口与 worker 语法，并对 Node 原生 coverage 实际报告的运行时模块设置行覆盖率
-100%、分支覆盖率 95%、函数覆盖率 100% 门禁。worker thread 的行为由端到端 runtime 测试覆盖；
-Node 的主测试进程不会把它纳入同一份 coverage 统计。默认验证不会调用模型。
+`npm run check` checks syntax, behavior, and the configured coverage thresholds without contacting a model.
 
-在本仓库 source checkout 中，Windows 上安装了 DSH 且已配置模型凭据时，可显式运行真实模型验收：
+The following commands consume configured model quota and are never part of `npm run check`:
 
 ```sh
 npm run test:expensive
-```
-
-该命令单次安装当前 checkout，显式使用 `danger-full-access`，然后默认以 3 路并发运行随机夹具场景，覆盖 durable 跨 cell binding、
-native `tools.*`、`capabilities.*`、`code.run`，以及普通 Node 文件/crypto API 进入 volatile 后的 live
-连续性。硬门禁读取结构化 journal 与解码后的 canonical value，不依赖固定回答措辞，也不会自动重试。
-
-场景由 `scripts/expensive-acceptance-scenarios.json` 声明。可用
-`DSH_PTC_ACCEPTANCE_CONCURRENCY` 调整正整数并发数，用逗号分隔的
-`DSH_PTC_ACCEPTANCE_SCENARIOS` 选择一个或多个场景，或用 `DSH_PTC_ACCEPTANCE_SCENARIO_FILE` 指向另一个
-数据文件。provider、model、profile、permission mode 和单场景 wall timeout 也可通过同前缀环境变量调整。
-验收产物写入 `artifacts/expensive/<run>/<scenario>/`，汇总位于该 run 根目录，不属于默认
-`npm run check`。
-
-普通任务下的插件开销与轨迹对比使用：
-
-```sh
 npm run test:ab
 ```
 
-它不会在 system prompt 中加入任务提示，只把 `scripts/ab-trajectory-tasks.json` 中的普通短任务作为
-user message。runner 先冻结当前 checkout，再为每条 session 复制独立 workspace；overlay 关闭用户
-全局 workspace instructions 和无关 skill catalog，任何意外 model-visible 注入差异都会使配对无效。
-相同模型、profile、Code Mode 和 `danger-full-access` 下，唯一 treatment 是是否禁用 `ptc-plus`。
-默认覆盖项目理解、测试、Git 状态、精确事实、代码解释和小修改等任务族，两次重复、最多四路并发；
-同一任务的两臂按稳定随机 AB/BA 顺序运行。报告分开记录机械 oracle、基础设施失败、top-level
-调用错误、完整初始 context、token bucket 和轨迹指标，并生成去除 treatment 身份和启发式派生字段
-的盲评 packet；评分在揭盲前独立完成，不把关键词计数当作正确率。
+`test:expensive` exercises capability and recovery scenarios. `test:ab` compares ordinary tasks with and without the plugin.
+
+## License
+
+Licensed under the [MIT License](LICENSE).

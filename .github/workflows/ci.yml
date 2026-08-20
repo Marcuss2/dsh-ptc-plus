@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: ${{ matrix.os }} / Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            node: 22.19.0
+          - os: ubuntu-latest
+            node: 24
+          - os: windows-latest
+            node: 24
+          - os: macos-latest
+            node: 24
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: npm run check
+      - name: Pack and import from a clean consumer
+        shell: bash
+        run: |
+          set -euo pipefail
+          pack_dir="$(mktemp -d)"
+          consumer_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$pack_dir" "$consumer_dir"' EXIT
+          archive="$(npm pack --pack-destination "$pack_dir" --json | node -e "let input=''; process.stdin.on('data', chunk => input += chunk); process.stdin.on('end', () => process.stdout.write(JSON.parse(input)[0].filename))")"
+          cd "$consumer_dir"
+          npm init --yes
+          npm install --ignore-scripts "$pack_dir/$archive"
+          node --input-type=module -e "const plugin = await import('dsh-ptc-plus'); if (plugin.name !== 'ptc-plus' || typeof plugin.apply !== 'function') throw new Error('invalid package exports')"

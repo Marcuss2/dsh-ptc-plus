@@ -12,15 +12,19 @@
     "index.js",
     "internal",
     "docs",
+    "assets/dsh-ptc-plus-banner.webp",
+    "assets/ptc-plus-repair.png",
     "cordis.patch.yml",
     "README.md",
+    "README.zh.md",
     "LICENSE"
   ],
   "engines": {
-    "node": ">=22.19"
+    "node": "^22.19.0 || >=24.0.0"
   },
   "dependencies": {
     "@babel/code-frame": "^7.29.7",
+    "@deepseek-ai/schemastery": "^3.18.1",
     "acorn": "^8.15.0"
   },
   "scripts": {
@@ -40,28 +44,18 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/muyuanjin/dsh-ptc-plus.git"
+    "url": "git+https://github.com/muyuanjin/dsh-ptc-plus.git"
+  },
+  "homepage": "https://github.com/muyuanjin/dsh-ptc-plus#readme",
+  "bugs": {
+    "url": "https://github.com/muyuanjin/dsh-ptc-plus/issues"
   },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
   },
-  "disclosure": {
-    "disclosureSchemaVersion": "0.2",
-    "cloud": false,
-    "network": [],
-    "offlineMode": true,
-    "apiKeys": [],
-    "permissions": [
-      "inherits the active DSH profile's native typed tool capabilities without adding authority",
-      "allows model-authored Node.js filesystem, process, network, and child-process APIs when the active DSH/OS profile permits them",
-      "runs isolated code.run children in worker-thread scratch without merging the parent REPL heap"
-    ],
-    "jurisdiction": [],
-    "retention": "session"
-  },
   "devDependencies": {
-    "yaml": "^2.8.1"
+    "yaml": "^2.9.0"
   }
 }
