@@ -51,35 +51,24 @@ test('normalizes complete journal values and detaches nested value wires', () =>
       { action: 'restore' },
       { action: 'delete', name: 'point.one' },
     ],
-    cordisEffects: [{
-      parent: 0,
-      member: 'define',
-      args: encodeValue({ target: { kind: 'new', prefix: 'demo' } }),
-      ok: true,
-      value: encodeValue({ pluginId: 'demo-1', packageId: 'pkg-1' }),
-    }, {
-      parent: 1,
-      member: 'stop',
-      args: encodeValue({ pluginId: 'demo-1' }),
-      ok: false,
-      error: 'not running',
-    }],
     confirms: ['prior-call'],
     diagnostics: [{
       code: 'PTC-T001', severity: 'note', phase: 'replay', message: 'replayed', stateEffect: 'unchanged',
     }],
-    volatileReason: 'ambient Date',
   })
   const normalized = normalizeJournal(value)
   assert.ok(Object.isFrozen(normalized))
   assert.ok(Object.isFrozen(normalized.calls))
   assert.ok(Object.isFrozen(normalized.operations))
-  assert.ok(Object.isFrozen(normalized.cordisEffects))
   assert.ok(Object.isFrozen(normalized.confirms))
   assert.ok(Object.isFrozen(normalized.diagnostics))
   assert.deepEqual(normalized.operations, value.operations)
   assert.notEqual(normalized.calls[0].args, value.calls[0].args)
-  assert.equal(normalized.volatileReason, 'ambient Date')
+  assert.equal(normalized.volatileReason, undefined)
+  assert.equal(normalizeJournal(journal({
+    status: 'volatile',
+    volatileReason: 'ambient Date',
+  })).volatileReason, 'ambient Date')
 
   assert.deepEqual(normalizeJournal(journal({
     status: 'discarded',
@@ -109,14 +98,6 @@ test('rejects malformed journal schemas exhaustively', () => {
     [journal({ operations: [{}] }), /journal operation at index 0/],
     [journal({ operations: [{ action: 'save' }] }), /journal operation at index 0/],
     [journal({ operations: [{ action: 'restore', name: '' }] }), /journal operation at index 0/],
-    [journal({ cordisEffects: null }), /journal Cordis effects/],
-    [journal({ cordisEffects: [{}] }), /Cordis effect at index 0/],
-    [journal({ cordisEffects: [{ parent: 0, member: 'future', args: encodeValue({}), ok: true, value: encodeValue(null) }] }), /Cordis effect at index 0/],
-    [journal({ cordisEffects: [{ parent: 0, member: 'define', args: encodeValue({}), ok: true }] }), /missing its value/],
-    [journal({ cordisEffects: [{ parent: 0, member: 'define', args: encodeValue({}), ok: false }] }), /missing its error/],
-    [journal({ cordisEffects: [{ parent: 0, member: 'define', args: encodeValue({}), ok: false, error: 1 }] }), /missing its error/],
-    [journal({ cordisEffects: [{ parent: 1, member: 'define', args: encodeValue({}), ok: true, value: encodeValue(null) }] }), /missing parent call/],
-    [journal({ calls: [{ global: 'tools', member: 'read', args: encodeValue({}), ok: true, value: encodeValue(null), settle: 0 }], cordisEffects: [{ parent: 0, member: 'define', args: encodeValue({}), ok: true, value: encodeValue(null) }] }), /parent must be code\.run/],
     [journal({ completion: undefined }), /journal completion/],
     [journal({ completion: null }), /journal completion/],
     [journal({ completion: { kind: 'return', hasValue: 'yes', value: encodeValue(1) } }), /journal return value/],
@@ -131,6 +112,7 @@ test('rejects malformed journal schemas exhaustively', () => {
     [journal({ diagnostics: [{}] }), /journal diagnostic at index 0/],
     [journal({ status: 'discarded', calls: [{ global: 'g', member: 'm', args: encodeValue(1), ok: true, value: encodeValue(1), settle: 0 }], completion: undefined }), /must not contain/],
     [journal({ volatileReason: 42 }), /volatile reason/],
+    [journal({ volatileReason: 'ambient Date' }), /requires volatile or discarded status/],
   ]
   for (const [value, expected] of invalid) assert.throws(() => normalizeJournal(value), expected)
 })
@@ -225,12 +207,12 @@ test('preserves a discarded external-effect boundary as an untrusted suffix', ()
     resultEvent(1, journal({
       status: 'discarded',
       completion: undefined,
-      volatileReason: 'cordis.define',
+      volatileReason: 'domain.write',
     })),
   ]
   const state = recoverJournal({ events })
   assert.equal(state.nodes.length, 0)
-  assert.deepEqual(state.volatileSuffix, [{ seq: 1, code: 'await mutate()', reason: 'cordis.define' }])
+  assert.deepEqual(state.volatileSuffix, [{ seq: 1, code: 'await mutate()', reason: 'domain.write' }])
 })
 
 test('handles omitted confirms, unrelated results, and unnamed parent restores', () => {

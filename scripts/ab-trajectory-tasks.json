@@ -1,0 +1,40 @@
+[
+  {
+    "id": "orientation",
+    "prompt": "这个项目是做什么的？",
+    "validator": "blind"
+  },
+  {
+    "id": "test-check",
+    "prompt": "检查这个项目能否通过测试。",
+    "validator": "test-gate"
+  },
+  {
+    "id": "worktree-status",
+    "prompt": "这个仓库当前有哪些未提交的变更？",
+    "validator": "git-status"
+  },
+  {
+    "id": "runtime-requirement",
+    "prompt": "这个项目要求的最低 Node.js 版本是什么？",
+    "validator": "package-engine"
+  },
+  {
+    "id": "code-explanation",
+    "prompt": "解释 internal/value-wire.js 中 projectValueWire 的返回策略。",
+    "validator": "blind"
+  },
+  {
+    "id": "small-edit",
+    "prompt": "在 package.json 中新增 test:unit 脚本，值为 node --test，并验证 JSON 有效。",
+    "validator": "package-script",
+    "script": "test:unit",
+    "value": "node --test"
+  },
+  {
+    "id": "negative-fact",
+    "prompt": "README 是否要求 Python 3.12？只报告结论和依据。",
+    "validator": "readme-phrase",
+    "phrase": "Python 3.12"
+  }
+]

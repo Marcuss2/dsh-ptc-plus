@@ -6,12 +6,10 @@ export const JOURNAL_VERSION = 1
 
 const STATUSES = new Set(['durable', 'volatile', 'discarded', 'noop'])
 const BINDING_MODES = new Set(['loose', 'strict'])
-const JOURNAL_FIELDS = new Set(['version', 'bindingMode', 'status', 'calls', 'operations', 'cordisEffects', 'confirms', 'diagnostics', 'completion', 'volatileReason'])
+const JOURNAL_FIELDS = new Set(['version', 'bindingMode', 'status', 'calls', 'operations', 'confirms', 'diagnostics', 'completion', 'volatileReason'])
 const CALL_SUCCESS_FIELDS = new Set(['global', 'member', 'args', 'ok', 'value', 'settle'])
 const CALL_ERROR_FIELDS = new Set(['global', 'member', 'args', 'ok', 'error', 'settle'])
 const OPERATION_FIELDS = new Set(['action', 'name'])
-const CORDIS_EFFECT_FIELDS = new Set(['parent', 'member', 'args', 'ok', 'value', 'error'])
-const CORDIS_EFFECT_MEMBERS = new Set(['define', 'run', 'stop', 'undefine'])
 const RETURN_FIELDS = new Set(['kind', 'hasValue', 'value'])
 const THROW_FIELDS = new Set(['kind', 'error'])
 const ERROR_FIELDS = new Set(['kind', 'message'])
@@ -81,32 +79,6 @@ function normalizeOperations(value) {
   })
 }
 
-function normalizeCordisEffects(value) {
-  if (value === undefined) return []
-  if (!Array.isArray(value)) throw new Error('invalid dsh-ptc-plus journal Cordis effects')
-  return value.map((effect, index) => {
-    if (!isRecord(effect) || !Number.isSafeInteger(effect.parent) || effect.parent < 0
-      || !CORDIS_EFFECT_MEMBERS.has(effect.member) || (effect.ok !== true && effect.ok !== false)
-      || !Object.hasOwn(effect, 'args')) {
-      throw new Error(`invalid dsh-ptc-plus journal Cordis effect at index ${index}`)
-    }
-    assertOwnFields(effect, effect.ok ? new Set([...CORDIS_EFFECT_FIELDS].filter(key => key !== 'error')) : new Set([...CORDIS_EFFECT_FIELDS].filter(key => key !== 'value')), `journal Cordis effect at index ${index}`)
-    if (effect.ok === true && !Object.hasOwn(effect, 'value')) {
-      throw new Error(`journal Cordis effect at index ${index} is missing its value`)
-    }
-    if (effect.ok === false && typeof effect.error !== 'string') {
-      throw new Error(`journal Cordis effect at index ${index} is missing its error`)
-    }
-    return {
-      parent: effect.parent,
-      member: effect.member,
-      args: normalizeValueWire(effect.args),
-      ok: effect.ok,
-      ...(effect.ok ? { value: normalizeValueWire(effect.value) } : { error: effect.error }),
-    }
-  })
-}
-
 function normalizeCompletion(value, required) {
   if (value === undefined && !required) return undefined
   if (!isRecord(value) || !['return', 'throw'].includes(value.kind)) {
@@ -166,23 +138,18 @@ export function normalizeJournal(value) {
   if (!BINDING_MODES.has(value.bindingMode)) throw new Error('invalid dsh-ptc-plus journal binding mode')
   const calls = normalizeCalls(value.calls)
   const operations = normalizeOperations(value.operations)
-  const cordisEffects = normalizeCordisEffects(value.cordisEffects)
-  if (cordisEffects.some(effect => effect.parent >= calls.length)) {
-    throw new Error('dsh-ptc-plus journal Cordis effect refers to a missing parent call')
-  }
-  if (cordisEffects.some(effect => calls[effect.parent].global !== 'code'
-    || calls[effect.parent].member !== 'run')) {
-    throw new Error('dsh-ptc-plus journal Cordis effect parent must be code.run')
-  }
   const confirms = normalizeConfirms(value.confirms)
   const diagnostics = normalizeDiagnostics(value.diagnostics)
   const completion = normalizeCompletion(value.completion, value.status === 'durable' || value.status === 'volatile')
   if ((value.status === 'discarded' || value.status === 'noop')
-    && (calls.length !== 0 || operations.length !== 0 || cordisEffects.length !== 0)) {
+    && (calls.length !== 0 || operations.length !== 0)) {
     throw new Error(`${value.status} dsh-ptc-plus journal must not contain calls or operations`)
   }
   if (value.volatileReason !== undefined && typeof value.volatileReason !== 'string') {
     throw new Error('invalid dsh-ptc-plus volatile reason')
+  }
+  if (value.volatileReason !== undefined && value.status !== 'volatile' && value.status !== 'discarded') {
+    throw new Error('dsh-ptc-plus volatile reason requires volatile or discarded status')
   }
   return Object.freeze({
     version: JOURNAL_VERSION,
@@ -190,7 +157,6 @@ export function normalizeJournal(value) {
     status: value.status,
     calls: Object.freeze(calls),
     operations: Object.freeze(operations),
-    ...(value.cordisEffects === undefined ? {} : { cordisEffects: Object.freeze(cordisEffects) }),
     confirms: Object.freeze(confirms),
     diagnostics: Object.freeze(diagnostics),
     ...(completion === undefined ? {} : { completion }),

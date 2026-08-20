@@ -1,8 +1,11 @@
 # dsh-ptc-plus
 
-> **Agent 原生 REPL：一个与 DSH session 绑定、可增量定义、可继续求值、可由 session log 恢复可信状态的代码环境。**
+> A session-bound, agent-native REPL for DSH Code Mode.
 
-PTC Plus 将模型直接发起的 DSH Code Mode `run_code` 变成 session REPL。模型只需继续写下一段程序；已经建立的变量、函数、模块和计算结果直接作为 binding 使用。
+> **非官方社区项目。** 本项目由个人独立开发和维护，与 DeepSeek / DSH 官方没有隶属或背书关系。
+
+PTC Plus 把模型直接发起的 DSH Code Mode `run_code` 变成连续的 TypeScript REPL。后续 cell
+直接使用已经建立的变量、函数、模块和计算结果，不需要搬运此前源码。
 
 ```ts
 // Cell 1
@@ -12,83 +15,161 @@ function parseSessionLine(line: string) {
 ```
 
 ```ts
-// Cell 2：直接继续求值，不搬运 Cell 1
-const result = await workspace.readLines({ path: "G:/logs/session.jsonl" })
-return result.lines.map(line => parseSessionLine(line.text)).length
+// Cell 2
+import { readFile } from "node:fs/promises"
+const text = await readFile("logs/session.jsonl", "utf8")
+return text.split("\n").filter(Boolean).map(parseSessionLine).length
 ```
 
-这里被复用的是环境，不是源码仓库、hash 引用或需要重新转义的代码字符串。
+这里复用的是 live environment，不是源码副本、hash 引用或再次转义的代码字符串。
 
-## 产品约束
+## 定位与边界
 
-实现同时满足四个约束：
+本插件是个人维护的社区实验插件，只使用 DSH 的公共扩展面，不修改或 fork DSH，不接入
+私有 scheduler，也不伪造 session event。
 
-- **不搬运源码**：后续 cell 直接引用已有 binding；
-- **不嵌套转义**：已有代码不作为另一个工具参数中的源码字符串；
-- **不浪费 token**：模型不处理源码副本、SHA、revision 或恢复协议；
-- **不增加往返**：普通继续求值仍只有一次 `run_code` 调用。
+`danger-full-access` 是一等运行方式：模型可以使用 DSH 原生 typed `tools.*`，以及它熟悉的
+Node、进程、shell 和生态 SDK。PTC Plus 不复制这些 API，不维护工具参数或结果适配表，也不实现
+第二套跨平台权限系统。native tool 的权限、审批、sandbox 与调度仍由 DSH 和当前 profile 负责；
+直接 Node access 的 confinement 由 worker 进程与操作系统负责。
 
-PTC Plus 是纯 RC7 社区插件：只使用 DSH 已有公共扩展面，不修改或 fork DSH，不接入私有
-scheduler，也不伪造 session event。当前实现不增加模型可直接调用的 tool；program-only operation
-可以使用 DSH 的公开 ToolDefinition 与 nested dispatch，但必须从 model-facing surface 隔离。
+其他 profile 只保留当前 request 实际提供的 capability；缺失能力明确失败，不由插件模拟。
+PTC Plus 的 worker thread 是 REPL 生命周期隔离，不是恶意代码安全边界，因此更窄的 tool view
+不能被解释为对 Node ambient API 的额外安全承诺。
 
-## 连续求值与诊断
+这组边界落实为四个用户可观察约束：
 
-每次模型直接发起的 `run_code` 都是同一个 session REPL 的下一格，而不是独立脚本。顶层 binding 会跨 cell 保留。默认宽松模式允许模型再次写顶层 `const`/`let`：完整 declarator 中的名称若全部已存在就替换现值，若全部为新名称就建立持久 binding。若被替换的名称也在前一个实际执行的 cell 中声明，插件会输出一条非阻断 `PTC-N002` note，提醒模型现有 binding 可以直接复用；cell 仍按原意执行。严格模式、同一解构里混合新旧名称，以及 function/class 重声明仍在执行前报告冲突。可重放的外部输入应通过 program capability 获取；当前 workspace 投影提供 `readLines(...)` 与 `findFiles(...)`，未适配能力使用显式 `host.invoke(...)`，动态源码使用 `code.run(...)`。typed `cordis.*` 的 Plugin/Package/Fiber 领域 effect 会随 journal 重建；Client approval、异步 settlement 和 raw `host.invoke(cordis_*)` 仍会开启 sticky volatile 后缀，但不会禁用或丢弃当前进程中的任何 live binding。
+- 后续 cell 直接引用已有 binding，不搬运源码；
+- 既有代码不作为另一个工具参数中的源码字符串；
+- 普通继续求值仍只需一次 `run_code`；
+- 能复用原生强类型接口时，不增加反射总线、命令 DSL 或权限抽象。
 
-cell 始终按完整 async function body 解释，不采用 Node 终端 REPL 对 `{ ... }` 的对象字面量猜测。模型可以自然使用块作用域中的 `const`/`let`、top-level `await` 和末尾注释，无需添加分号、包装函数或遵守执行器特有的书写仪式；适配器负责无语义变化的 statement framing。
+## 与 DSH 的集成
 
-模型可见的 `[PTC-...]` 诊断给出失败阶段、REPL 状态影响和最小修复动作。诊断是 session journal 中结构化事实的确定性投影，不依赖模型解析普通异常文本。当前稳定代码包括：
+插件通过 `dsh.bundle.patch` 指向的 `cordis.patch.yml` 挂载到 DSH profile。它接管模型直接发起的
+顶层 `run_code`，并在严格 Code Mode 的模型 wire 上固定提供 `edit_run_code`；其他 tool、
+非 agent runtime call 和嵌套调度保留上游行为。
+
+插件提供：
+
+- **session REPL**：跨 cell 保留顶层 binding；
+- **结构化诊断**：`[PTC-...]` 文本由 journal 中的封闭诊断结构确定性投影；
+- **durable / volatile 恢复**：精确重放可信历史，保留但不自动重放不可证明的副作用；
+- **原生 capability**：保留 DSH 当前 request 的 typed bindings，并为每个 cell 建立统一 lease；
+- **静默入口纠错**：把严格 Code Mode 中误发的已知顶层 tool call 包装为等价 `run_code` cell；
+- **描述性探索**：`capabilities.tree/find/inspect` 描述 live tool schema，不授予权限或调用能力；
+- **状态控制**：`repl.state` 管理 durable 命名状态；
+- **源码元编程**：`code.run` 在隔离 child environment 中执行动态源码。
+- **被拒绝 cell 的局部编辑**：`edit_run_code` 用一次精确替换修复未执行的长 cell，避免模型重发全文。
+
+插件保留 DSH 原有 tool schema、guidance、参数、canonical result、错误和 policy 语义。它只在严格
+Code Mode SDK 后追加 `repl`、`capabilities` 与 `code` 的类型声明，并把 `run_code` 描述改为连续
+REPL 语义。
+
+如果模型仍在严格 Code Mode request 中误发了当前 agent scope 已知的顶层 native tool call，
+插件会在写入 assistant message 前静默改写为一个调用 `tools[name]` 的 `run_code` cell。原始 JSON
+参数文本进入 cell 后才由 `JSON.parse` 解析，正式参数验证、dispatch、结果和错误仍由同一个 DSH
+tool contract 决定；插件不显示额外 warning/note，也不要求模型先失败再重试。call id、block index、
+usage 和 finish reason 保持不变，已失效的 provider replay metadata 会被丢弃。未知、畸形或内部不一致
+的调用不猜测修复，仍交给宿主诊断。该恢复默认开启，可用 `canonicalizeToolCalls: false` 关闭。
+
+## 连续求值
+
+每个顶层 `run_code` 都是同一 session kernel 的下一格。cell 按完整 async function body 解释，
+支持块作用域、top-level `await` 和普通控制流 `return`。
+
+默认宽松模式允许再次声明顶层 `const`/`let`：一个完整 declarator 的名称全部已存在时替换现值，
+全部为新名称时建立新 binding。宽松重声明是普通 REPL 操作，不产生诊断。严格模式、同一解构中
+混合新旧名称，以及 function/class 重声明会在执行前报告冲突。
+
+能力 namespace 及其 member 只在当前 cell lease 内有效。不要把 `tools`、`capabilities`、`repl`、
+`code` 或其中的函数保存到后续 cell；cell 结束后调用会得到 `PTC execution lease expired`。
+
+常见诊断：
 
 | Code | 含义 | 状态影响 |
 | --- | --- | --- |
-| `PTC-C001` | cell syntax 无法解析 | cell 未执行，REPL 不变 |
-| `PTC-C002` | preflight 拒绝 kernel-control capability | cell 未执行，REPL 不变 |
-| `PTC-N001` | 与已有顶层 binding 冲突 | cell 未执行，REPL 不变 |
-| `PTC-N002` | 宽松模式下相邻 cell 重复声明同一 binding | 仅提醒；cell 继续执行并保留实际结果 |
-| `PTC-O001` | 返回值超出 PTC Value V1 支持域或预算 | cell 已执行；此前 binding/mutation 可能生效 |
-| `PTC-V001` | 首次进入 volatile 模式 | live binding 继续可用；该后缀不参与冷重放，cell 成败由实际执行结果单独说明 |
-| `PTC-X001` | cell 执行中的未捕获异常 | 抛出前的变更可能已经生效 |
-| `PTC-R002` | 冷恢复跳过历史 volatile/unconfirmed 后缀 | 回到最后可信 durable head |
+| `PTC-C001` | cell syntax 无法解析 | 未执行，REPL 不变 |
+| `PTC-C002` | preflight 拒绝 kernel-control import | 未执行，REPL 不变 |
+| `PTC-N001` | 顶层 binding 冲突 | 未执行，REPL 不变 |
+| `PTC-O001` | 返回值不受支持或超过 value budget | 已执行；此前 mutation 可能生效 |
+| `PTC-X001` | 未捕获运行异常 | 抛出前的 mutation 可能生效 |
+| `PTC-R002` | 冷恢复跳过 volatile/unconfirmed 后缀 | 回到最后可信 durable head |
 
-出现诊断时只按 `help:` 修复失败部分，不要重发整个 cell，也不要重建已经存在的环境。`PTC-V001` 是持久性状态通知而非执行失败；除非确实要放弃 live 后缀并回到可冷恢复状态，否则继续复用当前 binding 即可。源码位置使用无 ANSI 的 code frame；完整诊断契约见 [架构说明](docs/architecture.md#诊断契约)。插件安装后提供随插件共同出现和消失的“全能模式” system preset：完整继承当前官方创造模式，并从官方创造、标准、极简 standing scope 动态提取、按名称去重其真实 tool definitions，附加 Code/PTC 与 `danger-full-access / never`；不维护工具名或 schema 副本。已知 Cordis contract 使用 `cordis.*` 强类型翻译，其余当前可见 binding 仍可通过 `host.invoke` 使用；边界见 [Full-access composition](docs/full-access.md)。
+普通成功 cell 不产生 PTC warning/note。进入 volatile 只记录在 journal 的 `status` 和
+`volatileReason` 中；只有真实执行失败或 cold recovery 已跳过历史状态时才向模型显示可行动诊断。
 
-PTC Plus 还通过 RC7 的 `system-prompt/assemble` 公共 waterfall，把模型可见的 `run_code` schema 改写为“下一 REPL cell”语义；注册表中的原始 tool definition 保持只读，其他 schema 字段原样保留。严格 PTC 的 compatibility SDK 从当前公开 tool schema 生成每个 capability 的参数形状，并移除 native tool guidance，避免模型因看见 `read`/`write` 语法而跳回直接调用；宿主结构不兼容时 prompt assembly 直接失败而不回退到误导性的一次性程序描述。
+## Capability 使用
 
-在严格 PTC 请求中，插件还通过 RC7 公共 `llm/stream` waterfall 做保守的 tool-call canonicalization（`canonicalizeToolCalls: true`，可关闭）。如果模型仍把当前 session 确实可见的 native capability，或程序内的 `host.invoke`、`workspace.*`、`code.run`、`repl.state` 错当成外层工具，插件会在 assistant message 落盘和 dispatch 前将其改写为同一 `callId` 的 block-scoped `run_code` cell。canonicalizer 使用当前 `ctx.tools.schemas(scope)` 的完整动态 schema 映射，不内置官方工具名或参数副本；native 参数原样进入 `host.invoke`，因此官方新增工具和字段自动适配。仅精确匹配当前 `read`/`glob` program contract 的请求升级为已翻译的 `workspace.*`，不匹配时仍无损透传。这样 UI、session log、调用树和 REPL 都只看到规范化后的程序事实；未知工具、不完整参数、非法 JSON 或非严格 PTC 请求不会被猜测或吞掉。
+cell 直接调用当前 SDK 声明的 `tools.*`。不同结果可能是完整值、有界窗口、增量、开放世界查询
+或未知完整性；模型/UI 的文本裁剪与程序收到的 canonical value 也是两个不同契约。
+
+当前 DSH `tools.read` 契约返回有界 inspection window，不是无损整文件 API；PTC capability
+metadata 缺少 owner 注解时仍会诚实显示 `unknown`，不会根据工具名补写这一事实。需要无损整文件
+计算时，在 `danger-full-access` 下使用 `node:fs/promises.readFile` 或流式文件 API。直接 Node/OS
+I/O 不经过 tool transcript，因此会让当前 live 后缀进入 `volatile`；当前进程仍可继续使用已有 binding。
+
+按需探索当前 tool view：
+
+```ts
+const roots = await capabilities.tree()
+const matches = await capabilities.find("session")
+return capabilities.inspect({
+  symbols: matches.slice(0, 8).map(item => item.symbol),
+  budget: 8,
+})
+```
+
+explorer 不调用 capability、不读取隐藏服务，也不发起模型请求。CodeRuntime request 已携带的
+owner-provided program namespace 会原样保留并共享 cell lease；PTC Plus 不翻译其领域契约。当前
+公共 CodeRuntime request 没有用于发现额外服务的跨插件 registry，非 tool API 不由插件猜测或
+通过名称反射暴露。owner namespace 若与插件保留的 `capabilities`、`code` 或 `repl` 同名，request
+会明确失败，而不是静默覆盖或合并两套实现。
 
 ## 源码元编程
 
-PTC Plus 在每个顶层 cell 中提供 `code.run({ code, description })`。cell 可以把历史 `run_code` 源码作为普通数据读取、用 TypeScript 转换，并直接执行转换后的源码。子调用使用捕获的 upstream CodeRuntime 创建隔离的一次性环境，继承当前可见 capability 与取消信号，但不读取或合并父 REPL binding。父 cell 返回后仍保留原环境，子声明不会进入父环境。
+`code.run({ code, description })` 在隔离 child environment 中执行动态源码，返回
+`{ logs, result? }`。child 继承当前 request 的 tool view 与取消信号，但不读取或合并父 REPL
+binding。父 journal 把它作为 program binding call 记录；调用正常结算后，cold replay 返回 recorded
+result，不重新执行 child。若取消、超时或 worker failure 发生在调用结算前，journal 保留
+`code.run` unknown-effect 边界并回到最近 durable frontier。相同的 pending/settled 规则适用于
+所有 program binding，不按 capability 名称特判。
 
-这种路径不把长源码搬回模型上下文：历史源码应通过当前可见的 session-event capability 读取，修改逻辑留在当前 PTC 程序中。PTC Plus 不增加 `repl.revise`、行编辑、cell id、源码 hash 或专用历史源码工具。
+`edit_run_code({ old_string, new_string })` 只编辑同一未结束 turn 中最近一个确定在执行前被拒绝的
+`run_code` cell。`old_string` 必须非空、与 `new_string` 不同，并在原 cell 中恰好出现一次。
+替换完成后立即以官方 `run_code` 执行完整结果；模型只需生成变化片段。
 
-这个入口是已有 PTC 执行环境中的插件 host binding，不是第二个模型工具，也不依赖 RC7 把 `run_code` 加入原生 SDK projection。它不会伪造原生 nested tool card、独立 policy hook 或 `tool/code-dispatch-*` 事件；这些 UI/事件差异不改变代码中的元编程能力。递归深度由 `maxNestedRunCodeDepth` 限制，默认 8 层。
+可编辑对象必须有 `noop` journal，且诊断为 `PTC-C001`、`PTC-C002` 或 `PTC-N001`。
+任何已进入 runtime 的 cell、运行时异常、超时、取消或未确定 effect 都不可编辑重跑，避免重复副作用。
+同一 turn 中后续的调查 cell 不会擦除该目标；修复后的 cell 一旦实际执行，目标即被消费。
+目标或替换不合法时，调用返回 `{ edited: false, reason }`，不产生 PTC warning。
+
+严格 Code Mode 的每个 request 都按固定顺序暴露 `[run_code, edit_run_code]`；是否存在可编辑 cell 不改变
+tool name、schema、顺序或提示，以保持 provider cache 稳定。`edit_run_code` 不注册为 DSH native tool；
+插件在 assistant message 持久化前将它确定性 lower 为官方 `run_code`，完整修复后源码依然进入
+session log，正式 validation、执行、journal 与结果投影不旁路。它不提供 cell ID、行号、
+replace-all、多 patch、自动修复或 runtime retry。
+
+该顶层入口是临时 transport 便利，用于缓解局部字符错误导致长源码全量重发的模型成本，不是第二套
+编辑 DSL。理想终点是 PTC 与 tool transport 统一，已发出的结构化程序可被原生局部修正；达到该条件后应
+删除此入口，而不是扩展它的语法。`code.run` 仍是 cell 内执行独立动态源码的 program binding，递归深度由
+`maxNestedRunCodeDepth` 限制。
 
 ## Durable / Volatile
 
-任意 Node.js heap 和操作系统资源无法仅凭日志无副作用地重建，因此 REPL 明确区分两种状态：
-
 | 状态 | 当前进程 | 冷恢复 |
 | --- | --- | --- |
-| `durable` | 正常继续求值 | 从 session log 精确重放，外部工具结果不重复执行 |
-| `volatile` | 保留完整 REPL 能力并继续求值 | 不重放源码或副作用，回到最后一个 durable frontier |
+| `durable` | 正常继续求值 | 从 session log 重放，recorded capability result 不重新 dispatch |
+| `volatile` | 保留完整 live REPL | 跳过该后缀，回到最后 durable frontier |
 
-确定性计算、受支持的 Node 模块和经 program capability 记录的结果可以 durable。`process.cwd()` 返回 session header 中不可变的工作目录，因此该调用本身可 durable；直接文件 I/O、依赖隐式 CWD 的模块、时钟、随机数、timer、其他进程能力和无法 journal 的能力会在同一次 `run_code` 中自动进入 volatile，不要求模型重试。
+确定性计算、受支持的 Node 模块和被 journal 记录的 capability result 可以推进 durable head。
+未记录的 Node/OS 输入、时钟、随机数、timer 和其他不可证明资源进入 sticky volatile。
+只有显式 restore、worker 重建或进程重启会丢弃该 live 后缀。
 
-一旦进入 volatile，后续 live cell 保持 volatile，直到显式恢复最后或命名的 durable 状态，或 worker 因取消、超时、退出或进程重启而回到 `durableHead`。被跳过的源码仍在 session log 中，首次恢复会向模型报告边界。
-
-session log 是所有**可恢复状态**的唯一真相。复制完整日志到另一个进程或机器，可以恢复相同的 durable frontier、命名状态和工具 transcript；worker 内存与旁路文件不参与正确性。volatile 内存不会被伪装成可迁移 checkpoint。
-
-详细协议见 [Durable / Volatile 恢复协议](docs/durability-design.md)。当前程序能力投影见
-[Program Capability Projection](docs/capability-projection.md)，目标数据面边界见
-[Program Data Plane](docs/program-data-plane.md)，full-access 与 Cordis creator 组合见
-[Full-access composition](docs/full-access.md)，rich runtime value 与持久格式见
-[PTC Value Graph V1](docs/value-wire.md)。
+session log 是可恢复状态的唯一事实源；worker heap 与旁路文件不属于可迁移 checkpoint。详细协议见
+[Durable / Volatile 恢复协议](docs/durability-design.md)。
 
 ## 状态管理
-
-REPL 内提供控制原语，不新增模型可直接调用的 DSH tool：
 
 ```ts
 await repl.state({ action: "list" })
@@ -98,72 +179,40 @@ await repl.state({ action: "restore", name: "before-refactor" })
 await repl.state({ action: "delete", name: "before-refactor" })
 ```
 
-- 名称匹配 `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`，模型不接触内部 node id；
-- `list` 返回 `{ names, mode, volatileReason? }`，可直接核验当前 live 状态；
-- `save` 只接受 durable cell，运行时降级为 volatile 时 tentative save 会被丢弃；
-- 无名称 `restore` 丢弃 live 后缀并回到本 cell 之前的最后 durable head，不要求预先保存名称；
-- `restore` 可从 volatile 后缀回到命名的 durable 状态；
-- 所有操作随当前 `run_code` 的 journal 一次提交，不增加模型往返。
-
-## 恢复模型
-
-源码只存在于 DSH 原有 `tool/call.data.arguments`。`tool/result.data.meta.dshPtcPlus` 保存 model-invisible journal：
-
-```text
-tool/call(run_code)             tool/result
-└── source code                └── meta.dshPtcPlus
-                                  ├── status / completion
-                                  ├── structured diagnostics
-                                  ├── host-call transcript
-                                  ├── typed Cordis effect transcript
-                                  ├── settlement order
-                                  ├── state operations
-                                  └── confirmed no-op call ids
-```
-
-冷恢复只重放 durable 路径。`workspace.*`、`code.*` 和 `host.*` 调用读取已记录结果，并按原结算顺序释放，因此不会重复外部副作用，也保留 `Promise.race` 等可观察语义。`code.run` 也是普通 parent capability call：其参数和规范结果进入父 journal，冷重放直接返回记录结果，不再次执行隔离 child。重放调用名称、参数、数量、结算顺序或 completion 不一致时恢复失败，不带着错误 heap 继续。
-
-durability 属于整个 live 后缀，不属于单个 capability 结果：进入 volatile 后，即使后续 cell 只调用可记录的 program capability，也不会重新变成 durable。块作用域只避免新增持久顶层名称；完整 durable cell 仍是 journal node，并在冷恢复时重放。
-
-RC7 不能为某次调用保留 journal 时，插件采用保守边界：
-
-- 已确认未进入 runtime 的 invalid args、pre-deny 或 dispatch 前取消是 no-op；
-- 已执行但最终 metadata 被 post policy 删除的 cell 降为 volatile；
-- 冷启动无法判断的无 journal 调用形成 unknown boundary，恢复此前最后一个可信 frontier；
-- 正在触发本次恢复的当前 `run_code` 按 call id 从历史扫描中排除，不能被误判为旧断档；
-- 恢复后的首个 durable cell 建立新的可信分支，使 durable 状态可以继续前移。
-
-实现细节见 [架构说明](docs/architecture.md)。
+- 名称匹配 `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`；
+- `list` 返回 `{ names, mode, volatileReason? }`；
+- `save` 只在 durable cell 中提交；
+- 无名称 `restore` 回到本 cell 之前的 durable head；
+- 操作与当前 `run_code` journal 一次提交，不增加模型往返。
 
 ## 安装
 
-在安装了 DSH CLI 的环境中，从本仓库目录运行：
+要求 Node.js `>=22.19`。当前集成验收版本是 DSH CLI `0.1.0-rc.8`；DSH 仍处于 prerelease，切换
+版本后应重新执行下述安装检查与项目验证。从本仓库目录安装：
 
 ```sh
 dsh plugin --profile default add .
 dsh --profile default --dump-config
 ```
 
-从 `deepseek-harness` 源码仓库运行时：
+从 `deepseek-harness` 源码 checkout 安装：
 
 ```sh
 pnpm dsh plugin --profile default add ../dsh-ptc-plus
 pnpm dsh --profile default --dump-config
 ```
 
-### Windows 本地开发安装
-
-双击仓库根目录的 `install-dev.cmd` 可将当前源码打包为脱离工作区的不可变快照，并安装到 dsh。脚本不会修改 `package.json` 的版本号，也不会把本项目当作已发布包处理。
-
-默认安装到 `web` profile；可设置 `DSH_PROFILE`，或在命令行传入 profile 名称覆盖默认值：
+Windows 本地开发可以运行 `scripts\install-dev.cmd`。脚本用 `npm pack` 创建基于内容 hash 的不可变
+快照，再安装到目标 profile；默认 profile 是 `web`：
 
 ```bat
-install-dev.cmd headless
+scripts\install-dev.cmd headless
 ```
 
-快照写入 dsh 约定的 `$DSH_HOME/plugin-snapshots/<package-name>/`；未设置 `DSH_HOME` 时使用 Windows 用户目录下的 `.dsh`。每个快照目录由 tarball 的 SHA-256 内容前缀标识，后续源码修改会生成新的快照，不会改变已安装的那一份。
+可用 `DSH_PROFILE` 指定默认 profile。快照位于
+`%DSH_HOME%\plugin-snapshots\dsh-ptc-plus\`；未设置 `DSH_HOME` 时使用用户目录下的 `.dsh`。
 
-执行上限可通过 patch 配置：
+配置示例中的值也是当前默认值：
 
 ```yaml
 - id: ptc-plus
@@ -178,25 +227,33 @@ install-dev.cmd headless
     maxValueArrayLength: 1000000
     maxValueBigIntDigits: 100000
     maxNestedRunCodeDepth: 8
+    canonicalizeToolCalls: true
     looseTopLevelRedeclarations: true
     durableReplay: true
 ```
 
-`durableReplay` 默认开启。设为 `false` 是恢复故障的逃生开关：新 kernel 不读取或重放
-session log 中的 REPL heap，所有实际进入 evaluator 的 cell 都以 volatile 运行，但 binding
-仍可在当前进程内连续复用。`noop` 与因取消、超时或 worker 失败而 `discarded` 的调用保持
-原语义。此模式不会删除已有日志；重新开启后，新 kernel 仍可按日志中最后可信的 durable
-frontier 恢复。
+`durableReplay: false` 是恢复故障的显式逃生开关：新 kernel 忽略历史 REPL heap，实际求值的 cell
+都以 volatile 运行，但当前进程仍保留连续 binding。它不删除已有 session log。
 
-## 当前边界
+## 当前限制
 
-- 仅支持 `codeRuntime.language === "typescript"`；
-- durable 模块包括 `node:assert`、`node:buffer`、`node:querystring`、`node:string_decoder`、`node:stream`、`node:url`、`node:util` 和 `node:zlib`；
-- `node:path` 因相对路径读取进程 CWD 而整体进入 volatile；
-- `node:worker_threads` 与 `node:cluster` 的直接 import/require 被拒绝；
-- worker 不继承宿主环境；每个 session kernel 只获得独立安全 scratch 对应的 `TEMP`、`TMP`、`TMPDIR`，因此 `os.tmpdir()` 返回可写绝对路径，scratch 不属于 durable 状态并在 kernel dispose 后尽力清理；
-- worker thread 是 REPL 生命周期隔离，不是抵抗恶意 sandbox escape 的安全边界；
-- durable 恢复当前使用 journal 全量重放，尚无压缩 checkpoint 或 worker LRU 驱逐。
+- 只支持 `codeRuntime.language === "typescript"`；
+- durable import allowlist 是 `node:assert`、`node:buffer`、`node:querystring`、
+  `node:string_decoder`、`node:stream`、`node:url`、`node:util` 和 `node:zlib`；
+- `node:path` 和 allowlist 之外的动态 import 会进入 volatile；
+- 直接 import/require `node:worker_threads` 与 `node:cluster` 会被拒绝；
+- `process.exit`、`process.abort` 与 `process.kill` 在 REPL worker 中会被拒绝；
+- worker 只继承 session cwd 与独立 scratch 对应的 `TEMP`、`TMP`、`TMPDIR`，不继承宿主环境；
+- durable 恢复使用 journal 全量重放，没有压缩 checkpoint 或 worker LRU 驱逐；
+- 插件没有自有 Client UI。
+
+架构与协议文档：
+
+- [Architecture](docs/architecture.md)
+- [Capability Surface](docs/capability-projection.md)
+- [Program Data Plane](docs/program-data-plane.md)
+- [PTC Value Graph V1](docs/value-wire.md)
+- [Publishing](docs/publishing.md)
 
 ## 验证
 
@@ -204,21 +261,38 @@ frontier 恢复。
 npm run check
 ```
 
-### Windows real-model acceptance (expensive, opt-in)
+该命令显式检查入口与 worker 语法，并对 Node 原生 coverage 实际报告的运行时模块设置行覆盖率
+100%、分支覆盖率 95%、函数覆盖率 100% 门禁。worker thread 的行为由端到端 runtime 测试覆盖；
+Node 的主测试进程不会把它纳入同一份 coverage 统计。默认验证不会调用模型。
 
-The default check never contacts a model. To run the manual end-to-end acceptance against the installed Windows DSH headless runner, use:
+在本仓库 source checkout 中，Windows 上安装了 DSH 且已配置模型凭据时，可显式运行真实模型验收：
 
 ```sh
 npm run test:expensive
 ```
 
-Set `DSH_PTC_ACCEPTANCE_PRESET=omnipotent` to run the same gate against the package-owned full-access preset; the default is the official `code` preset.
+该命令单次安装当前 checkout，显式使用 `danger-full-access`，然后默认以 3 路并发运行随机夹具场景，覆盖 durable 跨 cell binding、
+native `tools.*`、`capabilities.*`、`code.run`，以及普通 Node 文件/crypto API 进入 volatile 后的 live
+连续性。硬门禁读取结构化 journal 与解码后的 canonical value，不依赖固定回答措辞，也不会自动重试。
 
-This packs and installs the current checkout into the `headless` profile, enables the profile's official Code/PTC entry through `DSH_TOOLS_MODE=code`, pins the preferred model through a temporary overlay, runs `介绍本项目` from this repository as the workspace, and keeps the complete stdout/stderr, decompressed session log, and analysis report under `artifacts/expensive/<run>/`. The test fails on any tool error, unmatched tool call/result, native tool bypass, nested shell or host-I/O workaround, repository-wide `**/*` scan for orientation, blocking PTC diagnostic, contradictory native-tool prompt guidance, wrong workspace, or incomplete turn. Non-blocking notes such as `PTC-N002` are recorded in the report and do not fail the acceptance. It is intentionally not part of `npm run check`; invoke it explicitly when a real Windows DSH + model credential is available.
+场景由 `scripts/expensive-acceptance-scenarios.json` 声明。可用
+`DSH_PTC_ACCEPTANCE_CONCURRENCY` 调整正整数并发数，用逗号分隔的
+`DSH_PTC_ACCEPTANCE_SCENARIOS` 选择一个或多个场景，或用 `DSH_PTC_ACCEPTANCE_SCENARIO_FILE` 指向另一个
+数据文件。provider、model、profile、permission mode 和单场景 wall timeout 也可通过同前缀环境变量调整。
+验收产物写入 `artifacts/expensive/<run>/<scenario>/`，汇总位于该 run 根目录，不属于默认
+`npm run check`。
 
-`npm run check` 使用 Node 原生 coverage runner 串行执行测试文件，避免并发子进程退出时
-丢失覆盖率数据；单个测试文件内的异步行为不受影响。它对 `index.js` 与 `internal/*.js`
-设置行 100%、分支 95%、函数 100% 的回退门禁。覆盖率用于发现测试面退化，不要求为
-命中不可达实现分支而暴露私有函数、改写源码或扭曲生产代码。
+普通任务下的插件开销与轨迹对比使用：
 
-测试覆盖 live continuation、capability projection、durable/volatile 转换、两阶段 metadata 确认、仅凭 session log 冷恢复、host 结果 record/replay、并发结算顺序、命名状态、取消与 worker 失败，以及 PTC Value Graph 的 rich/deep value。
+```sh
+npm run test:ab
+```
+
+它不会在 system prompt 中加入任务提示，只把 `scripts/ab-trajectory-tasks.json` 中的普通短任务作为
+user message。runner 先冻结当前 checkout，再为每条 session 复制独立 workspace；overlay 关闭用户
+全局 workspace instructions 和无关 skill catalog，任何意外 model-visible 注入差异都会使配对无效。
+相同模型、profile、Code Mode 和 `danger-full-access` 下，唯一 treatment 是是否禁用 `ptc-plus`。
+默认覆盖项目理解、测试、Git 状态、精确事实、代码解释和小修改等任务族，两次重复、最多四路并发；
+同一任务的两臂按稳定随机 AB/BA 顺序运行。报告分开记录机械 oracle、基础设施失败、top-level
+调用错误、完整初始 context、token bucket 和轨迹指标，并生成去除 treatment 身份和启发式派生字段
+的盲评 packet；评分在揭盲前独立完成，不把关键词计数当作正确率。

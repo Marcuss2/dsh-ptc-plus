@@ -302,7 +302,7 @@ export function valueWiresEqual(left, right, options = {}) {
   }
 }
 
-/** True only when outer RC7 JSON projection preserves the complete value semantics. */
+/** True only when the outer structured-result projection preserves the complete value semantics. */
 export function isPlainJsonTree(value) {
   const pending = [value]
   const seen = new WeakSet()
@@ -418,7 +418,10 @@ export function renderValueWire(wire, options = {}) {
   return chunks.join('')
 }
 
-/** Return a lossless outer-RC7 value: structured JSON when safe, otherwise rendered text. */
+/**
+ * Return a lossless outer value: plain JSON values stay structured; richer values become rendered
+ * text. The untagged ranges overlap because a plain JSON root may itself be a string.
+ */
 export function projectValueWire(wire, options = {}) {
   const value = decodeValue(wire, options)
   return isPlainJsonTree(value) ? value : renderValueWire(wire, options)

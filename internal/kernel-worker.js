@@ -138,6 +138,7 @@ function markVolatile(reason) {
   if (current.durability === 'volatile') return
   current.durability = 'volatile'
   current.volatileReason ??= reason
+  channel.postMessage({ type: 'volatile', id: current.id, reason: current.volatileReason })
 }
 
 function completionDurability(execution) {

@@ -1,20 +1,15 @@
 {
   "name": "dsh-ptc-plus",
-  "version": "0.0.0-development",
+  "version": "0.1.0",
   "description": "A session-bound agent-native REPL for DeepSeek Harness Code Mode.",
   "type": "module",
   "main": "./index.js",
   "exports": {
     ".": "./index.js",
-    "./omnipotent-preset": "./omnipotent-preset.js",
-    "./preset-roster": "./preset-roster.js",
     "./package.json": "./package.json"
   },
   "files": [
     "index.js",
-    "omnipotent-preset.js",
-    "preset-roster.js",
-    "presets",
     "internal",
     "docs",
     "cordis.patch.yml",
@@ -28,22 +23,11 @@
     "@babel/code-frame": "^7.29.7",
     "acorn": "^8.15.0"
   },
-  "peerDependencies": {
-    "@deepseek-ai/cordis": "4.0.1",
-    "@deepseek-ai/dsh-tools": "0.1.0-rc.7",
-    "@deepseek-ai/dsh-agent-presets": "0.1.0-rc.7",
-    "@deepseek-ai/dsh-permission-presets": "0.1.0-rc.7"
-  },
-  "devDependencies": {
-    "@deepseek-ai/cordis": "4.0.1",
-    "@deepseek-ai/dsh-tools": "0.1.0-rc.7",
-    "@deepseek-ai/dsh-agent-presets": "0.1.0-rc.7",
-    "@deepseek-ai/dsh-permission-presets": "0.1.0-rc.7"
-  },
   "scripts": {
-    "coverage": "node --test --experimental-test-module-mocks --experimental-test-coverage --test-concurrency=1 --test-coverage-include=\"index.js\" --test-coverage-include=\"internal/*.js\" --test-coverage-lines=100 --test-coverage-branches=95 --test-coverage-functions=100",
-    "check": "node --check index.js && node --check preset-roster.js && node --check omnipotent-preset.js && npm run coverage",
-    "test:expensive": "node scripts/expensive-headless-acceptance.mjs"
+    "coverage": "node --test --experimental-test-module-mocks --experimental-test-coverage --test-concurrency=1 --test-coverage-include=\"index.js\" --test-coverage-include=\"internal/*.js\" --test-coverage-lines=100 --test-coverage-branches=95 --test-coverage-functions=100 \"test/*.test.js\"",
+    "check": "node --check index.js && node --check internal/kernel-worker.js && node --check scripts/expensive-headless-acceptance.mjs && node --check scripts/ab-headless-trajectories.mjs && npm run coverage",
+    "test:expensive": "node scripts/expensive-headless-acceptance.mjs",
+    "test:ab": "node scripts/ab-headless-trajectories.mjs"
   },
   "keywords": [
     "deepseek-harness",
@@ -54,9 +38,30 @@
     "repl"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/muyuanjin/dsh-ptc-plus.git"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
+  },
+  "disclosure": {
+    "disclosureSchemaVersion": "0.2",
+    "cloud": false,
+    "network": [],
+    "offlineMode": true,
+    "apiKeys": [],
+    "permissions": [
+      "inherits the active DSH profile's native typed tool capabilities without adding authority",
+      "allows model-authored Node.js filesystem, process, network, and child-process APIs when the active DSH/OS profile permits them",
+      "runs isolated code.run children in worker-thread scratch without merging the parent REPL heap"
+    ],
+    "jurisdiction": [],
+    "retention": "session"
+  },
+  "devDependencies": {
+    "yaml": "^2.8.1"
   }
 }

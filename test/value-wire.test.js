@@ -511,6 +511,7 @@ test('applies a separate byte ceiling to rendered presentation', () => {
 test('projects exactly the JSON-safe subset and renders every richer graph', () => {
   const jsonCases = [null, true, 1, 'x', [], {}, [1, null, 'x'], { nested: { array: [1, 2] } }]
   for (const value of jsonCases) assert.deepEqual(projectValueWire(encodeValue(value)), value)
+  assert.equal(typeof projectValueWire(encodeValue('x')), 'string')
 
   const shared = {}
   const cycle = {}

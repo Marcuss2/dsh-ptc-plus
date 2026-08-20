@@ -1,8 +1,5 @@
 # Attach the session REPL after both the tools registry and Code Runtime exist.
-# The plugin adds no model-facing tools; run_code remains the only Code Mode entry.
+# The plugin adds a virtual rejected-cell edit transport beside DSH's run_code.
 - insert:
-    - id: ptc-plus-preset-roster
-      name: dsh-ptc-plus/preset-roster
-
     - id: ptc-plus
       name: dsh-ptc-plus

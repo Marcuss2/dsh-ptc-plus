@@ -1,0 +1,3 @@
+# Prefer Native Program Surfaces
+
+Under the first-class `danger-full-access` profile, PTC Plus preserves familiar native Node, shell, ecosystem APIs, and the typed `tools.*` surface instead of wrapping effects in plugin-owned adapters. A tool's model/UI rendering is not its program contract: each result keeps its own completeness class. Every settled program binding call uses recorded-value replay without redispatching external effects; termination with an unsettled call preserves its `global.member` as a possible-effect boundary. Direct Node/OS access without a call transcript makes the live suffix `volatile`. Bounded results remain callable but cannot be promoted to lossless values.

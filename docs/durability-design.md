@@ -30,9 +30,8 @@ PTC Plus 的正确承诺是：
   version: 1,
   bindingMode: "loose" | "strict",
   status: "durable" | "volatile" | "discarded" | "noop",
-  calls: HostCall[],
+  calls: CapabilityCall[],
   operations: StateOperation[],
-  cordisEffects?: CordisEffect[],
   confirms: string[],
   diagnostics: Diagnostic[],
   completion?:
@@ -48,30 +47,27 @@ PTC Plus 的正确承诺是：
 - `durable`：创建可重放 node，推进 `durableHead`；
 - `bindingMode`：记录该 cell 实际采用的顶层 binding 语义；冷重放读取每个 node 的记录值，不读取恢复时的 profile 配置；
 - `volatile`：只推进 live heap，不推进 `durableHead`；
-- `discarded`：基础设施失败，calls、operations 和 `cordisEffects` 必须为空；若 opaque external capability 已越过 possible-effect boundary，则保留 `volatileReason`，恢复时不能把它折叠为 no-op；
-- `noop`：程序未执行，calls、operations 和 `cordisEffects` 必须为空；
+- `discarded`：基础设施失败，calls 和 operations 必须为空；若中止时仍有未结算的 program binding call，则以首个 `global.member` 保留 `volatileReason`，恢复时不能把这个 possible-effect boundary 折叠为 no-op；
+- `noop`：程序未执行，calls 和 operations 必须为空；
 - `confirms`：确认此前无 journal 的 call id 没有进入 runtime；
-- `cordisEffects`：可选的 typed Cordis domain effect transcript，以父 host-call index 关联 mutation；
-  普通 typed Cordis call 仍由自己的 `calls` entry 驱动 replay，嵌套 `code.run` 内的 effect 则使用
-  该关联记录；
 - `diagnostics`：本 cell 产生的封闭结构化诊断；
 - `completion`：区分普通 return 与可重放的语义 throw；
-- `volatileReason`：记录第一次触发降级的 capability。
+- `volatileReason`：记录第一次运行时降级原因，或 discarded cell 中最先观察到的未结算 program binding。
 
 `durableReplay` 不写入 journal，也不引入 schema 分支。它默认是 `true`。设为 `false` 时，
 SessionRuntime 创建 kernel 时完全忽略历史 nodes、head、checkpoints 与 volatile suffix；之后实际
 求值的 cell 无论静态分类如何都记录为 `volatile`。这是已知配置态，不是运行时降级，因此不
-发送 `PTC-V001`；system prompt 直接告知模型 binding 仅在当前进程可复用，`repl.state(list)`
+发送模型可见警告；system prompt 直接告知模型 binding 仅在当前进程可复用，`repl.state(list)`
 返回同一状态。未进入 evaluator 的调用仍是 `noop`，取消、超时和 worker failure 仍是
 `discarded`。关闭期间不能保存 durable named state；restore 后的下一 cell 仍被强制为 volatile。
 
-journal、diagnostic、source、cause、call、operation、completion 和 completion error 都使用封闭字段集合；未知、symbol 或非枚举自有字段会使 journal 无效。host-call `args`/`value` 与 return completion `value` 都是封闭、规范化的 `ptc-value-graph/v1` envelope。诊断结构、source frame 依赖和稳定代码见[架构说明](architecture.md#诊断契约)。
+journal、diagnostic、source、cause、call、operation、completion 和 completion error 都使用封闭字段集合；未知、symbol 或非枚举自有字段会使 journal 无效。capability-call `args`/`value` 与 return completion `value` 都是封闭、规范化的 `ptc-value-graph/v1` envelope。诊断结构、source frame 依赖和稳定代码见[架构说明](architecture.md#journal-与恢复)。
 
 当前实现只定义并接受本文这一种 `version: 1` schema；同一版本不存在其他历史形状或兼容迁移。包括 `bindingMode`、`diagnostics` 在内的必需字段缺失时 journal 必须失效，不能静默补默认值，否则会削弱最终持久值与 tentative journal 的严格一致性确认。profile 后续切换宽松/严格模式只影响新 cell，历史 node 始终按自身记录的模式重放。
 
-## Host Transcript
+## Capability Call Transcript
 
-每个 tool/repl binding call 保存：
+每个 native `tools.*` 或 cell program binding call 保存：
 
 ```ts
 {
@@ -85,31 +81,13 @@ journal、diagnostic、source、cause、call、operation、completion 和 comple
 }
 ```
 
-`settle` 必须是从 0 开始的连续序列。重放按源码产生调用，但按 recorded settlement order 释放结果；这同时校验调用提交顺序和异步完成顺序。
+`settle` 必须是从 0 开始的连续序列。重放按源码产生调用，但不重新 dispatch；它校验 global、member、args 和提交数量，再按 recorded settlement order 释放 recorded value/error。这个 `recorded-value` 承诺重建的是 REPL 计算状态，不表示外部 effect 被重做、撤销或验证。completeness、effect、authority 和 source evidence 属于 capability metadata，不伪装成 journal 字段。
 
-typed Cordis effect 使用独立的可选记录：
-
-```ts
-{
-  parent: number,
-  member: string,
-  args: PtcValueGraphV1,
-  ok: boolean,
-  value?: PtcValueGraphV1,
-  error?: string,
-}
-```
-
-`parent` 必须指向拥有该 effect 的 `code.run` host-call index。它只保留隔离 child 内部发生、但不会出现在
-父 canonical result 中的 Cordis mutation；普通 `cordis.*` 调用由自身 host-call transcript 重建，不重复记录。冷恢复执行该父调用时，adapter 按记录重新调用当前
-typed Cordis binding，并验证逻辑 identity。`cordisEffects` 不参与 host-call `settle` 排序，且在
-`noop`/`discarded` journal 中必须为空。字段省略等价于没有此类领域 effect。
-
-journal 的 host-call `args`/`value` 与 completion value 保存 `ptc-value-graph/v1` canonical envelope，不保存 decoded rich JS value，也不依赖递归 `JSON.stringify` 或 `structuredClone`。因此深层数组/对象、own `__proto__`、`undefined`、special number、BigInt、hole、shared identity 和 cycle 不会被外层 session JSON 改写。完整支持域和预算见 [PTC Value Graph V1](value-wire.md)。
+journal 的 capability-call `args`/`value` 与 completion value 保存 `ptc-value-graph/v1` canonical envelope，不保存 decoded rich JS value，也不依赖递归 `JSON.stringify` 或 `structuredClone`。因此深层数组/对象、own `__proto__`、`undefined`、special number、BigInt、hole、shared identity 和 cycle 不会被外层 session JSON 改写。完整支持域和预算见 [PTC Value Graph V1](value-wire.md)。
 
 ## 两阶段确认
 
-RC7 的真实流水线是：
+当前 DSH 公共扩展流水线是：
 
 ```text
 pre-execute -> tools/execute -> post-execute
@@ -143,9 +121,9 @@ pre-execute -> tools/execute -> post-execute
 
 ## Nested run_code
 
-只有模型直接发起的 top-level `run_code` 创建本 schema 的 cell journal。父 cell 的 `code.run` capability 在 upstream CodeRuntime 的隔离环境中执行 child，不创建 child PTC journal，也不产生可合并到父 heap 的 binding。
+只有模型直接发起的 top-level `run_code` 创建本 schema 的 cell journal。隔离 child binding 不创建 child PTC journal，也不产生可合并到父 heap 的 binding。
 
-父 cell 把 `code.run` 当成普通 host call，记录其 graph-encoded arguments、canonical result/error 和 settlement order。若 child 产生 typed Cordis domain effect，projection 同时在父 journal 的 `cordisEffects` 中记录 effect 与父 call index；冷重放先重建这些 Cordis effect，再返回 child 的 canonical result，不重新执行 child 源码或 raw 外部工具。没有 typed effect 的普通 child 仍只回放结果。projection 继承当前 request 的可见 authority 与取消信号，并以配置深度限制递归；它不注册第二个模型工具，不伪造 DSH child UI、独立 policy hook、调用树或 code-dispatch events。宿主若已提供可调用的 `run_code` binding，`code.run` 使用该宿主路径。
+父 cell 把隔离 child 当成普通 program binding call，记录 graph-encoded arguments、canonical result/error 和 settlement order。正常结算后，cold replay 返回 recorded child result，不重新执行 child 源码。若取消、超时或 worker failure 发生在调用结算前，`discarded` journal 以 `code.run` 保留 possible-effect boundary。这个结果来自所有 program binding 共用的 pending/settled 生命周期，不是 `code.run` 名称特例。它不注册第二个模型工具，也不伪造 UI、policy hook、调用树或事件。
 
 ## 日志折叠
 
@@ -203,11 +181,11 @@ type StateOperation =
 
 静态分类器理解 top-level、block、function、catch 和 loop binding。它只把实际未绑定的 ambient reference 作为降级候选；属性键和局部同名变量无影响。
 
-运行时对以下访问标记 volatile。归因依据是 worker 当前 active execution，不使用异步回调继承的 `AsyncLocalStorage` store。active execution 从开始求值持续到 host calls 结算、返回值 PTC value graph 编码或异常归一化全部完成；这些阶段的 getter、Proxy 或字符串转换仍可能执行用户代码。最终 durability 必须在转换后采样，纯 wire message 构造完成后才在最外层 `finally` 清除 active execution。只有此后发生的访问才暂存 reason 并使下一 cell volatile：
+运行时对以下访问标记 volatile。归因依据是 worker 当前 active execution，不使用异步回调继承的 `AsyncLocalStorage` store。active execution 从开始求值持续到 capability calls 结算、返回值 PTC value graph 编码或异常归一化全部完成；这些阶段的 getter、Proxy 或字符串转换仍可能执行用户代码。最终 durability 必须在转换后采样，纯 wire message 构造完成后才在最外层 `finally` 清除 active execution。只有此后发生的访问才暂存 reason 并使下一 cell volatile：
 
 - Date、performance、fetch、WebSocket、crypto、Intl；
 - setTimeout、setInterval、setImmediate；
-- eval、Function、除 `cwd()` 外的 process 能力、require；
+- eval、Function、除捕获的 stdout/stderr 与 session-backed `cwd()` 外的 process 能力、require；
 - `Math.random()`；
 - durable allowlist 之外的 dynamic import，包括 `node:path`。
 
@@ -215,7 +193,9 @@ type StateOperation =
 
 worker 不继承 Electron 的工作目录语义。插件通过现有 `tools/execute` context 读取不可变的 `agent.session.header.cwd` 并注入 session worker；`process.cwd()` 返回该值且保持 durable。header 未记录 cwd 时才回退宿主值并在运行时标记 volatile。
 
-直接访问 `worker_threads` 或 `cluster` 的常见 import/require 形式被拒绝，因为它们暴露 worker lifecycle control。该 gate 不是恶意代码安全沙箱；部署安全仍依赖 DSH policy、进程隔离和操作系统权限。
+直接访问 `worker_threads` 或 `cluster` 的常见 import/require 形式，以及 `process.exit/abort/kill`，
+会被拒绝，因为它们暴露或破坏 worker lifecycle control。该 gate 只维护 REPL 生命周期，不是恶意
+代码安全沙箱；native tool 的安全依赖 DSH policy，ambient Node 的安全依赖进程隔离和操作系统权限。
 
 ## 恢复通知
 
@@ -230,7 +210,7 @@ help: ...
 
 通知进入正常 CodeRuntime logs，结构化值进入当前 journal，因此成功结果和错误结果都能呈现并从 session log 重建。每个 kernel 只发送一次，避免污染后续上下文。
 
-live kernel 首次进入 volatile 时记录并投影一次 `PTC-V001`，包含精确 `volatileReason`。消息先确认当前 live state 仍可继续复用，并按 execution outcome 说明 cell 成功或失败前 mutation 可能已生效，再说明 sticky 后缀不会在冷启动重放；它不得诱导模型重建环境。后续 volatile cell 不重复该诊断。post-execute confirmation 丢失导致的延迟降级在下一 cell 通知。当前状态也可通过 `repl.state({ action: "list" })` 查询，不需要解析 model-invisible metadata。
+live kernel 首次进入 volatile 只更新 journal 的 `status` / `volatileReason` 和 `repl.state(list)`，不向模型投影 warning/note。该转换不要求当前任务采取行动；只有 cold recovery 已实际跳过 volatile/unknown 后缀时才发送 `PTC-R002`。worker 在首次观察到直接 Node/OS 边界时立即通知主线程，因此后续 hard abort、timeout 或 worker exit 仍能把原因写入 discarded journal。
 
 ## 失败状态语义
 
@@ -239,9 +219,8 @@ live kernel 首次进入 volatile 时记录并投影一次 `PTC-V001`，包含�
 - parse、无法安全放宽的跨 cell collision 在执行前失败，使用 `unchanged`，journal 为 `noop`；
 - 求值开始后的普通 throw 使用 `partially-applied`，因为此前 binding mutation 可能已生效；
 - PTC Value V1 输出超出支持域或预算时使用 `PTC-O001` 与 `partially-applied`，因为返回前的 binding/mutation 已经执行；`undefined`、special number、BigInt、hole、shared identity 和 cycle 属于受支持值，不要求模型为了 transport 改写；
-- 首次 volatile transition 使用 `unknown`，表示 live heap 仍可继续使用但冷恢复不再有确定重放路径；文本必须先说明 live continuity，再说明后缀不会冷重放；
 - 冷恢复丢弃不可信后缀使用 `rolled-back`；
-- 只有已知外部 dispatch 发生但 completion 无法确定时才使用 `unknown` 并附 `dispatchState: "unknown"`，插件不得在 RC7 未提供该事实时猜测。
+- 只有已知外部 dispatch 发生但 completion 无法确定时才使用 `unknown` 并附 `dispatchState: "unknown"`，插件不得在宿主未提供该事实时猜测。
 
 模型可见文本与 `diagnostics` 必须由同一个结构确定性生成。恢复不通过解析既有 message 重建诊断；session export/import 和 replay 均保留结构化 code、cause、dispatch state 与 state effect。源码 frame 使用 `@babel/code-frame` 的无色投影。
 
@@ -256,25 +235,24 @@ live kernel 首次进入 volatile 时记录并投影一次 `PTC-V001`，包含�
 - `run_code.output.presentationMeta`；
 - 标准 `tool/call` 与 `tool/result.meta`。
 
-以上是当前已实现的 PTC journal 协议；迁移目标若加入 program-only ToolDefinition，还会使用公开
-`ctx.tools.register()` 与 nested Code Mode bridge，但不能把该内部 operation 变成新的模型 transport。
+以上是当前已实现的 PTC journal 协议。native `tools.*` 保持 owner contract；cell program binding 不得变成新的模型 transport。
 
-任何 RC7 无法持久确认的状态都必须收缩为 volatile/unknown 边界。修改或 fork DSH、patch 私有
-scheduler、复制 policy/event protocol 或伪造事件不属于本协议；通过公开 API 执行的
-program-only nested dispatch 可以作为 capability 实现，但不得伪装成 journal confirmation，且
-不得泄漏为模型直接 tool。
+任何公共扩展面无法持久确认的状态都必须收缩为 volatile/unknown 边界。修改或 fork DSH、patch 私有
+scheduler、复制 policy/event protocol 或伪造事件不属于本协议。若上游以后提供 owner-declared
+typed binding，它可以使用 DSH nested dispatch，但不得伪装成 journal confirmation，也不得绕过
+scope、policy 或 settlement。
 
 ## 已验证场景
 
-- durable continuation 和仅凭日志的跨进程恢复；
+- durable continuation 和仅凭持久 session-log JSON 的 cold recovery；
 - tool call record/replay 与并发 settlement order；
 - volatile live continuation、冷恢复跳过和 durable 重基；
 - post-execute metadata 删除与 pre-dispatch no-op 确认；
-- hard abort、冷 worker 启动取消和 pending host call 清理；
+- hard abort、冷 worker 启动取消和未结算 program binding 的 possible-effect boundary；
 - replay timeout fail closed；
 - Math intrinsic、局部 ambient 名称、CWD 相关 `node:path`；
 - 命名状态 save/restore/delete 与 volatile restore；
 - 深层 graph value、own `__proto__` key、`undefined`、special number、BigInt、hole、alias 与 cycle；
 - 宽松变量重声明与严格/混合名称 collision preflight；
-- runtime throw、invalid output、首次 volatile 和真实 recovery 的结构化诊断与模型可见投影；
-- 未修改 RC7 的真实公共扩展面和两个独立 Node 进程恢复。
+- runtime throw、invalid output 和真实 recovery 的结构化诊断与模型可见投影；普通 volatile transition 保持安静；
+- 未修改 DSH 的真实公共扩展面，并在全新 session runtime 中从日志恢复。

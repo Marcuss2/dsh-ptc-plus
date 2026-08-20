@@ -1,0 +1,76 @@
+[
+  {
+    "id": "durable-repl-continuity",
+    "title": "Durable bindings across cells",
+    "task": "验证 durable 连续 REPL。先在一个 run_code cell 顶层声明 const {{binding}} = {{left}}，该 cell 不要 return 此值；再在后续独立 cell 中直接复用该 binding（不要重新声明）并加上 {{right}}，return 计算结果。最终用一句话报告结果。不要只描述步骤。",
+    "expect": {
+      "minCells": 2,
+      "maxCells": 4,
+      "allowedJournalStatuses": ["durable"],
+      "requiredJournalStatuses": ["durable"],
+      "continuityBinding": "{{binding}}",
+      "declarationCellHasValue": false,
+      "completionEqualsAny": ["{{expectedSum}}"]
+    }
+  },
+  {
+    "id": "durable-program-surface",
+    "title": "Typed durable program surface",
+    "fixture": {
+      "name": "program-surface-input.txt",
+      "content": "{{secret}}\n"
+    },
+    "task": "在 run_code 中完成一次 typed program surface 验证：先用 capabilities.find 定位 read，并用 capabilities.inspect 检查 tools.read；再用 tools.read 读取 {{fixturePath}} 的唯一标记；最后调用 code.run，让隔离 child 返回“文件中实际标记的完整原文:该原文的字符数”（不要返回中文字面量“标记”）。父 cell 必须 return child result，最终回答也原样给出它。不要绕过这些 SDK binding。",
+    "expect": {
+      "minCells": 1,
+      "maxCells": 3,
+      "allowedJournalStatuses": ["durable"],
+      "requiredCalls": [
+        { "global": "capabilities", "member": "find", "min": 1 },
+        {
+          "global": "capabilities",
+          "member": "inspect",
+          "min": 1,
+          "valueIncludes": ["unknown", "recorded-value"]
+        },
+        { "global": "tools", "member": "read", "min": 1, "valueIncludes": ["{{secret}}"] },
+        { "global": "code", "member": "run", "min": 1, "valueIncludes": ["{{expectedChild}}"] }
+      ],
+      "completionEqualsAny": ["{{expectedChild}}"],
+      "finalAnswerIncludes": ["{{expectedChild}}"]
+    }
+  },
+  {
+    "id": "volatile-node-continuity",
+    "title": "Natural Node.js full-access continuity",
+    "fixture": {
+      "name": "node-input.txt",
+      "content": "{{secret}}\n"
+    },
+    "task": "验证 danger-full-access 下普通 Node.js 路径及 live 连续性。第一个 run_code cell 使用 node:fs/promises 与 node:crypto（不使用 tools.*）读取 {{fixturePath}} 的精确字节，计算 SHA-256 并保存为顶层 const {{binding}}，该 cell 不要 return 摘要；后续独立 cell 直接复用该 binding（不要重新声明）并 return 它。最终用一句话报告小写十六进制摘要。",
+    "expect": {
+      "minCells": 2,
+      "maxCells": 4,
+      "allowedJournalStatuses": ["volatile"],
+      "requiredJournalStatuses": ["volatile"],
+      "continuityBinding": "{{binding}}",
+      "declarationCellHasValue": false,
+      "completionEqualsAny": ["{{fixtureSha256}}"]
+    }
+  },
+  {
+    "id": "rejected-source-edit",
+    "title": "Edit a rejected long cell",
+    "task": "请运行下面的 TypeScript 程序并只报告最终返回值。\n\n```ts\nconst text = \"{{longLiteral}}\"\nreturn text.length + \":\" + text.slice(-8) ]\n```",
+    "expect": {
+      "minCells": 2,
+      "maxCells": 2,
+      "allowedJournalStatuses": ["noop", "durable"],
+      "requiredJournalStatuses": ["noop", "durable"],
+      "allowedDiagnosticCodes": ["PTC-C001"],
+      "requiredCellDescriptions": ["Edit and run rejected TypeScript cell"],
+      "completionIncludes": ["{{expectedRepair}}"],
+      "finalAnswerIncludes": ["{{expectedRepair}}"]
+    }
+  }
+]
