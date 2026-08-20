@@ -1,6 +1,6 @@
 # Architecture
 
-PTC Plus 把 DSH Code Mode 的顶层 `run_code` 变成与 session 绑定的连续 TypeScript REPL。它负责 cell 求值、binding continuity、诊断、journal 和 cold replay；权限、sandbox、工具调度、取消、审批和跨平台进程治理仍属于 DSH 与操作系统。
+PTC Plus 把 DSH PTC 模式的顶层 `run_code` 变成与 session 绑定的连续 TypeScript REPL。它负责 cell 求值、binding continuity、诊断、journal 和 cold replay；权限、sandbox、工具调度、取消、审批和跨平台进程治理仍属于 DSH 与操作系统。
 
 ## 运行边界
 
@@ -12,11 +12,11 @@ PTC Plus 把 DSH Code Mode 的顶层 `run_code` 变成与 session 绑定的连�
 | Journal / replay | PTC Plus + session log | 记录 call transcript、settlement、completion 和恢复边界 |
 | Presentation | DSH + PTC Plus | 保留 native guidance，并追加 REPL 与探索声明 |
 
-主入口接管模型直接发起的顶层 `run_code`，并在 session-bound strict Code Mode 的模型 wire 上固定投影
+主入口接管模型直接发起的顶层 `run_code`，并在 session-bound strict PTC 模式的模型 wire 上固定投影
 `edit_run_code` transport。非 agent runtime call、嵌套 DSH dispatch 以及其他 tool 继续走
 上游实现。插件卸载时恢复仍由自己持有的 `CodeRuntime.run` 与 `presentationMeta` 属性；若外层插件仍持有旧 wrapper，已卸载 wrapper 会透明委托原 provider，不会恢复已释放的 session 状态。
 
-严格 Code Mode request 始终按固定顺序向模型暴露 `[run_code, edit_run_code]`。若模型仍生成当前 scope
+严格 PTC 模式 request 始终按固定顺序向模型暴露 `[run_code, edit_run_code]`。若模型仍生成当前 scope
 已知的顶层 native tool call，`llm/stream` middleware 会在 assistant chunk 持久化前把它规范为
 `run_code` block；生成的
 cell 用原始 JSON 参数调用同一个 `tools[name]`。插件不复制 schema validation，不适配参数或结果，

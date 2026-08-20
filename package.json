@@ -1,7 +1,7 @@
 {
   "name": "dsh-ptc-plus",
   "version": "0.1.0",
-  "description": "A session-bound agent-native REPL for DeepSeek Harness Code Mode.",
+  "description": "A session-bound agent-native REPL for DeepSeek Harness PTC mode.",
   "type": "module",
   "main": "./index.js",
   "exports": {
@@ -38,7 +38,7 @@
     "dsh",
     "dsh-plugin",
     "ptc",
-    "code-mode",
+    "ptc-mode",
     "repl"
   ],
   "license": "MIT",

@@ -4,12 +4,15 @@
 
 ![dsh-ptc-plus 横幅](assets/dsh-ptc-plus-banner.webp)
 
-为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) TypeScript Code Mode 提供与会话绑定的 REPL 和传输纠错层。
+为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) TypeScript PTC 模式提供与会话绑定的 REPL 和传输纠错层。
 
 > [!NOTE]
 > 这是独立维护的非官方社区插件，与 DeepSeek 或 DSH 项目无隶属或背书关系。
 
-PTC Plus 让模型通过连续的 `run_code` cell 扩展同一个 live program，复用此前 binding，调用当前 DSH 强类型能力，并在不干扰普通任务的前提下恢复常见 Code Mode 传输错误。
+> [!IMPORTANT]
+> PTC Plus 以 DSH 的 `danger-full-access` profile 为首要设计目标。它保留直接访问 Node.js 和操作系统的能力，不另加 sandbox。更窄的 DSH tool profile 只会减少 request 中提供的 native tools，不能单独约束 ambient Node/OS access。仅在可接受该权限范围的环境中使用 PTC Plus。
+
+PTC Plus 让模型通过连续的 `run_code` cell 扩展同一个 live program，复用此前 binding，调用当前 DSH 强类型能力，并在不干扰普通任务的前提下恢复常见 PTC 模式传输错误。
 
 ![使用 edit_run_code 修复并执行被拒绝的长 TypeScript cell](assets/ptc-plus-repair.png)
 
@@ -19,7 +22,7 @@ PTC Plus 让模型通过连续的 `run_code` cell 扩展同一个 live program�
 
 - **连续 cell**：变量、函数、模块和计算结果在同一会话后续 `run_code` 调用中继续可用。
 - **原生强类型能力**：cell 获得 DSH 已为当前 request 授权的 `tools.*` binding；PTC Plus 不复制其 schema、结果、审批规则或调度逻辑。
-- **静默传输纠错**：严格 Code Mode 中误发的已知顶层 native tool call 会在持久化前 lower 为等价 `run_code` cell。合法调用继续使用同一套 DSH 校验与执行路径，不增加 warning 或重试 turn。
+- **静默传输纠错**：严格 PTC 模式中误发的已知顶层 native tool call 会在持久化前 lower 为等价 `run_code` cell。合法调用继续使用同一套 DSH 校验与执行路径，不增加 warning 或重试 turn。
 - **被拒绝源码的局部修复**：`edit_run_code` 对最近一次符合条件的执行前拒绝做一次精确替换并立即运行，单个语法错误无需模型重新生成长程序。
 - **durable 与 live 恢复**：确定性工作和已记录 capability 结果可以在 worker 重启后 replay；直接 Node 或操作系统输入在当前进程中仍可使用，但会标记为 `volatile`，不会伪装成可重放状态。
 - **程序内探索与控制**：cell 内提供 `capabilities.tree/find/inspect`、`repl.state` 和隔离的 `code.run`，但不引入通用反射总线。
@@ -28,7 +31,7 @@ PTC Plus 让模型通过连续的 `run_code` cell 扩展同一个 live program�
 
 ## 实测结果
 
-一组配对 A/B 实测使用 `opencode-go/deepseek-v4-flash`、DSH `0.1.0-rc.8`、严格 Code Mode 和 `danger-full-access`，覆盖 7 类普通任务、每类 2 次，共 28 个 session。每个配对只有插件启用状态不同。
+一组配对 A/B 实测使用 `opencode-go/deepseek-v4-flash`、DSH `0.1.0-rc.8`、严格 PTC 模式和 `danger-full-access`，覆盖 7 类普通任务、每类 2 次，共 28 个 session。每个配对只有插件启用状态不同。
 
 | 指标 | PTC Plus | 基线 |
 | --- | ---: | ---: |
@@ -47,7 +50,7 @@ Token traffic 是 input、cache read、cache write 与 output token 之和。表
 要求：
 
 - Node.js `^22.19.0 || >=24.0.0`；
-- 已安装支持 TypeScript Code Mode 的 DSH；
+- 已安装支持 TypeScript PTC 模式的 DSH；
 - 当前已验收的集成版本是 DSH CLI `0.1.0-rc.8`。
 
 请安装到实际运行 DSH surface 的 profile。将 `<profile>` 替换为该 profile 名称；不要假设名为 `default` 的 profile 正在使用。
@@ -124,7 +127,7 @@ dsh --dump-config
 
 ## 使用
 
-无需单独命令或 UI 进入 REPL。正常使用 DSH Code Mode；每个直接 `run_code` 调用都会成为当前 session environment 的下一个 cell。
+无需单独命令或 UI 进入 REPL。正常使用 DSH PTC 模式；每个直接 `run_code` 调用都会成为当前 session environment 的下一个 cell。
 
 ```ts
 // Cell 1
@@ -155,19 +158,19 @@ return capabilities.inspect({
 
 `capabilities.*` 只提供只读元数据。Capability 调用仍使用 DSH 声明的强类型 `tools.*` member。
 
-严格 Code Mode 的每个 request 都按顺序暴露 `run_code` 和 `edit_run_code`。`edit_run_code` 只接收 `old_string` 与 `new_string`，要求唯一精确匹配，并且只能编辑最近一个在执行前被拒绝的合格 cell；不能重试 runtime failure 或可能已经产生 effect 的 cell。
+严格 PTC 模式的每个 request 都按顺序暴露 `run_code` 和 `edit_run_code`。`edit_run_code` 只接收 `old_string` 与 `new_string`，要求唯一精确匹配，并且只能编辑最近一个在执行前被拒绝的合格 cell；不能重试 runtime failure 或可能已经产生 effect 的 cell。
 
 ## 兼容性与权限
 
 | 项目 | 当前契约 |
 | --- | --- |
 | DeepSeek Harness | 已验收 CLI `0.1.0-rc.8`；升级 prerelease 后需要重新验证 |
-| Code runtime | DSH TypeScript Code Mode；cell 当前使用现代 JavaScript 语法 |
+| PTC runtime | DSH TypeScript PTC 模式；cell 当前使用现代 JavaScript 语法 |
 | Node.js | `^22.19.0 || >=24.0.0` |
 | CLI/Web 平台 | 已完成 Windows DSH `0.1.0-rc.8` profile 安装与 Linux package runtime 本地验证；macOS 是 CI 目标 |
 | DSH Desktop | 当前 Windows/macOS release 使用 active profile；安装后需要重启 |
 | 推荐权限模式 | `danger-full-access` |
-| Client UI | 无；产品表面是正常 DSH 对话与 Code Mode 卡片 |
+| Client UI | 无；产品表面是正常 DSH 对话与 PTC 模式卡片 |
 
 `danger-full-access` 是一等体验。当前 DSH profile 和操作系统允许时，模型可以把 DSH 原生强类型 tools 与熟悉的 Node.js 文件、进程、网络、child process 和生态 API 组合使用。
 

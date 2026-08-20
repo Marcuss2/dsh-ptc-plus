@@ -24,7 +24,7 @@ multi-patch payloads, diff syntax, automatic repair, or runtime retry. An unavai
 invalid replacement returns `{ edited: false, reason }` through a successful `run_code` result and
 does not create a PTC warning.
 
-Every session-bound strict Code Mode request exposes `[run_code, edit_run_code]` in that order.
+Every session-bound strict PTC mode request exposes `[run_code, edit_run_code]` in that order.
 Target availability never changes the name, schema, order, or instruction, preserving provider
 prompt and tool caching. `edit_run_code` is not registered as a DSH native tool. Before the assistant
 message is persisted, PTC Plus deterministically reconstructs the complete source and lowers the

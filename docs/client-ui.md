@@ -1,6 +1,6 @@
 # Client UI
 
-`0.1.0` 不提供插件自有 Client UI。PTC Plus 的产品表面是 DSH Code Mode 中的 `run_code` cell、
+`0.1.0` 不提供插件自有 Client UI。PTC Plus 的产品表面是 DSH PTC 模式中的 `run_code` cell、
 用于局部修正未执行 cell 的 `edit_run_code` transport、输出、诊断和 `repl.state`。增加设置卡片不会改善核心连续求值
 路径，却会引入独立的 React/client bundle、Host settings namespace、额外依赖和第二套验收面。
 
@@ -8,7 +8,7 @@
 
 只有出现下列需求之一时才重新评估：
 
-- 用户需要在 UI 中观察或控制无法通过现有 Code Mode 表达的 session 状态；
+- 用户需要在 UI 中观察或控制无法通过现有 PTC 模式表达的 session 状态；
 - DSH 稳定提供 settings namespace、client slot 与第三方 bundle 构建/测试契约；
 - 能在支持的 Web profile 中完成构建、加载、交互和截图验收。
 

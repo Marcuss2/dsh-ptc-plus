@@ -59,7 +59,7 @@ export const Config = Schema.object({
     .default(DEFAULT_MAX_NESTED_RUN_CODE_DEPTH)
     .description('Maximum recursive code.run depth.'),
   canonicalizeToolCalls: Schema.boolean().default(true)
-    .description('Lower known top-level native tool calls into strict Code Mode cells.'),
+    .description('Lower known top-level native tool calls into strict PTC mode cells.'),
   looseTopLevelRedeclarations: Schema.boolean().default(true)
     .description('Allow complete top-level const and let declarators to replace existing bindings.'),
   durableReplay: Schema.boolean().default(true)

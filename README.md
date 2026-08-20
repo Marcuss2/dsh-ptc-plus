@@ -4,12 +4,15 @@ English | [简体中文](README.zh.md)
 
 ![dsh-ptc-plus banner](assets/dsh-ptc-plus-banner.webp)
 
-A session-bound REPL and transport-recovery layer for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) TypeScript Code Mode.
+A session-bound REPL and transport-recovery layer for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) TypeScript PTC mode.
 
 > [!NOTE]
 > This is an unofficial, independently maintained community plugin. It is not affiliated with or endorsed by DeepSeek or the DSH project.
 
-PTC Plus lets the model extend one live program across consecutive `run_code` cells, reuse earlier bindings, call the current DSH typed capabilities, and recover common Code Mode transport mistakes without making ordinary tasks noisier.
+> [!IMPORTANT]
+> PTC Plus is designed first for DSH's `danger-full-access` profile. It preserves direct Node.js and operating-system access instead of adding another sandbox. A narrower DSH tool profile only reduces the native tools supplied to the request; it does not by itself confine ambient Node/OS access. Use PTC Plus only where this authority is acceptable.
+
+PTC Plus lets the model extend one live program across consecutive `run_code` cells, reuse earlier bindings, call the current DSH typed capabilities, and recover common PTC mode transport mistakes without making ordinary tasks noisier.
 
 ![A rejected long TypeScript cell repaired and executed with edit_run_code](assets/ptc-plus-repair.png)
 
@@ -19,7 +22,7 @@ In this DSH Web session, `edit_run_code` repaired a one-character error in a rej
 
 - **Persistent cells**: variables, functions, modules, and computed values remain available to later `run_code` calls in the same session.
 - **Native typed capabilities**: the cell receives the DSH `tools.*` bindings already authorized for the current request; PTC Plus does not copy their schemas, results, approval rules, or dispatch logic.
-- **Silent transport recovery**: a known top-level native tool call emitted in strict Code Mode is lowered to an equivalent `run_code` cell before it is persisted. Valid calls keep the same DSH validation and execution path and do not add a warning or retry turn.
+- **Silent transport recovery**: a known top-level native tool call emitted in strict PTC mode is lowered to an equivalent `run_code` cell before it is persisted. Valid calls keep the same DSH validation and execution path and do not add a warning or retry turn.
 - **Local repair for rejected source**: `edit_run_code` replaces one exact fragment in the latest eligible pre-execution rejection and immediately runs the repaired cell, so a small syntax mistake does not require the model to regenerate a long program.
 - **Durable and live recovery**: deterministic work and recorded capability results can be replayed after a worker restart; direct Node or operating-system input remains usable in the live process and is marked `volatile` instead of being falsely replayed.
 - **Program-native exploration and control**: `capabilities.tree/find/inspect`, `repl.state`, and isolated `code.run` are available inside cells without introducing a generic reflection bus.
@@ -28,7 +31,7 @@ Successful ordinary cells produce no PTC warning or note. The first transition t
 
 ## Measured Results
 
-A paired A/B run used `opencode-go/deepseek-v4-flash`, DSH `0.1.0-rc.8`, strict Code Mode, and `danger-full-access`: 7 ordinary task families, 2 replicates, and 28 sessions. The plugin setting was the only difference between each pair.
+A paired A/B run used `opencode-go/deepseek-v4-flash`, DSH `0.1.0-rc.8`, strict PTC mode, and `danger-full-access`: 7 ordinary task families, 2 replicates, and 28 sessions. The plugin setting was the only difference between each pair.
 
 | Metric | PTC Plus | Baseline |
 | --- | ---: | ---: |
@@ -47,7 +50,7 @@ Token traffic is input + cache read + cache write + output tokens. The table rep
 Requirements:
 
 - Node.js `^22.19.0 || >=24.0.0`;
-- an existing DSH installation with TypeScript Code Mode;
+- an existing DSH installation with TypeScript PTC mode;
 - DSH CLI `0.1.0-rc.8` is the currently verified integration version.
 
 Install into the profile that actually runs your DSH surface. Replace `<profile>` with that profile name; do not assume that a profile named `default` is active.
@@ -124,7 +127,7 @@ Restart DSH Desktop after installation. Linux Desktop is not a current DSH Deskt
 
 ## Usage
 
-There is no separate command or UI to enter the REPL. Use DSH Code Mode normally; each direct `run_code` call becomes the next cell in the session environment.
+There is no separate command or UI to enter the REPL. Use DSH PTC mode normally; each direct `run_code` call becomes the next cell in the session environment.
 
 ```ts
 // Cell 1
@@ -155,19 +158,19 @@ return capabilities.inspect({
 
 `capabilities.*` is read-only metadata. Capability calls remain on the typed `tools.*` members declared by DSH.
 
-Strict Code Mode exposes `run_code` followed by `edit_run_code` on every request. `edit_run_code` accepts `old_string` and `new_string`, requires one exact match, and applies only to the latest eligible cell rejected before execution. It cannot retry runtime failures or cells with possible effects.
+Strict PTC mode exposes `run_code` followed by `edit_run_code` on every request. `edit_run_code` accepts `old_string` and `new_string`, requires one exact match, and applies only to the latest eligible cell rejected before execution. It cannot retry runtime failures or cells with possible effects.
 
 ## Compatibility and Permissions
 
 | Component | Current contract |
 | --- | --- |
 | DeepSeek Harness | Verified with CLI `0.1.0-rc.8`; prerelease upgrades require revalidation |
-| Code runtime | DSH TypeScript Code Mode; cells currently use modern JavaScript syntax |
+| PTC runtime | DSH TypeScript PTC mode; cells currently use modern JavaScript syntax |
 | Node.js | `^22.19.0 || >=24.0.0` |
 | CLI/Web platforms | Windows DSH `0.1.0-rc.8` profile install and Linux package runtime verified locally; macOS is a CI target |
 | DSH Desktop | Uses the active profile on current Windows/macOS releases; restart after installation |
 | Recommended permission mode | `danger-full-access` |
-| Client UI | None; the product surface is the normal DSH conversation and Code Mode cards |
+| Client UI | None; the product surface is the normal DSH conversation and PTC mode cards |
 
 `danger-full-access` is the first-class experience. The model can combine DSH native typed tools with familiar Node.js filesystem, process, network, child-process, and ecosystem APIs when the active DSH profile and operating system permit them.
 

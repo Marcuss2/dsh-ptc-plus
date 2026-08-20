@@ -6,7 +6,7 @@
 
 浏览、搜索和 DSH 服务调用使用当前 scope 的 native `tools.*`。canonical result 直接进入 cell，不经过 PTC 参数翻译或结果裁剪。具体值可能 complete、bounded、incremental、open-world 或 unknown；模型/UI rendering 的裁剪不能反推 program value 的完整性。
 
-严格 Code Mode 的顶层误调用恢复属于 transport normalization：它把已知 native call 包装为
+严格 PTC 模式的顶层误调用恢复属于 transport normalization：它把已知 native call 包装为
 `run_code`，cell 再用未经重序列化的原始 JSON 调用同一 `tools.*` member。参数只由 DSH owner
 contract 做正式验证，返回值仍沿下述 data plane 流动；因此入口纠错不能被解释为第二套 tool API。
 
