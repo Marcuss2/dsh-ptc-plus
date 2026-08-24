@@ -34,4 +34,4 @@ DSH 当前公共 bundle surface 未定义供插件使用的机器可读 permissi
 
 ## Client UI
 
-`0.1.0` 不提供 Client UI。发布截图使用 DSH Web 或 Desktop 中真实的 PTC 模式 surface；重新评估条件见 [Client UI](client-ui.md)。
+发布包包含设置卡片和会话头部启用标识的 Client UI。发布截图必须来自 DSH Web 或 Desktop 中真实的 PTC 模式 surface；实现与构建边界见 [Client UI](client-ui.md)。
