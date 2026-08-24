@@ -51,9 +51,9 @@ system sections、tool schema 或 tool order，也不假设 Windows、WSL、POSI
 Host half 通过 DSH 公共 settings 服务注册 `ptc-plus` 命名空间，字段清单、默认值与校验来自 `internal/config-spec.js`。
 Client half 通过 `settings.plugin.item` 卡片呈现全部配置。`enabled` 是 kill switch：关闭时只保留 settings 注册和设置卡片，
 不注册 runtime、hook、tool surface 或 system prompt section；设置卡片显示“已启用/已停用”，`code` preset 会话在头部单独显示 `PTC Plus` 指示器。稳定指引不包含 UI 品牌名。
-`enabled` 由 settings watch 即时生效，其余字段仍按启动配置读取，设置卡片标注重启后生效。settings 服务缺失时 Host 回退到 composition config，原有行为不变。
+所有字段都由 settings watch 即时生效。`maxOldGenerationSizeMb` 在活动 worker 存在时因 Node 的创建期限制而拒绝并回滚；其余字段由各自 owner 重新配置而不替换已有 session-bound binding。settings 服务缺失时 Host 回退到 composition config，原有行为不变。
 
-`cordisToolsEnabled` 默认关闭且在启动时读取。Host 只在可见 `run_code` 的 agent scope 中挂载官方 `@deepseek-ai/dsh-tool-cordis`，并让 child fiber 跟随 agent 或 PTC runtime 释放。Cordis schema、guidance 和工具必须在首轮前完整可见；已有完整 surface 保留原 owner，部分同名 surface 拒绝启用。该开关不复制 Cordis 实现，也不改变 code-only direct-tool projection。
+`cordisToolsEnabled` 默认关闭且即时生效。Host 只在可见 `run_code` 的 agent scope 中挂载官方 `@deepseek-ai/dsh-tool-cordis`，并让 child fiber 跟随 agent 或 PTC runtime 释放；关闭时立即卸载。Cordis schema、guidance 和工具必须在首轮前完整可见；已有完整 surface 保留原 owner，部分同名 surface 拒绝启用。该开关不复制 Cordis 实现，也不改变 code-only direct-tool projection。
 
 ## Prompt 前缀稳定性
 
