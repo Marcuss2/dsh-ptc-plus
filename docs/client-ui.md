@@ -1,7 +1,7 @@
 # Client UI
 
 `0.1.0` 不提供插件自有 Client UI。PTC Plus 的产品表面是 DSH PTC 模式中的 `run_code` cell、
-用于局部修正未执行 cell 的 `edit_run_code` transport、输出、诊断和 `repl.state`。增加设置卡片不会改善核心连续求值
+用于局部修正最近可编辑 cell 的 `edit_run_code`、输出、诊断和 `repl.state`。增加设置卡片不会改善核心连续求值
 路径，却会引入独立的 React/client bundle、Host settings namespace、额外依赖和第二套验收面。
 
 因此 package manifest 不声明 `dsh.client`，不导出 `./client`，bundle patch 也不注册 client half。文档与截图应展示真实 DSH Web 会话，而不是一个只复述配置的装饰面板。

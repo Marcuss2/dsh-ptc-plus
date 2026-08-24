@@ -27,6 +27,59 @@ test('exploration is descriptive, deterministic, and budgeted', () => {
   })
 })
 
+test('find ranks symbols and matches only complete identifier or description tokens', () => {
+  const metadata = [
+    {
+      namespace: 'tools',
+      members: [
+        { name: 'edit', description: 'Replace one exact range.' },
+        { name: 'todo_write', description: 'REPLACES the complete todo list.' },
+        { name: 'write', description: 'Write or replace a file.' },
+      ],
+    },
+    {
+      namespace: 'repl',
+      members: [
+        { name: 'state', description: 'Inspect persistent REPL state.' },
+        { name: 'saveState', description: 'Save one named checkpoint.' },
+      ],
+    },
+    {
+      namespace: 'docs',
+      members: [
+        { name: 'lookup', description: 'Inspect tools metadata.' },
+        { name: 'HTTPServerStatus', description: 'Inspect one service.' },
+      ],
+    },
+  ]
+
+  assert.deepEqual(capabilityFind(metadata, 'repl').map(value => value.symbol), [
+    'repl.state',
+    'repl.saveState',
+  ])
+  assert.deepEqual(capabilityFind(metadata, 'REPL.STATE').map(value => value.symbol), [
+    'repl.state',
+  ])
+  assert.deepEqual(capabilityFind(metadata, 'save state').map(value => value.symbol), [
+    'repl.saveState',
+  ])
+  assert.deepEqual(capabilityFind(metadata, 'persistent repl').map(value => value.symbol), [
+    'repl.state',
+  ])
+  assert.deepEqual(capabilityFind(metadata, 'http server status').map(value => value.symbol), [
+    'docs.HTTPServerStatus',
+  ])
+  assert.deepEqual(capabilityFind(metadata, 'serverStatus').map(value => value.symbol), [
+    'docs.HTTPServerStatus',
+  ])
+  assert.deepEqual(capabilityFind(metadata, 'tools').map(value => value.symbol), [
+    'tools.edit',
+    'tools.todo_write',
+    'tools.write',
+    'docs.lookup',
+  ])
+})
+
 test('rejects malformed metadata and replay classifications', () => {
   assert.throws(() => capabilityFind([], ''), /query must be a non-empty string/)
   assert.throws(() => toolCapabilityMetadata([null]), /tool schema must be an object/)
@@ -78,7 +131,7 @@ test('preserves every replay classification through find and inspect', () => {
     members: replay.map((value, index) => ({ name: `call${index}`, replay: value })),
   }]
   assert.deepEqual(
-    capabilityFind(metadata, 'call').map(member => member.replay),
+    capabilityFind(metadata, 'tools').map(member => member.replay),
     replay,
   )
   assert.deepEqual(

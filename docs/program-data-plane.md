@@ -6,9 +6,9 @@
 
 浏览、搜索和 DSH 服务调用使用当前 scope 的 native `tools.*`。canonical result 直接进入 cell，不经过 PTC 参数翻译或结果裁剪。具体值可能 complete、bounded、incremental、open-world 或 unknown；模型/UI rendering 的裁剪不能反推 program value 的完整性。
 
-严格 PTC 模式的顶层误调用恢复属于 transport normalization：它把已知 native call 包装为
-`run_code`，cell 再用未经重序列化的原始 JSON 调用同一 `tools.*` member。参数只由 DSH owner
-contract 做正式验证，返回值仍沿下述 data plane 流动；因此入口纠错不能被解释为第二套 tool API。
+PTC 模式的 code-only direct-tool projection 只声明模型直接调用真实注册的 `run_code` 与 `edit_run_code`。模型误发的顶层 native call 不属于这个合法 direct protocol；当 live schema 能唯一证明该工具时，transport normalization 将它包装为 `run_code`，cell 再用原始 JSON 参数调用同一 `tools.*` member。参数仍由 DSH owner contract 正式验证，未知、畸形或不一致调用原样交给宿主诊断。该历史规范化只适用于无效的 out-of-surface call，不适用于已经合法声明的 `edit_run_code`。
+
+`edit_run_code` 是宿主 composite tool：外层 result 向模型返回精简的编辑状态、值与日志，完整物化源码和 journal 只进入标记为 derived 的私有 metadata。cold replay 消费该记录，不把完整源码重新投影给模型，也不把派生 `run_code` 归因给 assistant。
 
 每次调用进入 journal：
 
@@ -30,6 +30,11 @@ cold replay 校验相同的调用序列并返回 recorded value，不重新执�
 生态 SDK。直接 ambient access 受 worker 进程与操作系统的实际约束，不经过 DSH tool policy；
 PTC Plus 不另造 filesystem Consumer、跨平台权限系统或命令 DSL。更窄 profile 中缺少某个 native
 tool，也不能被解释为相应 Node API 已被隔离。
+
+记录了 session cwd 时，child process 在未提供 `options.cwd` 时继承该目录；显式 `cwd` 保持调用方选择。
+worker 继承宿主的 Node、package manager 和 shell 所需环境变量，只把 `TEMP`、`TMP` 和 `TMPDIR`
+覆盖为本 session 的 scratch 目录。`node:fs`、`node:fs/promises` 及 glob 的相对入口同样以 session cwd
+为基准，绝对路径仍按原生语义处理。
 
 完整文件读取示例：
 

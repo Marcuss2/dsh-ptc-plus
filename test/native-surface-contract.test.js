@@ -24,10 +24,15 @@ function fixture() {
     isolation: 'worker-thread',
     async run() { return { logs: [], value: 'upstream' } },
   }
+  const definitions = new Map([['run_code', runCode]])
   const ctx = {
     codeRuntime: runtime,
     tools: {
-      get(name) { return name === 'run_code' ? runCode : undefined },
+      get(name) { return definitions.get(name) },
+      register(definition) {
+        definitions.set(definition.name, definition)
+        return () => definitions.delete(definition.name)
+      },
       schemas() {
         return [
           runCode,
@@ -165,9 +170,14 @@ const tree = await capabilities.tree()
 const staleTree = capabilities.tree
 const found = await capabilities.find("read")
 const inspected = await capabilities.inspect({ symbols: ["tools.read", "tools.echo"], budget: 1 })
-return { tree, found, inspected }
+const advanced = await capabilities.inspect({ symbols: ["repl.state", "code.run"], budget: 2 })
+return { tree, found, inspected, advanced }
 `, { read: async value => value, echo: async value => value }, 'capability-explore')
-  assert.deepEqual(observed.raw.value.tree, [{ namespace: 'tools', members: ['echo', 'read'] }])
+  assert.deepEqual(observed.raw.value.tree, [
+    { namespace: 'tools', members: ['echo', 'read'] },
+    { namespace: 'repl', members: ['state'] },
+    { namespace: 'code', members: ['run'] },
+  ])
   assert.equal(observed.raw.value.found[0].symbol, 'tools.read')
   assert.equal(observed.raw.value.found[0].replay, 'recorded-value')
   assert.equal(observed.raw.value.found[0].completeness, 'unknown')
@@ -177,6 +187,26 @@ return { tree, found, inspected }
   assert.equal(observed.raw.value.inspected.symbols[0].effect, 'unknown')
   assert.equal(Object.hasOwn(observed.raw.value.inspected.symbols[0], 'sourceRef'), false)
   assert.deepEqual(observed.raw.value.inspected.unknown, [])
+  assert.deepEqual(observed.raw.value.advanced.symbols.map(item => `${item.namespace}.${item.name}`), [
+    'repl.state', 'code.run',
+  ])
+  assert.match(observed.raw.value.advanced.symbols[1].description, /source already held as data/)
+  assert.equal(observed.raw.value.advanced.symbols[1].parameters.additionalProperties, false)
+  assert.deepEqual(observed.raw.value.advanced.symbols[1].returns, {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      logs: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Child console output in emission order.',
+      },
+      result: {
+        description: 'Child return value; omitted when the child returns undefined.',
+      },
+    },
+    required: ['logs'],
+  })
   const invalid = await state.execute('try { await capabilities.inspect(null) } catch (error) { return error.message }', {}, 'capability-invalid')
   assert.match(invalid.raw.value, /expects an object/)
   const expired = await state.execute('try { await staleTree() } catch (error) { return error.message }', {}, 'capability-explore')
@@ -196,7 +226,11 @@ return {
 `, {}, 'degraded-empty-tools', bindings)
   assert.deepEqual(observed.raw.value, {
     child: { logs: [], result: 'upstream' },
-    tree: [{ namespace: 'tools', members: [] }],
+    tree: [
+      { namespace: 'tools', members: [] },
+      { namespace: 'repl', members: ['state'] },
+      { namespace: 'code', members: ['run'] },
+    ],
     domain: 'pong',
   })
 })

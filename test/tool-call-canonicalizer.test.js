@@ -69,53 +69,57 @@ test('canonicalizes every live native name through its typed tools binding', asy
   assert.equal(transformed.find(chunk => chunk.type === 'tool-call-delta').name, 'run_code')
 })
 
-test('edits one exact fragment of rejected source without model-side source re-emission', async () => {
-  const repairSource = `const payload = ${JSON.stringify('a'.repeat(20_000))}\nreturn payload.lenght`
-  const raw = JSON.stringify({ old_string: 'lenght', new_string: 'length' })
-  const transformed = await collect(call('edit_run_code', raw), {
+test('canonicalizes a uniquely schema-proven tools-qualified native name', async () => {
+  const raw = '{"command":"npm test", "timeout":123}'
+  const source = call('tools.pwsh', raw, { id: 'qualified-call', split: 11 })
+  const transformed = await collect(source, {
     tools: [{ name: 'run_code' }, { name: 'edit_run_code' }],
-    nativeSchemas: new Map(),
+    nativeSchemas: schemas('pwsh'),
     editToolName: 'edit_run_code',
-    repairSource,
   })
   const delta = transformed.find(chunk => chunk.type === 'tool-call-delta')
+  assert.equal(delta.id, 'qualified-call')
   assert.equal(delta.name, 'run_code')
   const generated = JSON.parse(delta.argumentsDelta)
-  assert.equal(generated.description, 'Edit and run rejected TypeScript cell')
-  assert.equal(generated.code, repairSource.replace('lenght', 'length'))
-  assert.ok(raw.length < generated.code.length / 100)
+  assert.ok(generated.code.includes('tools["pwsh"]'))
+  assert.ok(generated.code.includes(JSON.stringify(raw)))
+  assert.equal(generated.description, 'Call pwsh inside the session REPL')
+  assert.deepEqual(transformed.find(chunk => chunk.type === 'block-end').block, {
+    type: 'tool-call', id: 'qualified-call', name: 'run_code', arguments: delta.argumentsDelta,
+  })
 })
 
-test('declines unavailable or ambiguous code edits without a PTC failure', async () => {
-  for (const [args, repairSource, reason] of [
-    [null, 'return 1', /expects old_string/],
-    [{ old_string: 'x', new_string: 'y' }, undefined, /no run_code cell/],
-    [{ old_string: 'x', new_string: 'y' }, 'return 1', /not found/],
-    [{ old_string: 'x', new_string: 'y' }, 'x + x', /more than once/],
-    [{ old_string: '', new_string: 'y' }, 'x', /non-empty/],
-    [{ old_string: 'x', new_string: 'x' }, 'x', /must differ/],
-    [{ old_string: 'x', new_string: 'y', extra: true }, 'x', /exactly/],
-  ]) {
-    const transformed = await collect(call('edit_run_code', args), {
-      tools: [{ name: 'run_code' }, { name: 'edit_run_code' }],
-      nativeSchemas: new Map(), editToolName: 'edit_run_code', repairSource,
-    })
-    const generated = JSON.parse(transformed.find(chunk => chunk.type === 'tool-call-delta').argumentsDelta)
-    assert.equal(generated.description, 'Reject unavailable run_code edit')
-    assert.match(generated.code, reason)
-    assert.match(generated.code, /edited/)
+test('requires one unique schema match for tools-qualified names', async () => {
+  const qualified = call('tools.pwsh', { command: 'npm test' })
+  assert.deepEqual(await collect(qualified, {
+    tools: [{ name: 'run_code' }], nativeSchemas: schemas('pwsh', 'tools.pwsh'),
+  }), qualified)
+
+  const exactOnly = await collect(qualified, {
+    tools: [{ name: 'run_code' }], nativeSchemas: schemas('tools.pwsh'),
+  })
+  const exactGenerated = JSON.parse(
+    exactOnly.find(chunk => chunk.type === 'tool-call-delta').argumentsDelta,
+  )
+  assert.ok(exactGenerated.code.includes('tools["tools.pwsh"]'))
+
+  for (const name of ['tools.unknown', 'tools.pwsh.extra', 'tools.', '.pwsh']) {
+    const source = call(name, {})
+    assert.deepEqual(await collect(source, {
+      tools: [{ name: 'run_code' }], nativeSchemas: schemas('pwsh'),
+    }), source)
   }
 })
 
-test('accepts a provisional empty call id when the final block supplies identity', async () => {
-  const source = call('edit_run_code', { old_string: '1', new_string: '2' })
-  source.find(chunk => chunk.type === 'tool-call-delta').id = ''
-  const transformed = await collect(source, {
-    tools: [{ name: 'run_code' }, { name: 'edit_run_code' }],
-    nativeSchemas: new Map(), editToolName: 'edit_run_code', repairSource: 'return 1',
+test('passes the registered edit transport through unchanged', async () => {
+  const source = call('edit_run_code', {
+    edits: [{ old_string: 'lenght', new_string: 'length' }],
   })
-  assert.equal(transformed.find(chunk => chunk.type === 'tool-call-delta').name, 'run_code')
-  assert.equal(transformed.find(chunk => chunk.type === 'block-end').block.id, 'call-1')
+  assert.deepEqual(await collect(source, {
+    tools: [{ name: 'run_code' }, { name: 'edit_run_code' }],
+    nativeSchemas: schemas('edit_run_code'),
+    editToolName: 'edit_run_code',
+  }), source)
 })
 
 test('preserves unrelated content, accounting, and call ids while invalidating provider replay', async () => {

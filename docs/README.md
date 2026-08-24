@@ -1,0 +1,21 @@
+# Documentation
+
+## Getting Started
+
+- [Installation](installation.md): npm, Git, source, tarball, development snapshot, and Desktop installation.
+- [Runtime Reference](runtime-reference.md): cell behavior, capability discovery, configuration, diagnostics, and limits.
+- [Evaluation](evaluation.md): paired ordinary-task protocol, metrics, configuration, and limitations.
+
+## Design
+
+- [Architecture](architecture.md): ownership boundaries, prompt-prefix stability, runtime lifecycle, journals, and recovery.
+- [Capability Surface](capability-projection.md): typed program bindings and progressive discovery.
+- [Program Data Plane](program-data-plane.md): canonical values and result completeness.
+- [Durable / Volatile Recovery](durability-design.md): replay model and external-input boundaries.
+- [PTC Value Graph V1](value-wire.md): supported JavaScript value encoding.
+- [Architecture Decisions](adr/): stable design constraints and their consequences.
+
+## Maintenance
+
+- [Publishing](publishing.md): release checks, package contents, permissions, and platform validation.
+- [Client UI](client-ui.md): current UI boundary and reevaluation criteria.

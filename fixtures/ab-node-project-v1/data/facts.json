@@ -1,0 +1,6 @@
+{
+  "project": "ab-node-project-v1",
+  "engine": "node",
+  "minimumNode": "20.0.0",
+  "usesPython": false
+}

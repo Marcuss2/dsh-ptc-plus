@@ -27,12 +27,17 @@ PTC Plus 的正确承诺是：
 
 ```ts
 {
-  version: 1,
+  version: 3,
   bindingMode: "loose" | "strict",
+  rewritePolicy: {
+    autoRewriteImports: boolean,
+    autoStripExports: boolean,
+    autoSplitRedeclarations: boolean
+  },
   status: "durable" | "volatile" | "discarded" | "noop",
   calls: CapabilityCall[],
   operations: StateOperation[],
-  confirms: string[],
+  confirms: number[],
   diagnostics: Diagnostic[],
   completion?:
     | { kind: "return", hasValue: false }
@@ -46,10 +51,11 @@ PTC Plus 的正确承诺是：
 
 - `durable`：创建可重放 node，推进 `durableHead`；
 - `bindingMode`：记录该 cell 实际采用的顶层 binding 语义；冷重放读取每个 node 的记录值，不读取恢复时的 profile 配置；
+- `rewritePolicy`：记录该 cell 解析和 lowering 时使用的三个 AST rewrite 开关；冷重放读取每个 node 的记录值，不读取恢复时的 profile 配置；
 - `volatile`：只推进 live heap，不推进 `durableHead`；
 - `discarded`：基础设施失败，calls 和 operations 必须为空；若中止时仍有未结算的 program binding call，则以首个 `global.member` 保留 `volatileReason`，恢复时不能把这个 possible-effect boundary 折叠为 no-op；
 - `noop`：程序未执行，calls 和 operations 必须为空；
-- `confirms`：确认此前无 journal 的 call id 没有进入 runtime；
+- `confirms`：以 `tool/call.seq` 确认此前无 journal 的 call 没有进入 runtime；
 - `diagnostics`：本 cell 产生的封闭结构化诊断；
 - `completion`：区分普通 return 与可重放的语义 throw；
 - `volatileReason`：记录第一次运行时降级原因，或 discarded cell 中最先观察到的未结算 program binding。
@@ -63,7 +69,7 @@ SessionRuntime 创建 kernel 时完全忽略历史 nodes、head、checkpoints �
 
 journal、diagnostic、source、cause、call、operation、completion 和 completion error 都使用封闭字段集合；未知、symbol 或非枚举自有字段会使 journal 无效。capability-call `args`/`value` 与 return completion `value` 都是封闭、规范化的 `ptc-value-graph/v1` envelope。诊断结构、source frame 依赖和稳定代码见[架构说明](architecture.md#journal-与恢复)。
 
-当前实现只定义并接受本文这一种 `version: 1` schema；同一版本不存在其他历史形状或兼容迁移。包括 `bindingMode`、`diagnostics` 在内的必需字段缺失时 journal 必须失效，不能静默补默认值，否则会削弱最终持久值与 tentative journal 的严格一致性确认。profile 后续切换宽松/严格模式只影响新 cell，历史 node 始终按自身记录的模式重放。
+当前实现写入 `version: 3` schema。`version: 2` 且 `confirms` 为空的 journal 可无歧义规范化为 v3；v2 中非空的 call-id confirmation 无法可靠映射到可能重复的 session event，必须形成 unknown suffix，不能猜测迁移。包括 `bindingMode`、`rewritePolicy`、`diagnostics` 在内的必需字段缺失时 journal 必须失效，否则会削弱最终持久值与 tentative journal 的严格一致性确认。profile 后续切换宽松/严格模式或 AST rewrite 开关只影响新 cell，历史 node 始终按自身记录的模式重放。
 
 ## Capability Call Transcript
 
@@ -121,23 +127,24 @@ pre-execute -> tools/execute -> post-execute
 
 ## Nested run_code
 
-只有模型直接发起的 top-level `run_code` 创建本 schema 的 cell journal。隔离 child binding 不创建 child PTC journal，也不产生可合并到父 heap 的 binding。
+模型直接发起的 top-level `run_code` 与真实注册的 `edit_run_code` 派生执行都创建本 schema 的 cell journal。前者随 `run_code` result 持久化；后者随外层 edit result 的 derived metadata 持久化，并与模型原始 edit call 关联。隔离 child binding 不创建 child PTC journal，也不产生可合并到父 heap 的 binding。
 
 父 cell 把隔离 child 当成普通 program binding call，记录 graph-encoded arguments、canonical result/error 和 settlement order。正常结算后，cold replay 返回 recorded child result，不重新执行 child 源码。若取消、超时或 worker failure 发生在调用结算前，`discarded` journal 以 `code.run` 保留 possible-effect boundary。这个结果来自所有 program binding 共用的 pending/settled 生命周期，不是 `code.run` 名称特例。它不注册第二个模型工具，也不伪造 UI、policy hook、调用树或事件。
 
 ## 日志折叠
 
-恢复按 session event 顺序处理外层 `run_code`。触发本次恢复的 call id 作为 live boundary 传入折叠器；同 id 的在途 `tool/call` 不属于历史：
+恢复按 session event 顺序处理外层 `run_code` 和带明确 derived-run metadata 的 `edit_run_code`。恢复入口先把当前 call id 解析为持久化 `tool/call.seq`，再把该序号作为 live boundary 传入折叠器；对应的在途 call event 不属于历史。每个 `edit_run_code` 在其 call event 处，根据此前已经结算的调用确定并固定可编辑目标；之后出现的 result 只影响随后发起的 edit：
 
 1. 用 `sourceEventSeqs[0]` 关联 `tool/result` 与 `tool/call`；
 2. 预收集 valid journal 中的 `confirms`；
-3. 排除当前在途 call，并让已确认 no-op 的无 journal call 不改变状态；
+3. 排除与 live boundary 序号相同的在途 call，并让已确认 no-op 的无 journal call 不改变状态；
 4. 缺失源码、缺失/损坏 journal 进入 untrusted suffix；
 5. `noop` 与不含 `volatileReason` 的 `discarded` 不改变语言状态；带 `volatileReason` 的 `discarded` 表示 heap 已回滚但外部 effect 未知，进入 untrusted suffix；
 6. `volatile` 进入 untrusted suffix，只应用可独立持久的 delete/restore 操作；
 7. `restore` 命名状态重新建立 trusted durable head；
 8. untrusted suffix 后的首个 `durable` journal从当前 durable head 建立新分支，并清除旧 suffix；
-9. durable node 保存 parent link，命名状态保存 node index。
+9. durable node 保存 parent link，命名状态保存 node index；
+10. `ptc-plus/recovery-boundary` 在 event sequence 参与排序前完成规范化；任一损坏 boundary 使恢复失败，合法 boundary 再通过失败 call seq 选择 node，并要求记录的 frontier 恰好是该 node 的 parent；折叠器剪除该 node 及依赖后代，按剩余记录重算 checkpoints，再把 head 设为记录的 frontier。
 
 第 8 步是必要不变量：冷恢复已经实际丢弃 volatile/unknown heap，因此此后执行成功的 durable cell 不依赖该 heap。如果不把它作为可信重基点，旧 unknown 调用会在每次重启时永久吞掉所有后续状态。
 
@@ -157,7 +164,7 @@ pre-execute -> tools/execute -> post-execute
 - recovery divergence；
 - durable replay 触发 volatile capability。
 
-基础设施失败会终止当前 worker，保留此前 durable frontier，并向当前 `run_code` 返回 recovery error。
+基础设施失败会终止当前 worker，并通过 DSH 的公开 `Session.append()` 追加 log-only recovery boundary。kernel 从失败 node 的 parent 重新重放；若该 frontier 仍失败则继续向 parent 收缩，直到某个 frontier 验证成功或到达空 REPL。触发恢复的当前 `run_code` 在验证成功前不执行，因此可以在同一次请求中安全继续；如果 session 不提供追加能力、边界无效或历史本身无法折叠，则返回 recovery error。结构损坏的日志没有可证明的 frontier，后续调用会重新读取日志而不会接受一个无法持久表达 ancestry 的新分支。
 
 ## State Operations
 
@@ -192,17 +199,17 @@ type StateOperation =
 普通 `Math` intrinsic 保持完整。`process.stdout/stderr.write` 被捕获为 cell log，不因输出本身降级。
 
 worker 不继承 Electron 的工作目录语义。插件通过现有 `tools/execute` context 读取不可变的 `agent.session.header.cwd` 并注入 session worker；`process.cwd()` 返回该值且保持 durable。header 未记录 cwd 时才回退宿主值并在运行时标记 volatile。
+同一 session 中，`child_process` 的 `exec`、`execFile`、`fork`、`spawn` 及同步变体在未提供 `options.cwd` 时以该 cwd 启动；显式 cwd 保持调用方选择。worker 保留 Node、package manager 和 shell 所需的宿主环境变量，仅将 `TEMP`、`TMP` 和 `TMPDIR` 覆盖为该 session 的 scratch 目录。`node:fs`、`node:fs/promises` 和 glob 的相对入口统一以 session cwd 解析，绝对路径与显式路径选项保持原生语义。
 
-直接访问 `worker_threads` 或 `cluster` 的常见 import/require 形式，以及 `process.exit/abort/kill`，
-会被拒绝，因为它们暴露或破坏 worker lifecycle control。该 gate 只维护 REPL 生命周期，不是恶意
+直接访问 `worker_threads` 或 `cluster` 的常见 import/require 形式会被拒绝。直接 `process`、`require`、dynamic import 与 static import 取得的 `process.exit/abort/kill/chdir` 共享同一组拒绝函数，因为这些操作暴露或破坏 worker lifecycle control。该 gate 只维护 REPL 生命周期，不是恶意
 代码安全沙箱；native tool 的安全依赖 DSH policy，ambient Node 的安全依赖进程隔离和操作系统权限。
 
 ## 恢复通知
 
-构造 kernel 时若折叠结果含 volatile/unknown suffix，第一次 `run_code` 记录并投影 `PTC-R002`。它只统计当前 call 之前的历史边界：
+构造 kernel 时若折叠结果含 volatile/unknown suffix，或本次重放追加 recovery boundary，第一次实际执行的 `run_code` 记录并投影 `PTC-R002`。它只统计当前 call 之前实际跳过的历史 cell：
 
 ```text
-warning[PTC-R002]: restored the durable head and skipped N historical cells
+warning[PTC-R002]: restored the durable head and skipped N unreconstructable historical cells
 phase: recover
 state: ...
 help: ...
@@ -210,7 +217,7 @@ help: ...
 
 通知进入正常 CodeRuntime logs，结构化值进入当前 journal，因此成功结果和错误结果都能呈现并从 session log 重建。每个 kernel 只发送一次，避免污染后续上下文。
 
-live kernel 首次进入 volatile 只更新 journal 的 `status` / `volatileReason` 和 `repl.state(list)`，不向模型投影 warning/note。该转换不要求当前任务采取行动；只有 cold recovery 已实际跳过 volatile/unknown 后缀时才发送 `PTC-R002`。worker 在首次观察到直接 Node/OS 边界时立即通知主线程，因此后续 hard abort、timeout 或 worker exit 仍能把原因写入 discarded journal。
+live kernel 首次进入 volatile 只更新 journal 的 `status` / `volatileReason` 和 `repl.state(list)`，不向模型投影 warning/note。该转换不要求当前任务采取行动；只有 cold recovery 已实际跳过 volatile、unknown 或 replay-abandoned 历史时才发送 `PTC-R002`。worker 在首次观察到直接 Node/OS 边界时立即通知主线程，因此后续 hard abort、timeout 或 worker exit 仍能把原因写入 discarded journal。
 
 ## 失败状态语义
 

@@ -1,0 +1,5 @@
+{
+  "retries": 3,
+  "timeoutMs": 2500,
+  "locale": "zh-CN"
+}

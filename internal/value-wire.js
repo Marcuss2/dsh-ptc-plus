@@ -1,3 +1,5 @@
+import { assertFields, isRecord } from './record-utils.js'
+
 export const VALUE_CODEC = 'ptc-value-graph/v1'
 
 export const DEFAULT_VALUE_LIMITS = Object.freeze({
@@ -16,22 +18,6 @@ const NUMBER_FIELDS = new Set(['tag', 'value'])
 const BIGINT_FIELDS = new Set(['tag', 'value'])
 const REFERENCE_FIELDS = new Set(['tag', 'index'])
 const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/
-
-function isRecord(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-}
-
-function assertFields(value, allowed, label) {
-  if (!isRecord(value)) throw new TypeError(`invalid ${label}`)
-  const keys = Reflect.ownKeys(value)
-  for (const key of keys) {
-    if (typeof key !== 'string' || !allowed.has(key)
-      || !Object.prototype.propertyIsEnumerable.call(value, key)) {
-      throw new TypeError(`invalid ${label} field ${String(key)}`)
-    }
-  }
-  if (keys.length !== allowed.size) throw new TypeError(`invalid ${label} fields`)
-}
 
 function limitsOf(options = {}) {
   const limits = { ...DEFAULT_VALUE_LIMITS, ...options }
@@ -218,8 +204,8 @@ function decodeAtom(atom, nodes, limits, budget, path) {
   throw new TypeError(`unknown PTC value atom tag ${JSON.stringify(atom.tag)}`)
 }
 
-/** Validate and hydrate one canonical PTC value envelope without recursive stack growth. */
-export function decodeValue(wire, options = {}) {
+/** Validate, hydrate, and own one canonical PTC value envelope without recursive stack growth. */
+function decodeCanonicalValue(wire, options = {}) {
   const limits = limitsOf(options)
   assertFields(wire, ENVELOPE_FIELDS, 'PTC value envelope')
   if (wire.codec !== VALUE_CODEC || !Array.isArray(wire.nodes)) throw new TypeError('invalid PTC value codec')
@@ -286,17 +272,24 @@ export function decodeValue(wire, options = {}) {
   }
   if (budget.reachable.size !== wire.nodes.length) throw new TypeError('PTC value envelope contains unreachable nodes')
   const canonical = encodeValue(root, limits)
-  if (JSON.stringify(canonical) !== JSON.stringify(wire)) throw new TypeError('non-canonical PTC value envelope')
-  return root
+  const serialization = JSON.stringify(canonical)
+  if (serialization !== JSON.stringify(wire)) throw new TypeError('non-canonical PTC value envelope')
+  return { value: root, wire: canonical, serialization }
+}
+
+/** Validate and hydrate one canonical PTC value envelope without recursive stack growth. */
+export function decodeValue(wire, options = {}) {
+  return decodeCanonicalValue(wire, options).value
 }
 
 export function normalizeValueWire(wire, options = {}) {
-  return encodeValue(decodeValue(wire, options), options)
+  return decodeCanonicalValue(wire, options).wire
 }
 
 export function valueWiresEqual(left, right, options = {}) {
   try {
-    return JSON.stringify(normalizeValueWire(left, options)) === JSON.stringify(normalizeValueWire(right, options))
+    return decodeCanonicalValue(left, options).serialization
+      === decodeCanonicalValue(right, options).serialization
   } catch {
     return false
   }

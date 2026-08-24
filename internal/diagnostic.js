@@ -1,4 +1,5 @@
 import { codeFrameColumns } from '@babel/code-frame'
+import { assertOwnFields, isRecord } from './record-utils.js'
 
 const DIAGNOSTIC_FIELDS = new Set([
   'code', 'severity', 'phase', 'message', 'stateEffect', 'dispatchState',
@@ -12,21 +13,8 @@ const PHASES = new Set(['parse', 'preflight', 'execute', 'tool-dispatch', 'repla
 const STATE_EFFECTS = new Set(['unchanged', 'partially-applied', 'rolled-back', 'unknown'])
 const DISPATCH_STATES = new Set(['not-dispatched', 'dispatched', 'completed', 'unknown'])
 
-function isRecord(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-}
-
 function isLine(value) {
   return typeof value === 'string' && value.length > 0 && !/[\r\n]/.test(value)
-}
-
-function assertOwnFields(value, allowed, label) {
-  for (const key of Reflect.ownKeys(value)) {
-    if (typeof key !== 'string' || !allowed.has(key)
-      || !Object.prototype.propertyIsEnumerable.call(value, key)) {
-      throw new Error(`invalid ${label} field ${String(key)}`)
-    }
-  }
 }
 
 function normalizePosition(value, label) {

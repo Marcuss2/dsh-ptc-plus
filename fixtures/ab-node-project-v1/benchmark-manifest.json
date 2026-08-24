@@ -1,0 +1,22 @@
+{
+  "fixtureName": "ab-node-project-v1",
+  "fixtureVersion": "1.0.0",
+  "fixturePath": "fixtures/ab-node-project-v1",
+  "contentSha256": "807580baf64e367bb2dc047c389edf471e13077d54d50ee4b3a143c38f0cebd1",
+  "git": {
+    "authorName": "PTC Plus A/B Fixture",
+    "authorEmail": "ptc-plus-benchmark@example.invalid",
+    "initialCommitMessage": "chore(ab): initialize stable fixture v1",
+    "commitDate": "2026-01-01T00:00:00Z"
+  },
+  "dirty": [
+    {
+      "path": "src/greeting.js",
+      "content": "export function greeting(name) {\n  return `Hi, ${name}!`\n}\n\nexport function farewell(name) {\n  return `Goodbye, ${name}!`\n}\n"
+    },
+    {
+      "path": "internal/draft.txt",
+      "content": "intentionally untracked fixture draft\n"
+    }
+  ]
+}

@@ -1,22 +1,10 @@
 /** Deterministic capability metadata derived from the current DSH tool view. */
+import { record, text } from './record-utils.js'
 
 const COMPLETENESS = new Set(['complete', 'bounded', 'incremental', 'open-world', 'unknown'])
 const SOURCE_KINDS = new Set(['authored', 'runtime', 'tests', 'docs'])
 const REPLAY = new Set(['recorded-value', 'owner-replay', 'volatile', 'unknown'])
 
-function record(value, label) {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new TypeError(`ptc-plus: ${label} must be an object`)
-  }
-  return value
-}
-
-function text(value, label) {
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new TypeError(`ptc-plus: ${label} must be a non-empty string`)
-  }
-  return value
-}
 
 function metadataSnapshot(value, label) {
   let clone
@@ -103,6 +91,33 @@ function metadataEntries(metadata) {
   })
 }
 
+function searchTokens(value) {
+  const separated = value
+    .replace(/(\p{Lu}+)(\p{Lu}\p{Ll})/gu, '$1 $2')
+    .replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, '$1 $2')
+  return separated.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []
+}
+
+function includesTokenSequence(tokens, queryTokens) {
+  if (queryTokens.length === 0 || queryTokens.length > tokens.length) return false
+  return tokens.some((_, start) => queryTokens.every(
+    (token, offset) => tokens[start + offset] === token,
+  ))
+}
+
+function capabilityMatchRank(namespace, member, query, queryTokens) {
+  const normalizedNamespace = namespace.toLowerCase()
+  const normalizedMember = member.name.toLowerCase()
+  const symbol = `${normalizedNamespace}.${normalizedMember}`
+  if (symbol === query) return 0
+  if (normalizedNamespace === query) return 1
+  if (normalizedMember === query) return 2
+  if (includesTokenSequence(searchTokens(`${namespace}.${member.name}`), queryTokens)) return 3
+  if (typeof member.description === 'string'
+    && includesTokenSequence(searchTokens(member.description), queryTokens)) return 4
+  return undefined
+}
+
 /** Deterministic hierarchy only. Details remain behind inspect. */
 export function capabilityTree(metadata) {
   return metadataEntries(metadata).map((value) => {
@@ -117,19 +132,33 @@ export function capabilityTree(metadata) {
 
 /** Find lightweight candidates without returning full schemas or source. */
 export function capabilityFind(metadata, query) {
-  const needle = text(query, 'capability query').toLowerCase()
-  return metadataEntries(metadata).flatMap(entry => entry.members.flatMap((member) => {
-    const symbol = `${entry.namespace}.${member.name}`
-    const haystack = `${symbol} ${member.description ?? ''}`.toLowerCase()
-    if (!haystack.includes(needle)) return []
-    return [{
-      symbol,
-      ...(member.description === undefined ? {} : { description: member.description }),
-      completeness: member.completeness ?? 'unknown',
-      effect: member.effect ?? 'unknown',
-      replay: member.replay ?? 'unknown',
-    }]
-  }))
+  const trimmedQuery = text(query, 'capability query').trim()
+  const normalizedQuery = trimmedQuery.toLowerCase()
+  const queryTokens = searchTokens(trimmedQuery)
+  const candidates = []
+  let order = 0
+  for (const entry of metadataEntries(metadata)) {
+    for (const member of entry.members) {
+      const rank = capabilityMatchRank(entry.namespace, member, normalizedQuery, queryTokens)
+      if (rank !== undefined) {
+        candidates.push({
+          rank,
+          order,
+          value: {
+            symbol: `${entry.namespace}.${member.name}`,
+            ...(member.description === undefined ? {} : { description: member.description }),
+            completeness: member.completeness ?? 'unknown',
+            effect: member.effect ?? 'unknown',
+            replay: member.replay ?? 'unknown',
+          },
+        })
+      }
+      order += 1
+    }
+  }
+  return candidates
+    .sort((left, right) => left.rank - right.rank || left.order - right.order)
+    .map(candidate => candidate.value)
 }
 
 /** Batch, budgeted inspection; omitted items remain explicit to the caller. */

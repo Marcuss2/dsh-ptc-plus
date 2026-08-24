@@ -24,12 +24,19 @@
   },
   "dependencies": {
     "@babel/code-frame": "^7.29.7",
+    "@babel/parser": "^7.29.0",
+    "@babel/traverse": "^7.29.0",
     "@deepseek-ai/schemastery": "^3.18.1",
     "acorn": "^8.15.0"
   },
   "scripts": {
+    "hooks:install": "node scripts/review-findings.mjs install-hook",
+    "review:new": "node scripts/review-findings.mjs create",
+    "review:validate": "node scripts/review-findings.mjs validate",
+    "review:gate": "node scripts/review-findings.mjs gate",
     "coverage": "node --test --experimental-test-module-mocks --experimental-test-coverage --test-concurrency=1 --test-coverage-include=\"index.js\" --test-coverage-include=\"internal/*.js\" --test-coverage-lines=100 --test-coverage-branches=95 --test-coverage-functions=100 \"test/*.test.js\"",
-    "check": "node --check index.js && node --check internal/kernel-worker.js && node --check scripts/expensive-headless-acceptance.mjs && node --check scripts/ab-headless-trajectories.mjs && npm run coverage",
+    "verify": "npm run review:validate && node --check index.js && node --check internal/kernel-worker.js && node --check scripts/expensive-headless-acceptance.mjs && node --check scripts/ab-headless-trajectories.mjs && npm run coverage",
+    "check": "node scripts/review-findings.mjs check",
     "test:expensive": "node scripts/expensive-headless-acceptance.mjs",
     "test:ab": "node scripts/ab-headless-trajectories.mjs"
   },

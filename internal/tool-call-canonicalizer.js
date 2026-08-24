@@ -30,44 +30,6 @@ function nativeCallCode(name, rawArgs) {
 }`
 }
 
-export const EDIT_RUN_CODE_REJECTION_DESCRIPTION = 'Reject unavailable run_code edit'
-export const EDIT_RUN_CODE_EXECUTION_DESCRIPTION = 'Edit and run rejected TypeScript cell'
-
-function rejectedEditArguments(reason) {
-  return JSON.stringify({
-    code: `return ${JSON.stringify({ edited: false, reason })}`,
-    description: EDIT_RUN_CODE_REJECTION_DESCRIPTION,
-  })
-}
-
-function editRunCodeArguments(value, repairSource) {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    return rejectedEditArguments('edit_run_code expects old_string and new_string strings')
-  }
-  const keys = Object.keys(value)
-  if (keys.length !== 2 || !keys.includes('old_string') || !keys.includes('new_string')
-    || typeof value.old_string !== 'string' || typeof value.new_string !== 'string') {
-    return rejectedEditArguments('edit_run_code expects exactly old_string and new_string strings')
-  }
-  if (value.old_string.length === 0) {
-    return rejectedEditArguments('old_string must be non-empty')
-  }
-  if (value.old_string === value.new_string) {
-    return rejectedEditArguments('old_string and new_string must differ')
-  }
-  if (repairSource === undefined) {
-    return rejectedEditArguments('no run_code cell is currently eligible for safe editing')
-  }
-  const first = repairSource.indexOf(value.old_string)
-  if (first < 0) return rejectedEditArguments('old_string was not found in the rejected cell')
-  if (repairSource.indexOf(value.old_string, first + value.old_string.length) >= 0) {
-    return rejectedEditArguments('old_string occurs more than once in the rejected cell')
-  }
-  const code = repairSource.slice(0, first) + value.new_string
-    + repairSource.slice(first + value.old_string.length)
-  return JSON.stringify({ code, description: EDIT_RUN_CODE_EXECUTION_DESCRIPTION })
-}
-
 function acceptsTransportView(tools, editToolName) {
   if (!Array.isArray(tools) || tools.length < 1 || tools.length > 2) return false
   const names = tools.map(tool => tool?.name)
@@ -75,8 +37,17 @@ function acceptsTransportView(tools, editToolName) {
   return names.every(name => name === 'run_code' || name === editToolName)
 }
 
-function isCandidateName(name, nativeSchemas, editToolName, editVisible) {
-  return (editVisible && name === editToolName) || nativeSchemas.has(name)
+function resolveCandidateName(name, nativeSchemas) {
+  if (typeof name !== 'string' || name.length === 0) return undefined
+  const matches = new Set()
+  if (nativeSchemas.has(name)) matches.add(name)
+  if (name.startsWith('tools.')) {
+    const member = name.slice('tools.'.length)
+    if (member.length > 0 && !member.includes('.') && nativeSchemas.has(member)) {
+      matches.add(member)
+    }
+  }
+  return matches.size === 1 ? matches.values().next().value : undefined
 }
 
 function extractCall(chunks, index) {
@@ -166,35 +137,31 @@ function transformedChunks(chunks, replacements) {
   })
 }
 
-function transformCandidate(chunks, index, nativeSchemas, editToolName, editVisible, repairSource, allowDeltaOnly) {
+function transformCandidate(chunks, index, nativeSchemas, allowDeltaOnly) {
   const call = extractCall(chunks, index)
-  if ((!call.complete && !allowDeltaOnly) || !isCandidateName(call.name, nativeSchemas, editToolName, editVisible)
+  const nativeName = resolveCandidateName(call.name, nativeSchemas)
+  if ((!call.complete && !allowDeltaOnly) || nativeName === undefined
     || call.id === undefined || call.invalidId
     || call.inconsistent || call.deltaIndex < 0) return undefined
   const parsed = parseArguments(call.args)
   if (!parsed.ok) return undefined
-  const editing = editVisible && call.name === editToolName
-  const argumentsValue = editing
-    ? editRunCodeArguments(parsed.value, repairSource)
-    : JSON.stringify({
-        code: nativeCallCode(call.name, call.args),
-        description: `Call ${call.name} inside the session REPL`,
-      })
+  const argumentsValue = JSON.stringify({
+    code: nativeCallCode(nativeName, call.args),
+    description: `Call ${nativeName} inside the session REPL`,
+  })
   return { index, id: call.id, arguments: argumentsValue }
 }
 
-function transformCandidates(
-  chunks, indices, nativeSchemas, editToolName, editVisible, repairSource, allowDeltaOnly = false,
-) {
+function transformCandidates(chunks, indices, nativeSchemas, allowDeltaOnly = false) {
   const replacements = [...indices].map(index => transformCandidate(
-    chunks, index, nativeSchemas, editToolName, editVisible, repairSource, allowDeltaOnly,
+    chunks, index, nativeSchemas, allowDeltaOnly,
   ))
     .filter(replacement => replacement !== undefined)
   return replacements.length === 0 ? undefined : transformedChunks(chunks, replacements)
 }
 
 /**
- * Normalize model-emitted native calls into strict Code Mode without guessing.
+ * Normalize model-emitted native calls into the code-only direct-tool projection without guessing.
  * Unknown or malformed calls pass through unchanged for the host to diagnose.
  */
 export async function* canonicalizeToolCallStream(source, options = {}) {
@@ -205,12 +172,10 @@ export async function* canonicalizeToolCallStream(source, options = {}) {
     yield* source
     return
   }
-  const editVisible = editToolName !== undefined && options.tools.some(tool => tool?.name === editToolName)
-  const repairSource = typeof options.repairSource === 'string' ? options.repairSource : undefined
   const nativeSchemas = options.nativeSchemas instanceof Map
-    ? new Map([...options.nativeSchemas].filter(([name]) => name !== 'run_code'))
+    ? new Map([...options.nativeSchemas].filter(([name]) => name !== 'run_code' && name !== editToolName))
     : new Map()
-  if (nativeSchemas.size === 0 && !editVisible) {
+  if (nativeSchemas.size === 0) {
     yield* source
     return
   }
@@ -224,10 +189,10 @@ export async function* canonicalizeToolCallStream(source, options = {}) {
         pending.push(chunk)
         if (chunk.type === 'block-start' && chunk.blockType === 'tool-call') open.add(chunk.index)
         if (chunk.type === 'tool-call-delta'
-          && isCandidateName(chunk.name, nativeSchemas, editToolName, editVisible)) open.add(chunk.index)
+          && resolveCandidateName(chunk.name, nativeSchemas) !== undefined) open.add(chunk.index)
         if (chunk.type === 'tool-call-delta' && open.size === 1 && open.has(chunk.index)
           && typeof chunk.name === 'string'
-          && !isCandidateName(chunk.name, nativeSchemas, editToolName, editVisible)) {
+          && resolveCandidateName(chunk.name, nativeSchemas) === undefined) {
           yield* pending
           pending = []
           passthrough.add(chunk.index)
@@ -238,9 +203,7 @@ export async function* canonicalizeToolCallStream(source, options = {}) {
           const indices = new Set(pending
             .filter(item => item.type === 'tool-call-delta' || item.type === 'block-end')
             .map(item => item.index))
-          const transformed = transformCandidates(
-            pending, indices, nativeSchemas, editToolName, editVisible, repairSource,
-          )
+          const transformed = transformCandidates(pending, indices, nativeSchemas)
           if (transformed === undefined) yield* pending
           else {
             changed = true
@@ -251,9 +214,7 @@ export async function* canonicalizeToolCallStream(source, options = {}) {
           const indices = new Set(pending
             .filter(item => item.type === 'tool-call-delta' || item.type === 'block-end')
             .map(item => item.index))
-          const transformed = transformCandidates(
-            pending, indices, nativeSchemas, editToolName, editVisible, repairSource, true,
-          )
+          const transformed = transformCandidates(pending, indices, nativeSchemas, true)
           if (transformed !== undefined) {
             changed = true
             yield* transformed
@@ -278,7 +239,7 @@ export async function* canonicalizeToolCallStream(source, options = {}) {
         open.add(chunk.index)
         pending = [chunk]
       } else if (chunk.type === 'tool-call-delta'
-        && isCandidateName(chunk.name, nativeSchemas, editToolName, editVisible)) {
+        && resolveCandidateName(chunk.name, nativeSchemas) !== undefined) {
         open.add(chunk.index)
         pending = [chunk]
       } else if (changed && chunk.type === 'finish') {

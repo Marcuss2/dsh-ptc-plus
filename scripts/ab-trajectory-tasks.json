@@ -1,40 +1,69 @@
 [
   {
+    "id": "package-name",
+    "prompt": "请直接调用一次 run_code（不要先调用 capabilities 或其他工具）读取当前项目的 package.json。run_code 必须直接 return name 字段的 JSON 字符串值本身，不要返回对象或数组，也不要 console.log；然后报告该值。",
+    "validator": "package-name",
+    "canary": true,
+    "machineBudget": { "maxModelRequests": 4, "maxDirectCalls": 3, "maxSourceChars": 6000, "maxRepeatedSourceCalls": 0, "maxResultChars": 30000, "maxAssistantChars": 12000, "maxTokenTraffic": 40000, "maxRuntimeContextChars": 16000 },
+    "runtimeContexts": { "plugin": { "allowed": [], "requiredTransitions": [], "maxSnapshotChars": 8192 }, "baseline": { "allowed": [], "requiredTransitions": [], "maxSnapshotChars": 8192 } }
+  },
+  {
     "id": "orientation",
     "prompt": "这个项目是做什么的？",
-    "validator": "blind"
+    "validator": "blind",
+    "machineBudget": { "maxModelRequests": 5, "maxDirectCalls": 4, "maxSourceChars": 12000, "maxRepeatedSourceCalls": 0, "maxResultChars": 50000, "maxAssistantChars": 20000, "maxTokenTraffic": 60000, "maxRuntimeContextChars": 20000 },
+    "runtimeContexts": { "plugin": { "allowed": [], "requiredTransitions": [], "maxSnapshotChars": 8192 }, "baseline": { "allowed": [], "requiredTransitions": [], "maxSnapshotChars": 8192 } }
   },
   {
     "id": "test-check",
     "prompt": "检查这个项目能否通过测试。",
-    "validator": "test-gate"
+    "validator": "test-gate",
+    "machineBudget": { "maxModelRequests": 6, "maxDirectCalls": 5, "maxSourceChars": 16000, "maxRepeatedSourceCalls": 0, "maxResultChars": 100000, "maxAssistantChars": 20000, "maxTokenTraffic": 80000, "maxRuntimeContextChars": 24000 },
+    "runtimeContexts": { "plugin": { "allowed": [], "requiredTransitions": [], "maxSnapshotChars": 8192 }, "baseline": { "allowed": [], "requiredTransitions": [], "maxSnapshotChars": 8192 } }
   },
   {
     "id": "worktree-status",
     "prompt": "这个仓库当前有哪些未提交的变更？",
-    "validator": "git-status"
+    "validator": "git-status",
+    "machineBudget": { "maxModelRequests": 5, "maxDirectCalls": 4, "maxSourceChars": 12000, "maxRepeatedSourceCalls": 0, "maxResultChars": 50000, "maxAssistantChars": 20000, "maxTokenTraffic": 60000, "maxRuntimeContextChars": 20000 },
+    "runtimeContexts": { "plugin": { "allowed": [], "requiredTransitions": [], "maxSnapshotChars": 8192 }, "baseline": { "allowed": [], "requiredTransitions": [], "maxSnapshotChars": 8192 } }
   },
   {
     "id": "runtime-requirement",
     "prompt": "这个项目要求的最低 Node.js 版本是什么？",
-    "validator": "package-engine"
+    "validator": "package-engine",
+    "machineBudget": { "maxModelRequests": 5, "maxDirectCalls": 4, "maxSourceChars": 12000, "maxRepeatedSourceCalls": 0, "maxResultChars": 50000, "maxAssistantChars": 20000, "maxTokenTraffic": 60000, "maxRuntimeContextChars": 20000 },
+    "runtimeContexts": { "plugin": { "allowed": [], "requiredTransitions": [], "maxSnapshotChars": 8192 }, "baseline": { "allowed": [], "requiredTransitions": [], "maxSnapshotChars": 8192 } }
   },
   {
     "id": "code-explanation",
     "prompt": "解释 internal/value-wire.js 中 projectValueWire 的返回策略。",
-    "validator": "blind"
+    "validator": "blind",
+    "machineBudget": { "maxModelRequests": 6, "maxDirectCalls": 5, "maxSourceChars": 18000, "maxRepeatedSourceCalls": 0, "maxResultChars": 80000, "maxAssistantChars": 30000, "maxTokenTraffic": 80000, "maxRuntimeContextChars": 24000 },
+    "runtimeContexts": { "plugin": { "allowed": [], "requiredTransitions": [], "maxSnapshotChars": 8192 }, "baseline": { "allowed": [], "requiredTransitions": [], "maxSnapshotChars": 8192 } }
   },
   {
     "id": "small-edit",
     "prompt": "在 package.json 中新增 test:unit 脚本，值为 node --test，并验证 JSON 有效。",
     "validator": "package-script",
     "script": "test:unit",
-    "value": "node --test"
+    "value": "node --test",
+    "machineBudget": { "maxModelRequests": 6, "maxDirectCalls": 5, "maxSourceChars": 18000, "maxRepeatedSourceCalls": 0, "maxResultChars": 80000, "maxAssistantChars": 20000, "maxTokenTraffic": 80000, "maxRuntimeContextChars": 24000 },
+    "runtimeContexts": { "plugin": { "allowed": [], "requiredTransitions": [], "maxSnapshotChars": 8192 }, "baseline": { "allowed": [], "requiredTransitions": [], "maxSnapshotChars": 8192 } }
   },
   {
     "id": "negative-fact",
     "prompt": "README 是否要求 Python 3.12？只报告结论和依据。",
     "validator": "readme-phrase",
-    "phrase": "Python 3.12"
+    "phrase": "Python 3.12",
+    "machineBudget": { "maxModelRequests": 5, "maxDirectCalls": 4, "maxSourceChars": 12000, "maxRepeatedSourceCalls": 0, "maxResultChars": 50000, "maxAssistantChars": 20000, "maxTokenTraffic": 60000, "maxRuntimeContextChars": 20000 },
+    "runtimeContexts": { "plugin": { "allowed": [], "requiredTransitions": [], "maxSnapshotChars": 8192 }, "baseline": { "allowed": [], "requiredTransitions": [], "maxSnapshotChars": 8192 } }
+  },
+  {
+    "id": "static-import-cell",
+    "prompt": "在 run_code cell 中直接使用静态 import 声明导入 node:path 的 basename（不要改写为动态导入），用它返回 C:/logs/session.jsonl 的文件名，并报告该文件名。",
+    "validator": "blind",
+    "machineBudget": { "maxModelRequests": 5, "maxDirectCalls": 3, "maxSourceChars": 8000, "maxRepeatedSourceCalls": 0, "maxResultChars": 30000, "maxAssistantChars": 10000, "maxTokenTraffic": 50000, "maxRuntimeContextChars": 24000 },
+    "runtimeContexts": { "plugin": { "allowed": [{ "name": "tools:ptc-plus-rewrite-info", "maxChars": 2048 }], "requiredTransitions": [{ "name": "tools:ptc-plus-rewrite-info", "type": "append" }], "maxSnapshotChars": 8192 }, "baseline": { "allowed": [], "requiredTransitions": [], "maxSnapshotChars": 8192 } }
   }
 ]

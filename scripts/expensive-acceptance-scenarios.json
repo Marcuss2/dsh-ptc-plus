@@ -1,76 +1,314 @@
 [
   {
+    "id": "rejected-cell-editing",
+    "title": "Completed and rejected cell delta repair",
+    "default": true,
+    "task": "严格验证 edit transport。不要创建 todo 或计划，不要调用任何无关工具，不要并行或重试；唯一允许的工具活动是严格按 run_code、edit_run_code、run_code、edit_run_code 顺序各调用一次。先把下面第一段源码原样作为一个 run_code cell 执行，不要缩短其中字符串：\n\n{{completedSource}}\n\n它会成功执行，但结果需要微调；只调用一次 edit_run_code，用唯一 literal edit 把 {{adjustmentOld}} 替换为 {{adjustmentNew}}，不要用 run_code 重发修改后源码。然后把下面第二段源码原样作为新的 run_code cell 执行，不要提前修正：\n\n{{rejectedSource}}\n\n它被拒绝后，只调用一次 edit_run_code，用唯一 literal edit 把 {{repairOld}} 替换为 {{repairNew}}，仍然不要用 run_code 重发修改后源码。edit 参数和最终回答都不得包含任一完整源码。最终只报告两次 edit 执行返回的 {{expectedAdjustment}} 和 {{expectedRepair}}。",
+    "expect": {
+      "minCells": 4,
+      "maxCells": 4,
+      "allowedJournalStatuses": [
+        "noop",
+        "durable"
+      ],
+      "requiredJournalStatuses": [
+        "noop",
+        "durable"
+      ],
+      "allowedDiagnosticCodes": [
+        "PTC-C001"
+      ],
+      "requiredDirectToolSequence": [
+        "run_code",
+        "edit_run_code",
+        "run_code",
+        "edit_run_code"
+      ],
+      "editTransports": [
+        {
+          "originalSource": "{{completedSource}}",
+          "oldString": "{{adjustmentOld}}",
+          "newString": "{{adjustmentNew}}",
+          "repairedSource": "{{adjustedSource}}",
+          "targetStatus": "durable"
+        },
+        {
+          "originalSource": "{{rejectedSource}}",
+          "oldString": "{{repairOld}}",
+          "newString": "{{repairNew}}",
+          "repairedSource": "{{repairedSource}}",
+          "targetStatus": "noop"
+        }
+      ],
+      "completionIncludes": [
+        "{{expectedAdjustment}}",
+        "{{expectedRepair}}"
+      ],
+      "finalAnswerIncludes": [
+        "{{expectedAdjustment}}",
+        "{{expectedRepair}}"
+      ],
+      "runtimeContexts": {
+        "allowed": [],
+        "requiredTransitions": [],
+        "maxSnapshotChars": 8192
+      },
+      "machineBudget": {
+        "maxModelRequests": 6,
+        "maxDirectCalls": 4,
+        "maxSourceChars": 2500,
+        "maxRepeatedSourceCalls": 0,
+        "maxResultChars": 30000,
+        "maxAssistantChars": 10000,
+        "maxTokenTraffic": 80000,
+        "maxRuntimeContextChars": 20000
+      }
+    }
+  },
+  {
     "id": "durable-repl-continuity",
     "title": "Durable bindings across cells",
+    "default": true,
     "task": "验证 durable 连续 REPL。先在一个 run_code cell 顶层声明 const {{binding}} = {{left}}，该 cell 不要 return 此值；再在后续独立 cell 中直接复用该 binding（不要重新声明）并加上 {{right}}，return 计算结果。最终用一句话报告结果。不要只描述步骤。",
     "expect": {
       "minCells": 2,
       "maxCells": 4,
-      "allowedJournalStatuses": ["durable"],
-      "requiredJournalStatuses": ["durable"],
+      "allowedJournalStatuses": [
+        "durable"
+      ],
+      "requiredJournalStatuses": [
+        "durable"
+      ],
       "continuityBinding": "{{binding}}",
       "declarationCellHasValue": false,
-      "completionEqualsAny": ["{{expectedSum}}"]
+      "completionEqualsAny": [
+        "{{expectedSum}}"
+      ],
+      "runtimeContexts": {
+        "allowed": [],
+        "requiredTransitions": [],
+        "maxSnapshotChars": 8192
+      },
+      "machineBudget": {
+        "maxModelRequests": 5,
+        "maxDirectCalls": 4,
+        "maxSourceChars": 6000,
+        "maxRepeatedSourceCalls": 0,
+        "maxResultChars": 30000,
+        "maxAssistantChars": 10000,
+        "maxTokenTraffic": 50000,
+        "maxRuntimeContextChars": 16000
+      }
     }
   },
   {
     "id": "durable-program-surface",
     "title": "Typed durable program surface",
+    "default": true,
     "fixture": {
       "name": "program-surface-input.txt",
       "content": "{{secret}}\n"
     },
-    "task": "在 run_code 中完成一次 typed program surface 验证：先用 capabilities.find 定位 read，并用 capabilities.inspect 检查 tools.read；再用 tools.read 读取 {{fixturePath}} 的唯一标记；最后调用 code.run，让隔离 child 返回“文件中实际标记的完整原文:该原文的字符数”（不要返回中文字面量“标记”）。父 cell 必须 return child result，最终回答也原样给出它。不要绕过这些 SDK binding。",
+    "task": "在 run_code 中完成一次 typed program surface 验证：保持能力探索聚焦，只查找完成任务所需的读取文件、查看能力契约以及隔离执行 binding；按探索结果用读取能力读取 {{fixturePath}} 的唯一标记，再让隔离 child 返回“文件中实际标记的完整原文:该原文的字符数”（不要返回中文字面量“标记”）。只调用一次 code.run，并在同一个父 cell 中直接 return 该调用返回对象的 `.result`；不得先 return 整个对象再重试。最终回答也原样给出该字符串。不要绕过插件提供的 SDK binding；child 隔离 runtime 内只有 tools.* 等 SDK binding 可用，不要使用 require 或 Node 全局。",
     "expect": {
       "minCells": 1,
-      "maxCells": 3,
-      "allowedJournalStatuses": ["durable"],
+      "maxCells": 8,
+      "allowedJournalStatuses": [
+        "durable"
+      ],
       "requiredCalls": [
-        { "global": "capabilities", "member": "find", "min": 1 },
         {
           "global": "capabilities",
           "member": "inspect",
           "min": 1,
-          "valueIncludes": ["unknown", "recorded-value"]
+          "valueIncludes": [
+            "unknown",
+            "recorded-value",
+            "Run isolated source already held as data",
+            "logs",
+            "Child return value"
+          ]
         },
-        { "global": "tools", "member": "read", "min": 1, "valueIncludes": ["{{secret}}"] },
-        { "global": "code", "member": "run", "min": 1, "valueIncludes": ["{{expectedChild}}"] }
+        {
+          "global": "tools",
+          "member": "read",
+          "min": 1,
+          "valueIncludes": [
+            "{{secret}}"
+          ]
+        },
+        {
+          "global": "code",
+          "member": "run",
+          "min": 1,
+          "max": 1,
+          "valueIncludes": [
+            "{{expectedChild}}"
+          ]
+        }
       ],
-      "completionEqualsAny": ["{{expectedChild}}"],
-      "finalAnswerIncludes": ["{{expectedChild}}"]
+      "requiredCallSequence": [
+        { "global": "capabilities", "member": "inspect" },
+        { "global": "tools", "member": "read" },
+        { "global": "code", "member": "run" }
+      ],
+      "completionIncludes": [
+        "{{expectedChild}}"
+      ],
+      "finalAnswerIncludes": [
+        "{{expectedChild}}"
+      ],
+      "runtimeContexts": {
+        "allowed": [],
+        "requiredTransitions": [],
+        "maxSnapshotChars": 8192
+      },
+      "machineBudget": {
+        "maxModelRequests": 9,
+        "maxDirectCalls": 8,
+        "maxSourceChars": 20000,
+        "maxRepeatedSourceCalls": 0,
+        "maxResultChars": 100000,
+        "maxAssistantChars": 20000,
+        "maxTokenTraffic": 120000,
+        "maxRuntimeContextChars": 40000
+      }
     }
   },
   {
     "id": "volatile-node-continuity",
     "title": "Natural Node.js full-access continuity",
+    "default": true,
     "fixture": {
       "name": "node-input.txt",
       "content": "{{secret}}\n"
     },
-    "task": "验证 danger-full-access 下普通 Node.js 路径及 live 连续性。第一个 run_code cell 使用 node:fs/promises 与 node:crypto（不使用 tools.*）读取 {{fixturePath}} 的精确字节，计算 SHA-256 并保存为顶层 const {{binding}}，该 cell 不要 return 摘要；后续独立 cell 直接复用该 binding（不要重新声明）并 return 它。最终用一句话报告小写十六进制摘要。",
+    "task": "验证 danger-full-access 下普通 Node.js 路径及 live 连续性。第一个 run_code cell 使用动态 import 加载 node:fs/promises 与 node:crypto（不要写静态 import 声明，不使用 tools.*），读取 {{fixturePath}} 的精确字节，计算 SHA-256，并且必须用 `const {{binding}} = ...` 在顶层声明摘要 binding，不得省略 const；该 cell 不要 return 摘要。后续独立 cell 直接复用该 binding（不要重新声明）并 return 它。最终用一句话报告小写十六进制摘要。",
     "expect": {
       "minCells": 2,
       "maxCells": 4,
-      "allowedJournalStatuses": ["volatile"],
-      "requiredJournalStatuses": ["volatile"],
+      "allowedJournalStatuses": [
+        "volatile"
+      ],
+      "requiredJournalStatuses": [
+        "volatile"
+      ],
       "continuityBinding": "{{binding}}",
       "declarationCellHasValue": false,
-      "completionEqualsAny": ["{{fixtureSha256}}"]
+      "completionEqualsAny": [
+        "{{fixtureSha256}}"
+      ],
+      "runtimeContexts": {
+        "allowed": [],
+        "requiredTransitions": [],
+        "maxSnapshotChars": 8192
+      },
+      "machineBudget": {
+        "maxModelRequests": 5,
+        "maxDirectCalls": 4,
+        "maxSourceChars": 8000,
+        "maxRepeatedSourceCalls": 0,
+        "maxResultChars": 30000,
+        "maxAssistantChars": 10000,
+        "maxTokenTraffic": 50000,
+        "maxRuntimeContextChars": 16000
+      }
     }
   },
   {
-    "id": "rejected-source-edit",
-    "title": "Edit a rejected long cell",
-    "task": "请运行下面的 TypeScript 程序并只报告最终返回值。\n\n```ts\nconst text = \"{{longLiteral}}\"\nreturn text.length + \":\" + text.slice(-8) ]\n```",
+    "id": "static-import-conversion",
+    "title": "Static import auto-conversion",
+    "default": true,
+    "fixture": {
+      "name": "import-input.txt",
+      "content": "imported-mark\n"
+    },
+    "task": "验证静态 import 自动转换及其提示生命周期。第一个 run_code cell 在顶层使用静态 import 声明导入 node:path 的 basename，并声明 const {{binding}} = basename({{fixturePath}} 的字符串路径)，不要 return 该值，也不要改写为动态 import。第二个独立 run_code cell 直接 return {{binding}}，不要重新声明。最终用一句话报告文件名。",
     "expect": {
       "minCells": 2,
-      "maxCells": 2,
-      "allowedJournalStatuses": ["noop", "durable"],
-      "requiredJournalStatuses": ["noop", "durable"],
-      "allowedDiagnosticCodes": ["PTC-C001"],
-      "requiredCellDescriptions": ["Edit and run rejected TypeScript cell"],
-      "completionIncludes": ["{{expectedRepair}}"],
-      "finalAnswerIncludes": ["{{expectedRepair}}"]
+      "maxCells": 3,
+      "allowedJournalStatuses": [
+        "volatile"
+      ],
+      "completionIncludes": [
+        "import-input.txt"
+      ],
+      "continuityBinding": "{{binding}}",
+      "declarationCellHasValue": false,
+      "finalAnswerIncludes": [
+        "import-input.txt"
+      ],
+      "runtimeContexts": {
+        "allowed": [
+          {
+            "name": "tools:ptc-plus-rewrite-info",
+            "maxChars": 2048
+          }
+        ],
+        "requiredTransitions": [
+          {
+            "name": "tools:ptc-plus-rewrite-info",
+            "type": "append"
+          },
+          {
+            "name": "tools:ptc-plus-rewrite-info",
+            "type": "clear"
+          }
+        ],
+        "maxSnapshotChars": 8192
+      },
+      "machineBudget": {
+        "maxModelRequests": 5,
+        "maxDirectCalls": 3,
+        "maxSourceChars": 8000,
+        "maxRepeatedSourceCalls": 0,
+        "maxResultChars": 30000,
+        "maxAssistantChars": 10000,
+        "maxTokenTraffic": 50000,
+        "maxRuntimeContextChars": 24000
+      }
+    }
+  },
+  {
+    "id": "partial-redefinition-split",
+    "title": "Mixed redeclaration auto-split",
+    "default": false,
+    "task": "验证部分重定义自动拆解：第一个 run_code cell 顶层声明 const {{binding}} = {{left}}（不要 return）；第二个 cell 用 const 解构声明同时包含已存在的 {{binding}} 与新名字 split_fresh_name，初值分别为 {{left}} 与 {{right}}（例如 const { {{binding}}, split_fresh_name } = { {{binding}}: {{left}}, split_fresh_name: {{right}} }），并 return 模板字符串 split value: ${split_fresh_name}（严格按此形式，不要 return 对象）。不要手动拆分声明，直接写混合解构。最终用一句话报告该字符串。",
+    "expect": {
+      "minCells": 2,
+      "maxCells": 4,
+      "allowedJournalStatuses": [
+        "durable"
+      ],
+      "continuityBinding": "{{binding}}",
+      "completionIncludes": [
+        "split value: {{right}}"
+      ],
+      "runtimeContexts": {
+        "allowed": [
+          {
+            "name": "tools:ptc-plus-rewrite-info",
+            "maxChars": 2048
+          }
+        ],
+        "requiredTransitions": [
+          {
+            "name": "tools:ptc-plus-rewrite-info",
+            "type": "append"
+          }
+        ],
+        "maxSnapshotChars": 8192
+      },
+      "machineBudget": {
+        "maxModelRequests": 5,
+        "maxDirectCalls": 4,
+        "maxSourceChars": 8000,
+        "maxRepeatedSourceCalls": 0,
+        "maxResultChars": 30000,
+        "maxAssistantChars": 10000,
+        "maxTokenTraffic": 50000,
+        "maxRuntimeContextChars": 24000
+      }
     }
   }
 ]

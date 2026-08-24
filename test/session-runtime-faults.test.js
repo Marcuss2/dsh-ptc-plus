@@ -14,6 +14,7 @@ class FakePort extends EventEmitter {
 
   postMessage(message) {
     if (message.type === 'run') {
+      if (this.behavior === 'post-error') throw new Error('private port rejected run message')
       this.runId = message.id
       queueMicrotask(() => this.start(message))
       return
@@ -57,9 +58,16 @@ class FakeWorker extends EventEmitter {
   constructor() {
     super()
     this.behavior = behaviors.shift()
-    this.stdout = { resume() {} }
-    this.stderr = { resume() {} }
+    this.stdout = Object.assign(new EventEmitter(), { resume() {} })
+    this.stderr = Object.assign(new EventEmitter(), { resume() {} })
     this.performance = { eventLoopUtilization: () => ({ active: 0 }) }
+    if (this.behavior === 'stderr-then-exit') {
+      queueMicrotask(() => {
+        this.stderr.emit('data', Buffer.from('V8 crash\nFATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory\n'))
+        this.emit('exit', 134)
+      })
+      return
+    }
     const ready = () => {
       if (this.behavior === 'error-before-ready') this.emit('error', new Error('startup error event'))
       else if (this.behavior === 'exit-before-ready') this.emit('exit', 9)
@@ -94,6 +102,13 @@ test('fails closed for every worker startup and private-protocol fault', async (
   assert.equal((await durability.run('invalid-durability', { program: 'return 1', bindings: [] })).error.kind, 'worker-exit')
   await durability.dispose()
 
+  behaviors.push('post-error')
+  const postError = new SessionRuntime()
+  const postErrorResult = await postError.run('post-error', { program: 'return 1', bindings: [] })
+  assert.equal(postErrorResult.error.kind, 'worker-exit')
+  assert.match(postErrorResult.error.message, /private port rejected run message/)
+  await postError.dispose()
+
   behaviors.push('oversized-completion')
   const oversized = new SessionRuntime({ maxOutputBytes: 8 })
   assert.equal((await oversized.run('oversized', { program: 'return 1', bindings: [] })).error.kind, 'output-limit')
@@ -108,6 +123,13 @@ test('fails closed for every worker startup and private-protocol fault', async (
   const invalidLogs = new SessionRuntime()
   assert.deepEqual((await invalidLogs.run('invalid-logs', { program: 'return 1', bindings: [] })).logs, [])
   await invalidLogs.dispose()
+
+  behaviors.push('stderr-then-exit')
+  const stderrExit = new SessionRuntime()
+  const stderrResult = await stderrExit.run('stderr-exit', { program: 'return 1', bindings: [] })
+  assert.equal(stderrResult.error.kind, 'worker-exit')
+  assert.match(stderrResult.error.message, /last stderr: FATAL ERROR: Reached heap limit/)
+  await stderrExit.dispose()
 
   behaviors.push('error-without-name')
   const unnamed = new SessionRuntime()

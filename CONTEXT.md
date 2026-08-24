@@ -1,24 +1,26 @@
 # PTC Plus Project Context
 
-PTC Plus 是个人维护的社区实验插件。它把 DSH Code Mode 的顶层 `run_code` 变成 session-bound TypeScript REPL；它不复制 DSH 的权限、sandbox、nested dispatch、调度、取消、审批或跨平台进程治理。
+PTC Plus 是个人维护的社区实验插件。它把 DSH PTC 模式的顶层 `run_code` 变成 session-bound TypeScript REPL；它不复制 DSH 的权限、sandbox、nested dispatch、调度、取消、审批或跨平台进程治理。
 
 ## Core constraints
 
 1. `danger-full-access` 是一等体验：保留模型熟悉的 Node、process、filesystem、network、shell、生态 SDK 与 DSH native typed `tools.*`。其他 profile 的 native tool surface 只按 live request 简单降级，不模拟缺失能力；更窄 tool view 不构成 Node ambient sandbox。
 2. 后续 cell 直接复用 binding，不搬运源码、不嵌套转义、不增加普通继续求值的模型往返。
-3. DSH/宿主拥有 authority 和 policy。PTC Plus 只使用公共扩展面，不 fork DSH、不接入私有 scheduler、不伪造 session event。当前集成验收版本是 DSH CLI `0.1.0-rc.8`，切换 prerelease 版本必须重新验收。
+3. DSH/宿主拥有 authority 和 policy。PTC Plus 始终面向最新可用 DSH release 的公共扩展面，不 fork DSH、不接入私有 scheduler、不伪造 session event，也不以版本号白名单替代能力和契约验收。验收脚本在运行时记录实际 DSH 版本；上游升级后，当前 release 立即成为兼容目标。
 4. 无法由 session log 重建的 Node/OS 输入与 effect 进入 sticky volatile；live worker 继续可用，cold recovery 回到最后 durable frontier。volatile 是恢复分类，不是权限。
 5. shell 是解释命令文本的通用入口，不是 REPL、权限系统或普通 argv spawn 的前置条件。PTY/ConPTY 只用于交互进程；Windows、WSL 与 POSIX execution world 必须分别探查。
 6. 透明性要求 action、authority、effect、result completeness、replay 与 settlement 不被混淆；不要求暴露无决策意义的 provider 内部细节。
 
 ## Program surface
 
-- cell 直接调用 DSH 原生 `tools.<name>(args)` / `tools["name"](args)`。该 program surface 不按工具名过滤，不改写参数、canonical result、错误或 owner guidance。严格 Code Mode 中误发的已知顶层 native call 只在模型 transport 层静默包装为调用同一 member 的 `run_code`；原始 JSON 文本、call identity 和 DSH 正式 validation 保持不变，未知或不一致输入不猜测修复。
+- cell 直接调用 DSH 原生 `tools.<name>(args)` / `tools["name"](args)`。该 program surface 不按工具名过滤，不改写参数、canonical result、错误或 owner guidance。PTC 模式的 code-only direct-tool projection 只声明模型可直接调用 `run_code` 与 `edit_run_code`。若模型误发当前 live scope 中可证明存在的顶层 native call，插件可在持久化前将这个无效 direct call 规范为调用同一 member 的 `run_code`；原始 JSON 参数、call identity 和 DSH 正式 validation 保持不变。未知、畸形或不一致输入不猜测修复。合法的 `edit_run_code` 绝不进入该归一化路径。
 - 每个 cell 创建统一 lease。native tools、`capabilities.*`、`repl.state` 和 `code.run` 在 cell 结束后一起失效；下一次 dispatch 仍由 DSH 重新治理。
-- `capabilities.tree/find/inspect` 只描述当前 agent scope 的 live schemas，不调用 capability、不提升权限、不触发模型请求。
+- `capabilities.tree/find/inspect` 描述当前 agent scope 的 live tool schemas 以及插件自有 `repl.state` / `code.run` 契约，不调用 capability、不提升权限、不触发辅助模型请求。默认 SDK 只展开 explorer，不主动展开两个低频高级 API。
 - PTC journal 为所有已结算的 program binding call 提供 `recorded-value` replay：cold replay 校验调用序列并返回 recorded canonical value，不重新 dispatch capability。这不表示外部 effect 被重做、撤销或验证。
 - live tool schema 没有 owner-proven effect/completeness/source 注解时保持 `unknown`。不能从工具名、UI rendering 或自然语言摘要推测完整性。
-- CodeRuntime request 已携带的 owner-provided program namespace 会原样保留并共享 cell lease；PTC Plus 不翻译其领域契约。与插件保留的 `capabilities`、`code` 或 `repl` 同名时明确失败，不能静默合并。当前公共 request surface 没有用于发现额外服务的 program-binding registry，因此插件不增加名称分发总线或私有 registry。
+- CodeRuntime request 已携带的 owner-provided program namespace 会原样保留并共享 cell lease；PTC Plus 不翻译其领域契约。与插件保留的 `capabilities`、`code` 或 `repl` 同名时 request 明确失败，不能静默合并；普通 cell 局部变量可以自然 shadow 这三个低频 namespace，需要时仍可从 `globalThis` 访问。native `tools` 不允许 shadow，因为那会切断主要能力面。当前公共 request surface 没有用于发现额外服务的 program-binding registry，因此插件不增加名称分发总线或私有 registry。
+- cell 包裹前的 AST 重写适配模块语法（cell 是 async function body，模块声明在函数体内非法），全部默认开启（`autoRewriteImports` / `autoStripExports` / `autoSplitRedeclarations`，可关闭）：原始 Program 在 lowering 与 preload 前完成 scope validation，同一 cell 的 value import 重名按模块 binding 规则拒绝；worker 按源码顺序从 session cwd 预加载并静态链接 `import`，session 未记录 cwd 时回退到 process cwd；cell 通过持久 module namespace slot 捕获结果，named/default alias 保持 live read 与只读 binding 语义；value import alias 活跃时，无法由静态 AST 保真的 direct `eval` 与 `with` 在任何 module preload 前拒绝；顶层 `export` 修饰符剥离（声明保留、default 转 `__default`、re-export 转预加载的副作用模块、type-only 擦除）。跨 cell 重声明属于 REPL 便利策略，由 `internal/repl-convenience.js` 隔离实现；混合新旧名称的顶层解构在该策略开启时按插件定义的兼容规则 lowering，关闭时保持原文走既有解析失败路径。改写来源平行记录在 `meta.dshPtcPlusRewrites`（journal 封闭 schema），并经命名 context `tools:ptc-plus-rewrite-info` 在下一轮 model request 快照呈现。
+- `require(...)` 与动态导入按同一白名单分类：白名单内置模块保持 durable，其余 volatile，`worker_threads`/`cluster` 等内核控制模块在执行前以 `PTC-C002` 拒绝，非字面量参数为 dynamic module resolution。durable 只表示冷恢复可以重放已结算历史，不表示失败 cell 没有外部副作用或可以安全重试。
 
 ## Data boundaries
 
@@ -26,21 +28,27 @@ PTC Plus 是个人维护的社区实验插件。它把 DSH Code Mode 的顶层 `
 - 当前 DSH `tools.read` 契约是 bounded inspection，不是 lossless whole-file API；这项使用注意不构成 PTC metadata 注解。需要完整文件时，一等 profile 使用 `node:fs/promises.readFile` 或 stream；该直接 I/O 没有 call transcript，因此进入 volatile。
 - model/UI rendering 与 canonical program value 是不同层；展示被裁剪不能证明 program value 被裁剪，反之亦然。
 - `code.run` 在隔离 child runtime 执行 source，不合并父 binding。正常结算后记录并重放结果；若基础设施终止时调用仍未结算，discarded journal 以 `code.run` 记录 possible-effect boundary。该规则由所有 program binding 共用的 pending/settled 生命周期决定，不由 capability 名称决定。
-- 严格 Code Mode 按固定顺序暴露 `[run_code, edit_run_code]`，不根据失败状态改变 tool surface。`edit_run_code({ old_string, new_string })` 只对同一未结束 turn 中最近一个确定未执行的 rejected cell 做唯一字面替换，再 lower 为完整的官方 `run_code`。后续调查 cell 不擦除目标，成功 edit 执行后才消费目标。已执行、超时、取消和 effect 不确定的目标 cell 不可重跑；无可修复目标时安静返回原因。该临时 transport 便利只减少局部错误后的长源码重发，不增加 authority，不扩展为编辑 DSL。
+- PTC 模式的 code-only direct-tool projection 固定暴露 `[run_code, edit_run_code]`，但 DSH 默认只投影 `run_code` 不是插件必须继承的架构约束。DSH owner 为一个 agent composition 选择一次 `native`、`code` 或 `both`；PTC Plus 必须在自己的 agent-scoped presentation effect 生效前捕获首次可证明的 composition mode，并在该 agent 生命周期内只从这项事实派生 direct projection、native-call normalization 与 dispatch rejection。非空 `tools:code-only` rule 证明 `code`，同名空 section 证明 `both`；插件为执行 `edit_run_code` 调用的 `tools.presentAs('both')` 只是宿主执行效果，不能成为后续模式证据。PTC Plus 通过 DSH 的公共工具注册与 agent 级呈现接口真实注册并呈现 `edit_run_code`；无关 native tools 仍只作为程序内 `tools.*` 能力提供。`edit_run_code` 保留模型原始调用与参数，使用独立 editor 对同一未结束 turn 中调用发起时最近的可编辑 cell 原子应用至多 16 个唯一、非重叠的字面替换，或至多 16 条带显式预期匹配数的正则替换；发起后的其他 settlement 不追溯改变该目标。目标既可以是被拒绝或失败的 cell，也可以是已成功执行但仍需微调的 cell；成功 edit 的派生源码成为下一目标。完整物化源码只进入插件派生的 `run_code` 执行和可恢复日志元数据，不替换或重复进入模型 assistant history；执行结果由外层 `edit_run_code` result 表达。调用身份、派生执行、journal、恢复与 UI 展示必须保持可区分；`llm/stream` 不得重命名合法的 `edit_run_code`，也不得添加 edit 专用 runtime context。所有匹配、长度、capture、展开和 CPU 预算仍由 editor 统一拥有；失败、取消、未知 effect 与冷恢复语义必须从 session log 重建。
 
 ## Journal facts
 
-`version: 1` journal 是封闭 schema，只包含：binding mode、status、call transcript、state operations、confirmed no-op ids、diagnostics、completion 与 optional volatile reason。call transcript 包含 namespace/member、PTC Value Graph 编码的 args/value 或 error，以及连续 settlement 序号；不包含推测的 effect、completeness 或 fingerprint。基础设施终止时 calls 清空；若仍有未结算 binding，`discarded.volatileReason` 保存最先观察到的 `global.member` possible-effect boundary。
+`version: 3` journal 是封闭 schema，只包含：binding mode、rewrite policy、status、call transcript、state operations、confirmed no-op call sequences、diagnostics、completion 与 optional volatile reason。rewrite policy 固化该 cell 的三个 AST rewrite 开关，冷恢复不读取当前 profile 的开关。call transcript 包含 namespace/member、PTC Value Graph 编码的 args/value 或 error，以及连续 settlement 序号；不包含推测的 effect、completeness 或 fingerprint。基础设施终止时 calls 清空；若仍有未结算 binding，`discarded.volatileReason` 保存最先观察到的 `global.member` possible-effect boundary。
 
 两阶段确认通过 `run_code.output.presentationMeta` 与 `tools/result` 完成。已执行但最终 journal 缺失或变化时，live state 单调降为 volatile；未进入 runtime 的 call 由后续 `confirms` 证明为 no-op。损坏或缺失历史形成 unknown suffix，cold recovery 不越过它。
 
+durable node 重放失败时，插件通过 DSH `Session.append()` 追加仅进入日志的 `ptc-plus/recovery-boundary`，记录失败 call 与其已验证 parent frontier；原有 call/result 不修改。boundary 必须在 event sequence 参与排序前完成规范化，损坏 boundary 使 cold recovery fail closed。日志折叠删除失败 node 及依赖后代，重算仍可重建的 checkpoints，重置 worker 后逐级验证更早 frontier，成功后当前 live cell 才会执行。新 durable node 必须连接到实际重建的 frontier；历史 program binding effect 不重新派发。
+
+自动重写以 `meta.dshPtcPlusRewrites` 平行 key 记录（`{ kind: import|export|redeclaration, description, source? }`，校验与冻结同 journal 风格），不进入封闭的 journal schema，也不参与 `journalsEqual`；只对真实执行过的 cell 出现，preflight 拒绝的 cell 不带。`tools/result` 两阶段确认不受该平行 key 干扰。
+
+宿主工具调用经 worker 回调回到主线程时，DSH 的 AsyncLocalStorage initiator 上下文在回调中为空。插件注入 `agents` 服务并在 `invokeBinding` 处用 `withInitiator(精确活跃 agent, ...)` 建立边界：要求 driver 内精确调用 agent 的宿主工具（如 goal 跟踪）可从 cell 内 `tools.*` 直接调用。`edit_run_code` 的外层注册和派生 `run_code` dispatch 也必须复用这条宿主工具流水线，不得通过模型流中间件伪造调用。
+
 ## Presentation
 
-DSH 原生 tool guidance 与 typed SDK 保持 owner 提供的内容。PTC Plus 修改 `run_code` 的连续 REPL 说明，追加 `repl`、`capabilities` 与 `code` 声明，并在 session-bound strict Code Mode 增加固定的 `edit_run_code` schema。任何额外 Agent 语义增强都必须由用户主动触发，或由用户预授权且有硬预算、用量记录和取消能力的 policy 触发；当前运行时不包含这类增强。
+DSH 原生 tool guidance 与 typed SDK 保持 owner 提供的内容。PTC Plus 修改 `run_code` 的连续 REPL 说明，只追加 `capabilities` explorer 声明，并在使用 code-only direct-tool projection 的 session-bound PTC request 中增加真实注册的 `edit_run_code` schema。稳定指引只保留 cell async body、模块适配、binding continuity、能力发现和 execution-world 边界；不假设 Windows、WSL、POSIX、shell、package runner 或某个 native tool 存在。改写反馈和按需恢复 tip 只有在事实不已由 call/result 表达且确实改变下一步决策时才使用 named runtime context；edit 身份、参数、结果和目标消费不再通过 runtime context 补叙事。恢复 tip 受 `tipCooldownMessages` 与 `tipEscalationFailures` 约束；成功 cell 重置未解决计数。
 
-普通顶层误调用的 transport recovery 是确定性协议归一化，不调用模型、不增加 authority，也不向 prompt 注入按错误定制的提示。它只在 request identity 与 live schema 可证明时生效；无法证明时保留原调用，由宿主报告真实错误。
+普通顶层误调用的 transport recovery 是确定性协议归一化，不调用模型、不增加 authority，也不向 prompt 注入纠错说明。它只修复 declared direct surface 之外、但由 live schema 可证明的 native call；无法证明时保留原调用，由宿主报告真实错误。已声明的 `run_code` 与 `edit_run_code` 不是误调用，不能通过该机制互相改名。
 
-普通成功 cell 不产生 PTC warning/note。宽松重声明和首次进入 volatile 都是正常运行状态；后者只进入 journal 与 `repl.state(list)`。只有执行失败或 cold recovery 实际跳过历史状态时才投影可行动诊断。
+普通成功 cell 不产生 PTC warning/note。宽松重声明和首次进入 volatile 都是正常运行状态；后者只进入 journal 与 `repl.state(list)`。只有执行失败或 cold recovery 实际跳过历史状态时才投影可行动诊断。同一失败指纹在单个 kernel 内连续出现 3 次时，失败 cell 追加一次分类提示：可证明的 binding 错误使用 `PTC-W001` 并允许恢复 tip 建议 live capability 探查，其他错误使用 `PTC-W002` 且只要求重新检查其具体 cause。成功或不同失败会重置计数；提示不重写原始错误。
 
 当前公共扩展面没有跨 prompt assembly 与 runtime dispatch 的冻结 capability token。插件在两个阶段使用同一 agent scope，但以实际 request binding 为执行事实，不承诺不存在定义漂移。
 

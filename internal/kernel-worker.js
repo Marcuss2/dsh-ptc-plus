@@ -1,9 +1,17 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { registerHooks } from 'node:module'
+import { isAbsolute, parse, resolve, sep } from 'node:path'
 import repl from 'node:repl'
 import { PassThrough } from 'node:stream'
-import { formatWithOptions } from 'node:util'
+import { pathToFileURL } from 'node:url'
+import { formatWithOptions, promisify } from 'node:util'
 import { MessageChannel, parentPort, workerData } from 'node:worker_threads'
+import { synchronizeBuiltinEsmExports } from './builtin-esm-sync.js'
+import { errorDetails, messageOf } from './failure-reporting.js'
+import { AMBIENT_GLOBALS, DURABLE_IMPORTS, FORBIDDEN_IMPORTS } from './module-policy.js'
 import { decodeValue, encodeValue } from './value-wire.js'
+
+const nativeResolve = resolve
 
 if (parentPort === null) throw new Error('ptc-plus kernel worker started without a parent port')
 const { port1, port2: channel } = new MessageChannel()
@@ -11,6 +19,10 @@ const { port1, port2: channel } = new MessageChannel()
 const input = new PassThrough()
 const output = new PassThrough()
 output.resume()
+const sessionCwd = typeof workerData?.cwd === 'string' ? workerData.cwd : undefined
+if (sessionCwd !== undefined && !isAbsolute(sessionCwd)) {
+  throw new Error(`ptc-plus session cwd must be absolute, got ${JSON.stringify(sessionCwd)}`)
+}
 const server = repl.start({
   input,
   output,
@@ -20,20 +32,45 @@ const server = repl.start({
   ignoreUndefined: true,
 })
 const context = server.context
-const sessionCwd = typeof workerData?.cwd === 'string' ? workerData.cwd : undefined
+const REPL_IMPORT_CANARY = 'data:text/javascript,export default 1'
+let replParent
+const sessionReplParent = sessionCwd === undefined ? undefined : pathToFileURL(resolve(sessionCwd, 'repl')).href
+const staticAdapterParents = new Set()
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (specifier === REPL_IMPORT_CANARY && replParent === undefined) replParent = context.parentURL
+    return nextResolve(specifier, context.parentURL === replParent || staticAdapterParents.has(context.parentURL)
+      ? { ...context, parentURL: sessionReplParent ?? replParent }
+      : context)
+  },
+})
 const logScope = new AsyncLocalStorage()
 const pending = new Map()
 const installedGlobals = new Set()
-const RETURN_SIGNAL = '__dsh_ptc_return_signal_7f3a__'
+const PROCESS_CONTROLS = new Set(['exit', 'abort', 'kill', 'chdir'])
 const CELL_FRAME_SUFFIX = '\n;'
-const CONFORMANCE_CELL = `{
+let filenameSequence = 0
+let activeFilename = 'ptc-plus-repl'
+const CONFORMANCE_CELL = `"use strict";
+{
+  if (this !== globalThis) throw new Error('invalid REPL global receiver semantics')
   const __ptc_canary = await Promise.resolve(1)
   if (__ptc_canary !== 1) throw new Error('invalid REPL await semantics')
+  const __ptc_import_canary = await import(${JSON.stringify(REPL_IMPORT_CANARY)})
+  if (__ptc_import_canary.default !== 1) throw new Error('invalid REPL import semantics')
 }`
 let activeRun
 let activeExecution
 let pendingVolatileReason
 let nextCallId = 0
+let nextStaticAdapterId = 0
+
+class StaticImportFailure {
+  constructor(error, position) {
+    this.error = error
+    this.position = position
+  }
+}
 
 class CellReturn extends Error {
   constructor(value) {
@@ -41,56 +78,6 @@ class CellReturn extends Error {
     this.value = value
   }
 }
-Object.defineProperty(context, RETURN_SIGNAL, { value: CellReturn })
-
-function messageOf(error) {
-  try {
-    if (error !== null && typeof error === 'object' && typeof error.message === 'string') {
-      return error.message
-    }
-    return String(error)
-  } catch {
-    return 'Unprintable thrown value'
-  }
-}
-
-function safeProperty(value, key) {
-  if ((typeof value !== 'object' || value === null) && typeof value !== 'function') return undefined
-  try {
-    return value[key]
-  } catch {
-    return undefined
-  }
-}
-
-function firstLine(value) {
-  if (typeof value !== 'string') return undefined
-  const line = value.split(/[\r\n]/, 1)[0]
-  return line.length > 0 ? line : undefined
-}
-
-function errorDetails(error) {
-  const message = messageOf(error)
-  let name = 'Error'
-  try {
-    if (error !== null && typeof error === 'object' && typeof error.name === 'string' && error.name.length > 0) {
-      name = error.name
-    }
-  } catch {}
-  const candidate = safeProperty(error, 'ptcCause')
-  const candidateMessage = safeProperty(candidate, 'message')
-  const candidateCode = safeProperty(candidate, 'code')
-  const causeMessage = firstLine(candidateMessage)
-  const causeCode = firstLine(candidateCode)
-  const cause = causeMessage !== undefined
-    ? {
-        ...(causeCode === undefined ? {} : { code: causeCode }),
-        message: causeMessage,
-      }
-    : undefined
-  return { name, message, ...(cause === undefined ? {} : { cause }) }
-}
-
 function appendLog(...values) {
   const current = logScope.getStore()
   if (current?.open !== true) return
@@ -149,16 +136,226 @@ function completionDurability(execution) {
 }
 
 const originalRequire = context.require
+const sessionCwdBufferPrefix = sessionCwd === undefined
+  ? undefined
+  : Buffer.from(sessionCwd + (/[\\/]$/.test(sessionCwd) ? '' : sep))
+
+function virtualizeProcessCwd() {
+  if (sessionCwd === undefined) return
+  process.cwd = () => sessionCwd
+}
+
+function guardProcessControls() {
+  for (const property of PROCESS_CONTROLS) {
+    const descriptor = Object.getOwnPropertyDescriptor(process, property)
+    Object.defineProperty(process, property, {
+      configurable: false,
+      enumerable: descriptor?.enumerable ?? true,
+      writable: false,
+      value: () => {
+        throw new Error(`process.${property} is forbidden inside the REPL kernel`)
+      },
+    })
+  }
+}
+
+function isAbsoluteBufferPath(value) {
+  return isAbsolute(String.fromCharCode(...value.subarray(0, 3)))
+}
+
+function sessionPath(value) {
+  if (sessionCwd === undefined) return value
+  if (typeof value === 'string') return isAbsolute(value) ? value : nativeResolve(sessionCwd, value)
+  if (Buffer.isBuffer(value)) return isAbsoluteBufferPath(value)
+    ? value
+    : Buffer.concat([sessionCwdBufferPrefix, value])
+  return value
+}
+
+function sessionPathPrefix(value) {
+  // Node appends the random suffix directly, so terminal prefix text must survive anchoring.
+  if (sessionCwd === undefined || typeof value !== 'string' || isAbsolute(value)) {
+    return sessionPath(value)
+  }
+  if (parse(value).root !== '') return sessionPath(value)
+  return sessionCwd + (/[\\/]$/.test(sessionCwd) ? '' : sep) + value
+}
+
+function wrapBuiltinCallable(original, projectArguments, projectedProperties = []) {
+  const wrapped = {
+    invoke(...args) {
+      return Reflect.apply(original, this, projectArguments(args))
+    },
+  }.invoke
+  const descriptors = Object.getOwnPropertyDescriptors(original)
+  const projected = new Set(projectedProperties)
+  for (const property of Reflect.ownKeys(descriptors)) {
+    const descriptor = descriptors[property]
+    if (descriptor.value === original) {
+      descriptors[property] = { ...descriptor, value: wrapped }
+    } else if (projected.has(property)) {
+      descriptors[property] = {
+        ...descriptor,
+        value: wrapBuiltinCallable(descriptor.value, projectArguments),
+      }
+    }
+  }
+  return Object.defineProperties(wrapped, descriptors)
+}
+
+function wrapBuiltin(owner, name, projectArguments, projectedProperties) {
+  const original = owner?.[name]
+  if (typeof original !== 'function') return
+  owner[name] = wrapBuiltinCallable(original, projectArguments, projectedProperties)
+}
+
+function fileSystemArguments(args, pathArguments) {
+  const next = [...args]
+  for (const index of pathArguments) next[index] = sessionPath(next[index])
+  return next
+}
+
+function fileSystemPrefixArguments(args) {
+  const next = [...args]
+  next[0] = sessionPathPrefix(next[0])
+  return next
+}
+
+const FILE_SYSTEM_PATH_ARGUMENTS = Object.freeze({
+  access: [0], accessSync: [0], appendFile: [0], appendFileSync: [0],
+  chmod: [0], chmodSync: [0], chown: [0], chownSync: [0],
+  copyFile: [0, 1], copyFileSync: [0, 1], cp: [0, 1], cpSync: [0, 1],
+  createReadStream: [0], createWriteStream: [0], exists: [0], existsSync: [0],
+  lchmod: [0], lchmodSync: [0], lchown: [0], lchownSync: [0],
+  link: [0, 1], linkSync: [0, 1], lstat: [0], lstatSync: [0],
+  lutimes: [0], lutimesSync: [0], mkdir: [0], mkdirSync: [0],
+  open: [0], openAsBlob: [0], openSync: [0], opendir: [0], opendirSync: [0],
+  readFile: [0], readFileSync: [0], readdir: [0], readdirSync: [0],
+  readlink: [0], readlinkSync: [0], realpath: [0], realpathSync: [0],
+  rename: [0, 1], renameSync: [0, 1], rm: [0], rmSync: [0],
+  rmdir: [0], rmdirSync: [0], stat: [0], statSync: [0], statfs: [0], statfsSync: [0],
+  symlink: [1], symlinkSync: [1], truncate: [0], truncateSync: [0],
+  unlink: [0], unlinkSync: [0], utimes: [0], utimesSync: [0],
+  watch: [0], watchFile: [0], writeFile: [0], writeFileSync: [0],
+})
+const FILE_SYSTEM_PREFIX_ARGUMENTS = Object.freeze([
+  'mkdtemp', 'mkdtempSync', 'mkdtempDisposable', 'mkdtempDisposableSync',
+])
+const FILE_SYSTEM_PROJECTED_PROPERTIES = Object.freeze({
+  exists: [promisify.custom],
+  realpath: ['native'],
+  realpathSync: ['native'],
+})
+const CHILD_PROCESS_PROJECTED_PROPERTIES = Object.freeze({
+  exec: [promisify.custom],
+  execFile: [promisify.custom],
+})
+
+function sessionChildOptions(options) {
+  if (sessionCwd === undefined || options === null || typeof options !== 'object') return options
+  return options.cwd === undefined ? { ...options, cwd: sessionCwd } : options
+}
+
+function withDefaultOptions(args, index) {
+  const next = [...args]
+  next[index] = sessionChildOptions(next[index]) ?? { cwd: sessionCwd }
+  return next
+}
+
+function childProcessOptions(name, args) {
+  if (sessionCwd === undefined) return args
+  if (name === 'exec' || name === 'execSync') {
+    const next = [...args]
+    if (typeof next[1] === 'function') next.splice(1, 0, { cwd: sessionCwd })
+    else next[1] = sessionChildOptions(next[1]) ?? { cwd: sessionCwd }
+    return next
+  }
+  if (name === 'execFile' || name === 'execFileSync') {
+    if (args.length === 1 || typeof args[1] === 'function') {
+      const next = [...args]
+      next.splice(1, 0, { cwd: sessionCwd })
+      return next
+    }
+    if (typeof args[2] === 'function') {
+      if (args[1] !== undefined && !Array.isArray(args[1])) return withDefaultOptions(args, 1)
+      const next = [...args]
+      next.splice(2, 0, { cwd: sessionCwd })
+      return next
+    }
+    if (args[1] !== undefined && !Array.isArray(args[1])) return withDefaultOptions(args, 1)
+    return withDefaultOptions(args, 2)
+  }
+  if (args.length === 1 || (args[1] !== undefined && !Array.isArray(args[1]))) {
+    return withDefaultOptions(args, 1)
+  }
+  return withDefaultOptions(args, 2)
+}
+
+function virtualizeChildProcessCwd(childProcess) {
+  if (sessionCwd === undefined) return
+  for (const name of ['exec', 'execFile', 'execFileSync', 'execSync', 'fork', 'spawn', 'spawnSync']) {
+    wrapBuiltin(
+      childProcess,
+      name,
+      args => childProcessOptions(name, args),
+      CHILD_PROCESS_PROJECTED_PROPERTIES[name],
+    )
+  }
+}
+
+function sessionGlobOptions(args) {
+  const next = [...args]
+  if (typeof next[1] === 'function') {
+    next.splice(1, 0, { cwd: sessionCwd })
+  } else if (next[1] === undefined) {
+    next[1] = { cwd: sessionCwd }
+  } else if (next[1] !== null && typeof next[1] === 'object' && next[1].cwd === undefined) {
+    next[1] = { ...next[1], cwd: sessionCwd }
+  }
+  return next
+}
+
+function virtualizeGlobCwd(owner, name) {
+  wrapBuiltin(owner, name, sessionGlobOptions)
+}
+
+function virtualizeFileSystemPaths() {
+  if (sessionCwd === undefined) return
+  virtualizeProcessCwd()
+  const fs = originalRequire('node:fs')
+  const path = originalRequire('node:path')
+  for (const [name, pathArguments] of Object.entries(FILE_SYSTEM_PATH_ARGUMENTS)) {
+    wrapBuiltin(
+      fs,
+      name,
+      args => fileSystemArguments(args, pathArguments),
+      FILE_SYSTEM_PROJECTED_PROPERTIES[name],
+    )
+    wrapBuiltin(fs.promises, name, args => fileSystemArguments(args, pathArguments))
+  }
+  for (const name of FILE_SYSTEM_PREFIX_ARGUMENTS) {
+    wrapBuiltin(fs, name, fileSystemPrefixArguments)
+    wrapBuiltin(fs.promises, name, fileSystemPrefixArguments)
+  }
+  for (const name of ['glob', 'globSync']) {
+    virtualizeGlobCwd(fs, name)
+    virtualizeGlobCwd(fs.promises, name)
+  }
+  wrapBuiltin(path, 'resolve', args => [sessionCwd, ...args])
+  virtualizeChildProcessCwd(originalRequire('node:child_process'))
+}
+guardProcessControls()
+virtualizeFileSystemPaths()
+synchronizeBuiltinEsmExports()
 const originalGlobals = Object.fromEntries(
-  ['Date', 'performance', 'fetch', 'WebSocket', 'crypto', 'Intl', 'setTimeout', 'setInterval', 'setImmediate', 'eval', 'Function']
+  [...AMBIENT_GLOBALS].filter(name => name !== 'require')
     .map(name => [name, globalThis[name]]),
 )
-const forbiddenModules = new Set(['node:worker_threads', 'worker_threads', 'node:cluster', 'cluster'])
 Object.defineProperty(context, 'require', {
   configurable: true,
   value(specifier) {
-    if (forbiddenModules.has(specifier)) throw new Error(`module ${specifier} is forbidden because it exposes kernel control`)
-    markVolatile(`require(${JSON.stringify(specifier)})`)
+    if (FORBIDDEN_IMPORTS.has(specifier)) throw new Error(`module ${specifier} is forbidden because it exposes kernel control`)
+    if (!DURABLE_IMPORTS.has(specifier)) markVolatile(`require(${JSON.stringify(specifier)})`)
     return originalRequire(specifier)
   },
 })
@@ -186,9 +383,7 @@ const processView = new Proxy(process, {
       markVolatile('process.cwd')
       return target.cwd.bind(target)
     }
-    if (['exit', 'abort', 'kill'].includes(property)) {
-      return () => { throw new Error(`process.${String(property)} is forbidden inside the REPL kernel`) }
-    }
+    if (PROCESS_CONTROLS.has(property)) return Reflect.get(target, property, target)
     markVolatile(`process.${String(property)}`)
     const value = Reflect.get(target, property, target)
     return typeof value === 'function' ? value.bind(target) : value
@@ -248,8 +443,45 @@ function evaluate(program) {
     }
     const onError = error => finish(error)
     domain.on('error', onError)
-    server.eval(program + CELL_FRAME_SUFFIX, context, 'ptc-plus-repl', finish)
+    activeFilename = `ptc-plus-repl-${++filenameSequence}`
+    server.eval(program + CELL_FRAME_SUFFIX, context, activeFilename, finish)
   })
+}
+
+function staticImportAttributes(options) {
+  if (options === undefined) return ''
+  const [keyword, attributes] = Object.entries(options)[0]
+  const entries = Object.entries(attributes)
+    .map(([key, value]) => `${JSON.stringify(key)}: ${JSON.stringify(value)}`)
+  return ` ${keyword} { ${entries.join(', ')} }`
+}
+
+function staticAdapterSource(load) {
+  const source = JSON.stringify(load.source)
+  const attributes = staticImportAttributes(load.options)
+  if (load.global === undefined) return `import ${source}${attributes};`
+  const requirements = load.requiredExports?.map((name, index) => {
+    const imported = name === 'default' ? 'default' : JSON.stringify(name)
+    return `${imported} as __required_${index}__`
+  }) ?? []
+  return [
+    `import * as namespace from ${source}${attributes};`,
+    ...(requirements.length === 0 ? [] : [
+      `export { ${requirements.join(', ')} } from ${source}${attributes};`,
+    ]),
+    'export { namespace };',
+  ].join('\n')
+}
+
+async function loadStaticModule(load) {
+  const adapter = `data:text/javascript,${encodeURIComponent(staticAdapterSource(load))}#${++nextStaticAdapterId}`
+  staticAdapterParents.add(adapter)
+  try {
+    const completion = await evaluate(`import(${JSON.stringify(adapter)})`)
+    return completion.value.namespace
+  } finally {
+    staticAdapterParents.delete(adapter)
+  }
 }
 
 function callHost(runId, global, member, args, errorClass) {
@@ -320,11 +552,34 @@ async function runCell(message) {
   }
   pendingVolatileReason = undefined
   activeExecution = execution
+  const cellGlobals = []
 
   try {
     let completion
     try {
-      completion = await logScope.run(execution, () => evaluate(message.program))
+      completion = await logScope.run(execution, async () => {
+        Object.defineProperty(context, message.returnSignal, {
+          configurable: true,
+          value: CellReturn,
+        })
+        cellGlobals.push(message.returnSignal)
+        for (const load of message.moduleLoads ?? []) {
+          let namespace
+          try {
+            namespace = await loadStaticModule(load)
+          } catch (error) {
+            throw new StaticImportFailure(error, load.position)
+          }
+          if (load.global !== undefined) {
+            Object.defineProperty(context, load.global, {
+              configurable: true,
+              value: namespace,
+            })
+            cellGlobals.push(load.global)
+          }
+        }
+        return evaluate(message.program)
+      })
       activeRun = undefined
       execution.open = false
       const calls = [...pending.values()]
@@ -339,13 +594,17 @@ async function runCell(message) {
     } catch (error) {
       activeRun = undefined
       execution.open = false
-      const detail = errorDetails(error)
+      const failure = error instanceof StaticImportFailure ? error.error : error
+      const detail = errorDetails(failure, activeFilename)
+      const position = error instanceof StaticImportFailure ? error.position : detail.position
       channel.postMessage({
         type: 'done',
         id: message.id,
         logs: execution.logs,
         error: detail.message,
         errorName: detail.name,
+        ...(error instanceof StaticImportFailure ? { moduleLoadFailed: true } : {}),
+        ...(position === undefined ? {} : { position }),
         ...(detail.cause === undefined ? {} : { cause: detail.cause }),
         ...completionDurability(execution),
       })
@@ -377,6 +636,7 @@ async function runCell(message) {
     }
     channel.postMessage(response)
   } finally {
+    for (const name of cellGlobals) delete context[name]
     activeRun = undefined
     activeExecution = undefined
     execution.open = false
