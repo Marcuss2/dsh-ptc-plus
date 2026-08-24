@@ -124,7 +124,7 @@ window.__ModuleLoader__.load({
                     ...CONFIG_FIELDS.map(field => h('div', { key: field.key, className: 'ptcPlusRow' },
                       h('div', { className: 'ptcPlusMain' },
                         h('div', { className: 'ptcPlusLabel' }, field.label),
-                        h('div', { className: 'ptcPlusDetail' }, field.description)),
+                        field.description === '' ? null : h('div', { className: 'ptcPlusDetail' }, field.description)),
                       fieldInput(field, value[field.key], fieldDisabled(field), persist))),
                     h('div', { key: 'footer', className: 'ptcPlusFooter' },
                       h('span', { className: 'ptcPlusMessage', role: 'status' }, status || (snapshot.writable ? '设置会在修改后立即生效' : '当前设置为只读'))),

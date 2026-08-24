@@ -41,6 +41,8 @@ For commands, prefer project-declared scripts and use an available typed tool. W
 
 ## Configuration
 
+The configuration uses `ptc-plus` as the DSH plugin ID and `dsh-ptc-plus` as the package name. The distinction is intentional: the former is the runtime/settings identity, while the latter is the repository and npm package identity.
+
 ```yaml
 - id: ptc-plus
   name: dsh-ptc-plus

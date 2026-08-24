@@ -103,7 +103,7 @@ This is one stochastic paired observation, not a performance guarantee. Machine 
 
 ## Settings
 
-Open **Settings → Plugin configuration** to use the card shown above. The `enabled` switch is live: turning it off leaves only the card and that switch, while turning it on restores the session runtime and `run_code`/`edit_run_code`. Other controls are disabled while the plugin is off.
+Open **Settings → Plugin configuration** to use the card shown above. The `enabled` switch is live: turning it off leaves only the card and that switch, while turning it on restores the session runtime and `run_code`/`edit_run_code`.
 
 Every setting applies immediately and keeps existing bindings. A failed change rolls back. Node fixes a worker's V8 old-generation limit when the worker starts, so that one setting is rejected while a session worker is active and can be changed after the session is disposed. A failed enable is rolled back and persisted as disabled.
 

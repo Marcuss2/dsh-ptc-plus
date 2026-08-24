@@ -131,3 +131,4 @@ durable replay 无法验证某个 node 时，当前已结算 `tool/result` 的�
 - [Track The Latest DSH Public Surface](adr/0017-track-the-latest-dsh-public-surface.md)
 - [Plugin Settings UI and Enabled Kill Switch](adr/0019-plugin-settings-and-kill-switch.md)
 - [Optional Cordis Tools in PTC Mode](adr/0020-optional-cordis-tools-in-ptc-mode.md)
+- [Separate Host Bootstrap From Session Runtime](adr/0021-separate-host-bootstrap-from-session-runtime.md)

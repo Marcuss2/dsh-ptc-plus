@@ -8,7 +8,7 @@
       type: "boolean",
       default: true,
       label: "\u542F\u7528 PTC Plus",
-      description: "\u5173\u95ED\u540E\u53EA\u4FDD\u7559\u8BBE\u7F6E\u5361\u7247\u548C\u6B64\u5F00\u5173\uFF1B\u5176\u4ED6\u8BBE\u7F6E\u4E0D\u53EF\u4FEE\u6539\u3002"
+      description: ""
     },
     {
       key: "cordisToolsEnabled",
@@ -314,7 +314,7 @@
                       "div",
                       { className: "ptcPlusMain" },
                       h("div", { className: "ptcPlusLabel" }, field.label),
-                      h("div", { className: "ptcPlusDetail" }, field.description)
+                      field.description === "" ? null : h("div", { className: "ptcPlusDetail" }, field.description)
                     ),
                     fieldInput(field, value[field.key], fieldDisabled(field), persist)
                   )),

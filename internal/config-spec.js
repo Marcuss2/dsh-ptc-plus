@@ -11,7 +11,7 @@ export const CONFIG_FIELDS = Object.freeze([
     type: 'boolean',
     default: true,
     label: '启用 PTC Plus',
-    description: '关闭后只保留设置卡片和此开关；其他设置不可修改。',
+    description: '',
   },
   {
     key: 'cordisToolsEnabled',

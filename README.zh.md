@@ -103,7 +103,7 @@ import { readFile } from 'node:fs/promises'
 
 ## 设置
 
-打开 **设置 → 插件配置** 使用上面的设置卡片。`enabled` 是即时生效的总开关：关闭后只保留卡片和这个开关，开启后恢复 session runtime 以及 `run_code`/`edit_run_code`。关闭时其他控件不可编辑。
+打开 **设置 → 插件配置** 使用上面的设置卡片。`enabled` 是即时生效的总开关：关闭后只保留卡片和这个开关，开启后恢复 session runtime 以及 `run_code`/`edit_run_code`。
 
 所有设置都会立即生效，并保留已有 binding；更新失败会回滚。Node 在 worker 创建时固定 V8 old-generation 上限，因此活动 session worker 存在时修改这一项会被拒绝，释放 session 后才能修改。启用失败时，运行时会回滚并把设置保持为停用。
 

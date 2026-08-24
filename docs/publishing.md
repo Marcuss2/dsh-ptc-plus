@@ -2,6 +2,18 @@
 
 本仓库是普通 DSH bundle：`package.json` 声明 `dsh.bundle.patch`、入口、依赖、Node 范围和发布白名单，`cordis.patch.yml` 只插入 `dsh-ptc-plus`。运行时依赖由 npm 包声明，DSH/Cordis service 则由宿主按 `inject` 装配，不声明虚假的 peer dependency。
 
+## 命名约定
+
+项目在不同集成层使用不同名称：
+
+| 名称 | 用途 |
+| --- | --- |
+| `dsh-ptc-plus` | 仓库和 npm 包名；浏览器 bundle 的 module name 也从 `package.json` 取得它。 |
+| `ptc-plus` | DSH 插件 ID、运行时 loader name 和 settings namespace。 |
+| `PTC Plus` | 面向用户的产品名。 |
+
+在 `cordis.patch.yml` 和解析后的 DSH 配置中，`id: ptc-plus` 标识插件配置项，`name: dsh-ptc-plus` 标识待加载的包。内部错误前缀、runtime context 名称和 worker 临时路径会按所属子系统使用 `ptc-plus` 或 `dsh-ptc-plus`；它们不是另外的公开产品名。
+
 ## Release checklist
 
 1. 在 Node `22.19.0` 与 Node 24.x 上运行 `npm ci`、`npm run build:check` 和 `npm run check`；Node 24.x 还应覆盖 Windows、Linux 与 macOS。仓库 CI 定义同一矩阵。
