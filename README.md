@@ -17,6 +17,10 @@
 > [!IMPORTANT]
 > Built for `danger-full-access`: direct Node.js and OS access with no extra sandbox. Use it only where that permission scope is acceptable.
 
+![PTC Plus settings card](assets/ptc-plus-settings.png)
+
+*The settings card exposes live configuration and the `enabled` kill switch.*
+
 ## What default PTC mode gets wrong
 
 DSH PTC mode starts every `run_code` in a fresh environment. The model computes something, then has to send the same setup code again. One bad line means the whole thing is resent. This plugin attaches `run_code` to a session-backed environment, so later calls reuse what was already there.
@@ -68,9 +72,9 @@ Only the diff goes in. The full source stays out of the conversation. Exact repl
 
 ### Module syntax
 
-DSH PTC mode runs each `run_code` as an async function body, so `import` and `export` were never valid there. That is a limitation of PTC mode, not something this REPL introduced.
+DSH PTC mode executes each `run_code` as an async function body, where static `import` and `export` declarations are invalid. PTC Plus adapts those forms before execution with AST analysis.
 
-PTC Plus rewrites those forms behind the scenes with AST analysis. The model writes normally:
+The model writes normally:
 
 ```ts
 import { readFile } from 'node:fs/promises'
@@ -97,17 +101,19 @@ This is one stochastic paired observation, not a performance guarantee. Machine 
 
 *A real session: the long code and the truthful `edit_run_code` repair call. The repair never resends the source.*
 
-## Settings and the kill switch
+## Settings
 
-Open **Settings → Plugin configuration** to see a PTC Plus card. It exposes every plugin configuration field plus an `enabled` switch. Turning it off removes all runtime behavior, tool surfaces, prompt sections and session state while keeping the settings card available. The collapsed card header identifies it as a session-level TypeScript REPL and names its expand/collapse action. The card shows **已启用** or **已停用**; stable REPL guidance remains protocol text without UI branding. In an enabled session using the `code` preset, the Client header separately shows **PTC Plus**. All settings apply immediately while preserving existing session-bound bindings; a failed update rolls back to the last applied configuration. An active session worker cannot change its V8 old-generation limit because Node fixes that limit at worker creation; that update is rejected and rolled back until the session is disposed. When disabled, only the `enabled` control remains editable. If a live enable fails, the runtime is rolled back and `enabled` is persisted as disabled. A host without a TypeScript code runtime can still load PTC Plus while it is disabled; enabling it is rejected and persisted as disabled.
+Open **Settings → Plugin configuration** to use the card shown above. The `enabled` switch is live: turning it off leaves only the card and that switch, while turning it on restores the session runtime and `run_code`/`edit_run_code`. Other controls are disabled while the plugin is off.
 
-`cordisToolsEnabled` is off by default and applies immediately. It adds or removes DSH's official Cordis tools from PTC agents under `tools.*`; the direct surface remains `run_code` and `edit_run_code`. Because Cordis can run model-written plugins against the live DSH runtime, enabling it grants shell-equivalent trust.
+Every setting applies immediately and keeps existing bindings. A failed change rolls back. Node fixes a worker's V8 old-generation limit when the worker starts, so that one setting is rejected while a session worker is active and can be changed after the session is disposed. A failed enable is rolled back and persisted as disabled.
+
+`cordisToolsEnabled` is off by default. Turning it on immediately adds DSH's official Cordis tools to PTC agents under `tools.*`; it does not change the direct `run_code`/`edit_run_code` surface. Cordis runs model-written plugins against the live DSH runtime, so enabling it requires shell-level trust.
 
 See [Client UI](docs/client-ui.md), [ADR 0019](docs/adr/0019-plugin-settings-and-kill-switch.md), and [ADR 0020](docs/adr/0020-optional-cordis-tools-in-ptc-mode.md).
 
-## Where this fits
+## Scope
 
-PTC Plus is a step toward a run-first environment, not the end point. In that direction, the model works inside a stateful computable environment, reaches files, tools, commands and context programmatically, and the user sees the result of the run. That full shape still needs the model, inference engine and transport layer to evolve together. This plugin handles the part that is practical today: a session-bound, persistent `run_code`.
+PTC Plus provides the session-bound persistent `run_code` layer. DSH and the operating system continue to own native-tool authority, policy, approval, cancellation, sandboxing and process governance.
 
 ## Install
 

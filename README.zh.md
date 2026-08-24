@@ -17,6 +17,10 @@
 > [!IMPORTANT]
 > 面向 `danger-full-access` 设计：可直接访问 Node.js 与操作系统，不另加沙箱。仅在可接受此权限的环境使用。
 
+![PTC Plus 设置卡片](assets/ptc-plus-settings.png)
+
+*设置卡片展示即时配置和 `enabled` 开关。*
+
 ## 默认 PTC 模式的问题
 
 DSH 的 PTC 模式让每次 `run_code` 都从新环境开始。模型算过的东西，下一次还要重发。写错一行，整段代码重发。这个插件把 `run_code` 接到一个会话级环境里，后面的调用直接复用之前的东西。
@@ -68,9 +72,9 @@ edit_run_code({ edits: [{ old_string: 'deps.length', new_string: 'deps' }] })
 
 ### 模块语法
 
-DSH 的 PTC 模式把每个 `run_code` 当作 async function body 执行，所以 `import` 和 `export` 本来就不能写。这是 PTC 模式自身的限制，不是这个 REPL 带来的。
+DSH 的 PTC 模式把每个 `run_code` 当作 async function body 执行，静态 `import` 和 `export` 声明在这个函数体里无效。PTC Plus 会在执行前用 AST 分析适配这些形式。
 
-PTC Plus 在后台用 AST 重写。模型照常写：
+模型照常写：
 
 ```ts
 import { readFile } from 'node:fs/promises'
@@ -97,17 +101,19 @@ import { readFile } from 'node:fs/promises'
 
 *真实会话：长代码与真实的 `edit_run_code` 修复调用；修复从未重发源码。*
 
-## 设置与开关
+## 设置
 
-打开 **设置 → 插件配置** 就能看到 PTC Plus 卡片。它包含所有插件配置项，以及一个 `enabled` 开关。关闭后插件不再注册任何运行时、工具 surface、prompt section 或 session 状态，只保留设置卡片本身。折叠状态的卡片头部会说明它是会话级 TypeScript REPL，并明确展开/收起操作。卡片显示 **已启用** 或 **已停用**，稳定 REPL 指引保持协议文本而不携带 UI 品牌名。启用且会话选择 `code` preset 时，Client 会在会话头部单独显示 **PTC Plus**。所有配置项都会立即生效；运行时会在保留已有 session-bound binding 的前提下更新 owner，更新失败会回滚到上一次已应用配置。由于 Node 在 worker 创建时固定 V8 old-generation 上限，活动 session worker 存在时不能修改该上限；这类更新会被拒绝并回滚，待 session 释放后再修改。关闭后只有 `enabled` 勾选框可操作。实时启用失败时，运行时会回滚并把 `enabled` 持久化为停用。没有 TypeScript code runtime 的宿主也可以在停用状态加载 PTC Plus；尝试启用时会被拒绝，并持久化为停用。
+打开 **设置 → 插件配置** 使用上面的设置卡片。`enabled` 是即时生效的总开关：关闭后只保留卡片和这个开关，开启后恢复 session runtime 以及 `run_code`/`edit_run_code`。关闭时其他控件不可编辑。
 
-`cordisToolsEnabled` 默认关闭，修改后立即生效。开启后，DSH 官方 Cordis 工具会进入 PTC agent 的 `tools.*`；顶层直接调用面仍是 `run_code` 与 `edit_run_code`。Cordis 可以在实时 DSH runtime 中运行模型编写的插件，因此开启它等同于授予 shell 级信任。
+所有设置都会立即生效，并保留已有 binding；更新失败会回滚。Node 在 worker 创建时固定 V8 old-generation 上限，因此活动 session worker 存在时修改这一项会被拒绝，释放 session 后才能修改。启用失败时，运行时会回滚并把设置保持为停用。
+
+`cordisToolsEnabled` 默认关闭，打开后立即把 DSH 官方 Cordis 工具加入 PTC agent 的 `tools.*`，不改变 `run_code`/`edit_run_code` 的直接调用面。Cordis 能在实时 DSH runtime 中运行模型编写的插件，开启它需要接受 shell 级信任。
 
 详见 [客户端 UI](docs/client-ui.md)、[ADR 0019](docs/adr/0019-plugin-settings-and-kill-switch.md) 与 [ADR 0020](docs/adr/0020-optional-cordis-tools-in-ptc-mode.md)。
 
-## 这只是方向中的一步
+## 范围
 
-PTC Plus 是走向 run-first 环境的一步，不是终点。在这个方向里，模型在一个会话绑定的状态化可计算环境里工作，文件、工具、命令、上下文都可以编程访问，用户看到的是运行后的结果。这个完整形态还需要模型、推理引擎和传输层一起演进。这个插件先做当前能落地的一部分：一个会话绑定、持久的 `run_code`。
+PTC Plus 提供会话绑定的持久 `run_code` 层。原生工具的权限、策略、审批、取消、sandbox 和进程治理仍由 DSH 与操作系统负责。
 
 ## 安装
 
