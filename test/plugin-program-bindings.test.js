@@ -9,15 +9,19 @@ import { SessionRuntime } from '../internal/session-runtime.js'
 import { decodeValue, encodeValue, renderValueWire } from '../internal/value-wire.js'
 import { JOURNAL_POLICY, appendRunCodeEvents, fixture, ptcAgent } from './plugin-fixture.js'
 
-test('keeps the serialized prompt prefix stable across rewrite feedback transitions', async (t) => {
+test('keeps successful rewrites out of the prompt projection', async (t) => {
   const state = fixture()
   t.after(() => state.dispose())
+  const stableContexts = [
+    { name: 'sandbox:policy', text: 'stable sandbox policy' },
+    { name: 'approval:policy', text: 'stable approval policy' },
+  ]
   const codeOnlyAssembly = {
     sections: [
       { name: 'tools:code-only', text: '`run_code` is the only tool you can call directly.' },
       { name: 'tools:sdk', text: 'declare const tools: unknown' },
     ],
-    contexts: [], variables: {}, tools: [state.runCodeDefinition],
+    contexts: stableContexts, variables: {}, tools: [state.runCodeDefinition],
   }
   const session = { id: 'rewrite-feedback-session', events: [{ type: 'turn/start' }] }
   const agent = ptcAgent(`${session.id}-agent`, session)
@@ -38,38 +42,32 @@ test('keeps the serialized prompt prefix stable across rewrite feedback transiti
   }
   const headerOf = (assembly = codeOnlyAssembly, contextOverride = {}) =>
     renderHeader(state, assembly, { ...requestContext, ...contextOverride })
-  const rewriteContext = async () => {
+  const runtimeContexts = async () => {
     const assembly = await state.assemble(codeOnlyAssembly, { ...requestContext, signal: new AbortController().signal })
-    const entries = assembly.contexts.filter(item => item?.name === 'tools:ptc-plus-rewrite-info')
-    return { count: entries.length, text: entries.at(-1)?.text, tail: assembly.contexts.at(-1) }
+    return assembly.contexts
   }
 
   const baseline = await headerOf()
   const firstCode = "import { basename } from 'node:path'\nreturn basename('/a/b')"
   const first = await state.runDurable(session.id, firstCode, {}, { session })
+  assert.match(first.meta.dshPtcPlusRewrites[0].description, /adapted the static import of "node:path"/)
   appendRunCodeEvents(session.events, 'rewrite-first', firstCode, first)
-  const appended = await rewriteContext()
-  assert.equal(appended.count, 1)
-  assert.equal(appended.tail.name, 'tools:ptc-plus-rewrite-info')
-  assert.match(appended.text, /adapted the static import of "node:path"/)
-  assert.match(appended.text, /reusing its ordinary top-level bindings/)
+  assert.equal(await runtimeContexts(), stableContexts)
   assert.equal(await headerOf(), baseline)
 
   const secondCode = "import { fileURLToPath } from 'node:url'\nreturn typeof fileURLToPath"
   const second = await state.runDurable(session.id, secondCode, {}, { session })
+  assert.match(second.meta.dshPtcPlusRewrites[0].description, /adapted the static import of "node:url"/)
   appendRunCodeEvents(session.events, 'rewrite-second', secondCode, second)
-  const updated = await rewriteContext()
-  assert.equal(updated.count, 1)
-  assert.match(updated.text, /adapted the static import of "node:url"/)
-  assert.notEqual(updated.text, appended.text)
+  assert.equal(await runtimeContexts(), stableContexts)
   assert.equal(await headerOf(), baseline)
 
   const later = await state.runDurable(session.id, 'return 1', {}, { session })
   appendRunCodeEvents(session.events, 'rewrite-later', 'return 1', later)
-  assert.deepEqual(await rewriteContext(), { count: 0, text: undefined, tail: undefined })
+  assert.equal(await runtimeContexts(), stableContexts)
   assert.equal(await headerOf(), baseline)
   session.events.push({ type: 'turn/end' })
-  assert.deepEqual(await rewriteContext(), { count: 0, text: undefined, tail: undefined })
+  assert.equal(await runtimeContexts(), stableContexts)
   assert.equal(await headerOf(), baseline)
 })
 

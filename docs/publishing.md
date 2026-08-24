@@ -4,7 +4,7 @@
 
 ## Release checklist
 
-1. 在 Node `22.19.0` 与 Node 24.x 上运行 `npm ci` 和 `npm run check`；Node 24.x 还应覆盖 Windows、Linux 与 macOS。仓库 CI 定义同一矩阵。
+1. 在 Node `22.19.0` 与 Node 24.x 上运行 `npm ci`、`npm run build:check` 和 `npm run check`；Node 24.x 还应覆盖 Windows、Linux 与 macOS。仓库 CI 定义同一矩阵。
 2. 运行 `npm audit`、`npx publint`、`git diff --check`、Markdown local-link check 和 `npm pack --dry-run --json`。确认 tarball 只包含发布白名单内的运行时代码、文档和展示资产，不含凭据、本地路径、开发脚本或测试夹具，并从 tarball 安装到空目录执行 ESM import smoke。
 3. 更新到最新可用 DSH release 并记录 `dsh --version`。分别从 npm 包、固定 Git commit、源码 checkout 和 tarball 安装到临时 profile，再执行 `dsh --profile <profile> --dump-config`，确认只新增 `ptc-plus` row。每个上游 release 都重新验证公共扩展面、CLI/Web 集成和 profile 装配，不设置版本白名单。
 4. 在 Windows 与 Linux CLI/Web 实机启动临时 profile。macOS 由原生 runner 验证 CLI/Web；Windows 与 macOS Desktop 从托盘打开当前 profile 的 DSH Terminal 安装，重启 Desktop 后做一次 PTC 模式 smoke。Desktop 当前发布平台不包括 Linux。

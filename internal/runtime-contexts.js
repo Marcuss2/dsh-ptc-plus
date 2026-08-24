@@ -14,7 +14,7 @@ function continuationFeedback(view) {
   if (run.journal.completion?.kind !== 'return') {
     return `The preceding run_code cell failed after a source adjustment: ${details}. Treat it as failed; inspect its tool result and live bindings before continuing, and do not replay it automatically.`
   }
-  return `The preceding run_code cell completed after these source adjustments: ${details}. Continue by reusing its ordinary top-level bindings; do not resend its source.`
+  return undefined
 }
 
 /** Build all dynamic PTC contexts from one session-log projection. */

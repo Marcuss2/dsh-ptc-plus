@@ -4,6 +4,48 @@ import { isAbsolute, join } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import { messageOf } from './failure-reporting.js'
 
+const WINDOWS_ENVIRONMENT_NAMES = new Map([
+  ['appdata', 'APPDATA'],
+  ['comspec', 'ComSpec'],
+  ['home', 'HOME'],
+  ['homedrive', 'HOMEDRIVE'],
+  ['homepath', 'HOMEPATH'],
+  ['localappdata', 'LOCALAPPDATA'],
+  ['path', 'PATH'],
+  ['pathext', 'PATHEXT'],
+  ['programdata', 'ProgramData'],
+  ['programfiles', 'ProgramFiles'],
+  ['programfiles(x86)', 'ProgramFiles(x86)'],
+  ['systemdrive', 'SystemDrive'],
+  ['systemroot', 'SystemRoot'],
+  ['temp', 'TEMP'],
+  ['tmp', 'TMP'],
+  ['userprofile', 'USERPROFILE'],
+  ['windir', 'windir'],
+])
+const HOST_ONLY_ENVIRONMENT_NAMES = new Set(['node_test_context', 'node_v8_coverage'])
+
+/** Project the host environment once without losing Windows case variants. */
+export function normalizeWorkerEnvironment(source, platform = process.platform) {
+  if (platform !== 'win32') {
+    return Object.fromEntries(Object.entries(source).filter(([name, value]) => (
+      value !== undefined && !HOST_ONLY_ENVIRONMENT_NAMES.has(name.toLowerCase())
+    )))
+  }
+  const normalized = new Map()
+  for (const [name, value] of Object.entries(source)) {
+    if (value === undefined) continue
+    const key = name.toLowerCase()
+    if (HOST_ONLY_ENVIRONMENT_NAMES.has(key)) continue
+    const canonicalName = WINDOWS_ENVIRONMENT_NAMES.get(key) ?? name
+    const current = normalized.get(key)
+    if (current === undefined || name === canonicalName) {
+      normalized.set(key, [canonicalName, value])
+    }
+  }
+  return Object.fromEntries(normalized.values())
+}
+
 /** Owns one session kernel's worker process, private port, and scratch directory. */
 export class WorkerClient {
   constructor({ workerUrl, cwd, maxOldGenerationSizeMb, onMessage, onFailure }) {
@@ -43,14 +85,7 @@ export class WorkerClient {
     if (this.disposed) throw new Error('session kernel disposed')
     /* c8 ignore next */
     if (this.worker !== undefined) return this.workerReady
-    const environment = { ...process.env }
-    // Test-runner instrumentation belongs to the host process, not the session worker.
-    delete environment.NODE_TEST_CONTEXT
-    delete environment.NODE_V8_COVERAGE
-    for (const name of ['PATH', 'Path', 'ComSpec', 'COMSPEC', 'HOME', 'USERPROFILE']) {
-      const value = process.env[name]
-      if (value !== undefined) environment[name] = value
-    }
+    const environment = normalizeWorkerEnvironment(process.env)
     const worker = new Worker(this.workerUrl, {
       env: {
         ...environment,
@@ -112,6 +147,11 @@ export class WorkerClient {
 
   post(message) {
     this.port.postMessage(message)
+  }
+
+  /** Best-effort reply for a request whose lease may outlive a worker reset. */
+  postIfAlive(message) {
+    this.port?.postMessage(message)
   }
 
   fail(worker, message) {

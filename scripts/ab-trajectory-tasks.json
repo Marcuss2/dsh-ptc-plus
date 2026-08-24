@@ -64,6 +64,6 @@
     "prompt": "在 run_code cell 中直接使用静态 import 声明导入 node:path 的 basename（不要改写为动态导入），用它返回 C:/logs/session.jsonl 的文件名，并报告该文件名。",
     "validator": "blind",
     "machineBudget": { "maxModelRequests": 5, "maxDirectCalls": 3, "maxSourceChars": 8000, "maxRepeatedSourceCalls": 0, "maxResultChars": 30000, "maxAssistantChars": 10000, "maxTokenTraffic": 50000, "maxRuntimeContextChars": 24000 },
-    "runtimeContexts": { "plugin": { "allowed": [{ "name": "tools:ptc-plus-rewrite-info", "maxChars": 2048 }], "requiredTransitions": [{ "name": "tools:ptc-plus-rewrite-info", "type": "append" }], "maxSnapshotChars": 8192 }, "baseline": { "allowed": [], "requiredTransitions": [], "maxSnapshotChars": 8192 } }
+    "runtimeContexts": { "plugin": { "allowed": [], "requiredTransitions": [], "maxSnapshotChars": 8192 }, "baseline": { "allowed": [], "requiredTransitions": [], "maxSnapshotChars": 8192 } }
   }
 ]

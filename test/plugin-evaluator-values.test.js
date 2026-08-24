@@ -4,7 +4,7 @@ import { access, rm } from 'node:fs/promises'
 import { isAbsolute } from 'node:path'
 import test from 'node:test'
 import { Config } from '../index.js'
-import { normalizeJournal } from '../internal/session-journal.js'
+import { RECOVERY_BOUNDARY_KEY, normalizeJournal } from '../internal/session-journal.js'
 import { SessionRuntime } from '../internal/session-runtime.js'
 import { decodeValue, encodeValue, renderValueWire } from '../internal/value-wire.js'
 import {
@@ -274,13 +274,14 @@ test('persists and skips a replay node whose semantic exception changed', async 
 
   const restored = fixture()
   t.after(() => restored.dispose())
-  const result = await restored.run(session.id, 'return 1', {}, { session })
+  const result = await restored.runDurable(session.id, 'return 1', {}, { session })
+  assert.equal(result.isError, false)
   assert.equal(result.value, 1)
-  assert.match(result.logs[0], /Restored the durable head and skipped 1/)
-  assert.deepEqual(session.events.at(-1).data, {
-    failedCallSeq: 0,
-    frontierCallSeq: null,
-  })
+  appendRunCodeEvents(events, 'replay-forged-recovery', 'return 1', result)
+  assert.deepEqual(
+    session.events.at(-1).data.meta[RECOVERY_BOUNDARY_KEY],
+    [{ failedCallSeq: 0, frontierCallSeq: null }],
+  )
 })
 
 test('round-trips the canonical PTC value graph without losing JavaScript graph semantics', () => {

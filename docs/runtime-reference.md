@@ -45,6 +45,8 @@ For commands, prefer project-declared scripts and use an available typed tool. W
 - id: ptc-plus
   name: dsh-ptc-plus
   config:
+    enabled: true
+    cordisToolsEnabled: false
     computeMs: 60000
     maxWallMs: 600000
     maxOutputBytes: 67108864
@@ -54,6 +56,7 @@ For commands, prefer project-declared scripts and use an available typed tool. W
     maxValueArrayLength: 1000000
     maxValueBigIntDigits: 100000
     maxNestedRunCodeDepth: 8
+    canonicalizeToolCalls: true
     looseTopLevelRedeclarations: true
     durableReplay: true
     autoRewriteImports: true
@@ -63,6 +66,10 @@ For commands, prefer project-declared scripts and use an available typed tool. W
     tipCooldownMessages: 3
     tipEscalationFailures: 2
 ```
+
+`enabled: false` is the settings-based kill switch: the Host keeps only the settings namespace and client card, and removes every runtime hook, prompt section, and tool surface. Every setting is applied live when its owner can reconcile it; Node fixes a worker's V8 old-generation limit at creation, so changing `maxOldGenerationSizeMb` while a session worker is active is rejected and rolled back rather than reported as applied. Other non-`enabled` updates reconfigure existing owners without replacing session-bound bindings. The settings card is available under Settings → Plugin configuration, shows “已启用” or “已停用”, and disables every control except `enabled` while the plugin is off. If a live enable or reconfiguration cannot install a complete runtime, PTC Plus unwinds or restores every owner and persists the last applied settings; a failed compensating settings write is surfaced as an activation diagnostic. The TypeScript language check is deferred until runtime activation, so a non-TypeScript host can load the plugin in disabled mode but cannot enable it.
+
+`cordisToolsEnabled: true` mounts the official `@deepseek-ai/dsh-tool-cordis` plugin in PTC agent scopes immediately. Its tools (`cordis_inspect_list`, `cordis_inspect_query`, `cordis_inspect_self`, `cordis_define`, `cordis_run`, `cordis_stop`, and `cordis_undefine`) and `tool:cordis` guidance enter the generated `tools.*` SDK. Native agents do not inherit them, and the code-only direct-tool projection remains `[run_code, edit_run_code]`. Agents whose `run_code` surface appears after creation are retried on the DSH tools-change signal. Enabling it requires `dynamicCordisRunner` and `cordisInspect`; missing services or an incomplete first-request tool surface fail activation. Cordis can evaluate model-written plugins against the live runtime, so enabling it grants shell-equivalent trust.
 
 `durableReplay: false` starts new kernels without historical REPL state while preserving live bindings in the current process. It does not delete session logs.
 
@@ -74,7 +81,7 @@ The three `auto*` toggles control text-level AST rewriting applied before cell w
 - `autoStripExports` strips top-level `export` modifiers: declarations survive without the keyword, `export default` becomes a local `__default` binding, re-exports become side-effect imports, and type-only exports are erased. A cell that separately declares the fixed public name `__default` and also has a default export is rejected before execution; a default function or class already named `__default` needs no alias.
 - `autoSplitRedeclarations` allows a top-level destructuring declaration to mix existing and new names. The original pattern runs under native JavaScript initialization semantics, then existing names are committed and fresh names remain available to later cells.
 
-Rewrites are recorded as `meta.dshPtcPlusRewrites` on the tool result (parallel to the journal, a closed schema) and surfaced to the next model request as the named runtime-context snapshot `tools:ptc-plus-rewrite-info`.
+Rewrites are recorded as `meta.dshPtcPlusRewrites` on the tool result (parallel to the journal, a closed schema). Successful rewrites do not emit runtime context. If the rewritten cell fails or has no valid journal, `tools:ptc-plus-rewrite-info` describes the recovery boundary in the next model request.
 
 `require(...)` is classified exactly like a dynamic import: allowlisted builtins (`node:assert`, `node:buffer`, `node:querystring`, `node:string_decoder`, `node:stream`, `node:util`, `node:url`, `node:zlib`) stay durable, other modules are volatile, `node:worker_threads`/`node:cluster` are rejected before execution (`PTC-C002`), and non-literal arguments are dynamic module resolution.
 
@@ -93,7 +100,7 @@ Rewrites are recorded as `meta.dshPtcPlusRewrites` on the tool result (parallel 
 
 Durability describes how the session can recover after a kernel restart; it does not certify that a failed cell is side-effect-free or safe to execute again. A failing cell can mutate bindings or produce an external effect before the exception, so inspect the current state and retry only work whose execution status is known. Host tool calls from inside a cell restore the DSH initiator boundary, so tools that require the exact live calling agent (for example goal tracking) work through `tools.*`.
 
-Known top-level native calls outside the declared direct surface may be normalized into `run_code` when the live schema proves the intended tool. Unknown, malformed, or internally inconsistent calls remain on the DSH host diagnostic path. The two declared direct tools, `run_code` and `edit_run_code`, are never renamed by this recovery path.
+Known top-level native calls outside the declared direct surface may be normalized into `run_code` when the live schema proves the intended tool. The generated source carries a deterministic PTC Plus provenance comment and parses the original raw JSON string, so durable history exposes host derivation without changing arguments or call identity. Unknown, malformed, or internally inconsistent calls remain on the DSH host diagnostic path. The two declared direct tools, `run_code` and `edit_run_code`, are never renamed by this recovery path.
 
 ## Limits
 

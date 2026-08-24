@@ -4,7 +4,10 @@ import { normalizeBindingDescriptors } from './binding-descriptors.js'
 import { SessionRuntime } from './session-runtime.js'
 import {
   JOURNAL_KEY,
+  RECOVERY_BOUNDARY_KEY,
   journalsEqual,
+  recoveryBoundariesEqual,
+  withRecoveryBoundaries,
   withJournal,
   withRewrites,
 } from './session-journal.js'
@@ -14,6 +17,7 @@ import {
   capabilityTree,
   toolCapabilityMetadata,
 } from './program-bindings.js'
+import { deepFreeze } from './record-utils.js'
 
 export const RUN_CODE = 'run_code'
 
@@ -41,79 +45,67 @@ function namespace(global, functions, errorName, memberNameProperty) {
   }
 }
 
-const PROGRAM_CAPABILITY_METADATA = Object.freeze([
-  Object.freeze({
+const PROGRAM_CAPABILITY_METADATA = deepFreeze([
+  {
     namespace: 'repl',
-    members: Object.freeze([Object.freeze({
+    members: [{
       name: 'state',
       description: 'List, save, restore, or delete named durable REPL states.',
-      parameters: Object.freeze({
+      parameters: {
         type: 'object',
-        properties: Object.freeze({
-          action: Object.freeze({ enum: Object.freeze(['list', 'save', 'restore', 'delete']) }),
-          name: Object.freeze({ type: 'string' }),
-        }),
-        oneOf: Object.freeze([
-          Object.freeze({
-            required: Object.freeze(['action']),
-            properties: Object.freeze({ action: Object.freeze({ const: 'list' }) }),
-          }),
-          Object.freeze({
-            required: Object.freeze(['action', 'name']),
-            properties: Object.freeze({ action: Object.freeze({ const: 'save' }) }),
-          }),
-          Object.freeze({
-            required: Object.freeze(['action']),
-            properties: Object.freeze({ action: Object.freeze({ const: 'restore' }) }),
-          }),
-          Object.freeze({
-            required: Object.freeze(['action', 'name']),
-            properties: Object.freeze({ action: Object.freeze({ const: 'delete' }) }),
-          }),
-        ]),
-      }),
-      returns: Object.freeze({ type: 'object' }),
+        properties: {
+          action: { enum: ['list', 'save', 'restore', 'delete'] },
+          name: { type: 'string' },
+        },
+        oneOf: [
+          { required: ['action'], properties: { action: { const: 'list' } } },
+          { required: ['action', 'name'], properties: { action: { const: 'save' } } },
+          { required: ['action'], properties: { action: { const: 'restore' } } },
+          { required: ['action', 'name'], properties: { action: { const: 'delete' } } },
+        ],
+      },
+      returns: { type: 'object' },
       effect: 'ptc-state',
       authority: 'ptc-plus-program-binding',
       completeness: 'complete',
       replay: 'recorded-value',
-    })]),
-  }),
-  Object.freeze({
+    }],
+  },
+  {
     namespace: 'code',
-    members: Object.freeze([Object.freeze({
+    members: [{
       name: 'run',
       description: 'Run isolated source already held as data through the top-level code.run binding; do not use tools.code.run or wrap work that can execute directly in the current cell.',
-      parameters: Object.freeze({
+      parameters: {
         type: 'object',
         additionalProperties: false,
-        properties: Object.freeze({
-          code: Object.freeze({ type: 'string' }),
-          description: Object.freeze({ type: 'string' }),
-        }),
-        required: Object.freeze(['code', 'description']),
-      }),
-      returns: Object.freeze({
+        properties: {
+          code: { type: 'string' },
+          description: { type: 'string' },
+        },
+        required: ['code', 'description'],
+      },
+      returns: {
         type: 'object',
         additionalProperties: false,
-        properties: Object.freeze({
-          logs: Object.freeze({
+        properties: {
+          logs: {
             type: 'array',
-            items: Object.freeze({ type: 'string' }),
+            items: { type: 'string' },
             description: 'Child console output in emission order.',
-          }),
-          result: Object.freeze({
+          },
+          result: {
             description: 'Child return value; omitted when the child returns undefined.',
-          }),
-        }),
-        required: Object.freeze(['logs']),
-      }),
+          },
+        },
+        required: ['logs'],
+      },
       effect: 'unknown',
       authority: 'ptc-plus-program-binding',
       completeness: 'unknown',
       replay: 'recorded-value',
-    })]),
-  }),
+    }],
+  },
 ])
 
 export function createRuntimeBridgeOwner({
@@ -130,6 +122,7 @@ export function createRuntimeBridgeOwner({
     ? undefined
     : (agent, operation) => ctx.agents.withInitiator(agent, operation)
   const sessions = new SessionRuntime(sessionConfig, { withInitiator })
+  let currentConfig = sessions.config
   const runtime = ctx.codeRuntime
   const ownRun = Object.getOwnPropertyDescriptor(runtime, 'run')
   const upstreamRun = runtime.run
@@ -157,8 +150,8 @@ export function createRuntimeBridgeOwner({
     const runCode = async (value) => {
       ensureLease()
       const args = nestedRunCodeArguments(value)
-      if (depth >= maxNestedRunCodeDepth) {
-        throw new RangeError(`code.run recursion depth exceeds configured maximum ${maxNestedRunCodeDepth}`)
+      if (depth >= currentConfig.maxNestedRunCodeDepth) {
+        throw new RangeError(`code.run recursion depth exceeds configured maximum ${currentConfig.maxNestedRunCodeDepth}`)
       }
       if (typeof functions[RUN_CODE] === 'function') return functions[RUN_CODE](args)
       const childProjected = projectBindings(
@@ -240,9 +233,13 @@ export function createRuntimeBridgeOwner({
       if (!active) return original === undefined ? undefined : original(args, value)
       const base = original === undefined ? undefined : original(args, value)
       const current = scope.getStore()
-      if (current?.journal === undefined) return base
-      const meta = withJournal(base, current.journal)
-      return current.rewrites === undefined ? meta : withRewrites(meta, current.rewrites)
+      const settlement = current?.settlement
+      if (settlement === undefined) return base
+      let meta = withJournal(base, settlement.journal)
+      if (settlement.recoveryBoundaries !== undefined) {
+        meta = withRecoveryBoundaries(meta, settlement.recoveryBoundaries)
+      }
+      return settlement.rewrites === undefined ? meta : withRewrites(meta, settlement.rewrites)
     }
     try {
       Object.defineProperty(output, 'presentationMeta', {
@@ -262,7 +259,12 @@ export function createRuntimeBridgeOwner({
     const current = scope.getStore()
     if (current === undefined) return upstreamRun.call(runtime, request)
     const projected = projectBindings(request, 0, current)
-    return sessions.run(current, { ...projected.request, executionToken: current }).finally(projected.release)
+    return sessions.runTentative(current, { ...projected.request, executionToken: current })
+      .then((execution) => {
+        current.settlement = execution.settlement
+        return execution.result
+      })
+      .finally(projected.release)
   }
 
   Object.defineProperty(runtime, 'run', {
@@ -273,6 +275,10 @@ export function createRuntimeBridgeOwner({
 
   return Object.freeze({
     config: sessions.config,
+    reconfigure(nextConfig) {
+      sessions.reconfigure(nextConfig)
+      currentConfig = sessions.config
+    },
     // A composite tool's outer result owns the final durability decision.
     async executeTentative(callSeq, operation) {
       const settlement = {
@@ -283,8 +289,8 @@ export function createRuntimeBridgeOwner({
       const finalize = (outerConfirmed) => {
         if (settlement.finalized) return
         settlement.finalized = true
-        if (settlement.current?.journal !== undefined) {
-          sessions.finalize(settlement.current, outerConfirmed && settlement.innerConfirmed)
+        if (settlement.current?.settlement !== undefined) {
+          sessions.finalize(settlement.current.settlement, outerConfirmed && settlement.innerConfirmed)
         }
       }
       try {
@@ -321,9 +327,13 @@ export function createRuntimeBridgeOwner({
       pending.set(exec, current)
       return scope.run(current, async () => {
         const result = await next()
-        if (result?.isError === true && current.journal !== undefined) {
-          let meta = withJournal(result.meta, current.journal)
-          if (current.rewrites !== undefined) meta = withRewrites(meta, current.rewrites)
+        const settlement = current.settlement
+        if (result?.isError === true && settlement !== undefined) {
+          let meta = withJournal(result.meta, settlement.journal)
+          if (settlement.recoveryBoundaries !== undefined) {
+            meta = withRecoveryBoundaries(meta, settlement.recoveryBoundaries)
+          }
+          if (settlement.rewrites !== undefined) meta = withRewrites(meta, settlement.rewrites)
           return { ...result, meta }
         }
         return result
@@ -335,19 +345,24 @@ export function createRuntimeBridgeOwner({
       if (id === undefined) return
       const current = pending.get(exec)
       pending.delete(exec)
-      if (current?.journal === undefined) {
+      const settlement = current?.settlement
+      if (settlement === undefined) {
         sessions.noteNoop(id, exec.agent?.session, exec.callId)
         return
       }
       const meta = result?.meta
       const confirmed = meta !== null && typeof meta === 'object' && !Array.isArray(meta)
         && Object.hasOwn(meta, JOURNAL_KEY)
-        && journalsEqual(meta[JOURNAL_KEY], current.journal)
+        && journalsEqual(meta[JOURNAL_KEY], settlement.journal)
+        && recoveryBoundariesEqual(
+          Object.hasOwn(meta, RECOVERY_BOUNDARY_KEY) ? meta[RECOVERY_BOUNDARY_KEY] : undefined,
+          settlement.recoveryBoundaries,
+        )
       if (current.deferredSettlement !== undefined) {
         current.deferredSettlement.innerConfirmed = confirmed
         return
       }
-      sessions.finalize(current, confirmed)
+      sessions.finalize(settlement, confirmed)
     },
     disposeAgent(agent) {
       return sessions.disposeSession(sessionId(agent) ?? String(agent.id))

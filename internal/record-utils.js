@@ -30,3 +30,24 @@ export function text(value, label) {
   }
   return value
 }
+
+/** Freeze one static object graph without invoking accessors or recursing. */
+export function deepFreeze(value) {
+  if (value === null || typeof value !== 'object') return value
+  const pending = [value]
+  const seen = new Set()
+  while (pending.length > 0) {
+    const current = pending.pop()
+    if (seen.has(current)) continue
+    seen.add(current)
+    for (const key of Reflect.ownKeys(current)) {
+      const descriptor = Object.getOwnPropertyDescriptor(current, key)
+      if (descriptor !== undefined && Object.hasOwn(descriptor, 'value')) {
+        const child = descriptor.value
+        if (child !== null && typeof child === 'object') pending.push(child)
+      }
+    }
+    Object.freeze(current)
+  }
+  return value
+}

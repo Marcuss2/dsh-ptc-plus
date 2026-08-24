@@ -31,18 +31,29 @@ DSH 为一个 agent composition 固定选择 `native`、`code` 或 `both`。首�
 
 `internal/session-log-view.js` 单次前向扫描 session events，分别投影最新执行、可编辑目标、rewrite metadata 和恢复 tip
 所需事实。`edit_run_code` 不产生专用 runtime context：真实 call/result 已完整表达操作身份和结果，额外 contribution
-只会触发 DSH 聚合 runtime-context 全量快照并重复无关 policy 文本。自动 rewrite feedback 和其他恢复提示保留各自独立生命周期。
+只会触发 DSH 聚合 runtime-context 全量快照并重复无关 policy 文本。只有失败或完成状态不可信的 rewrite feedback 才保留独立生命周期；成功的透明改写不产生 runtime context。
 
 插件卸载时恢复仍由自己持有的 `CodeRuntime.run` 与 `presentationMeta` 属性；若外层插件仍持有旧 wrapper，已卸载 wrapper 会透明委托原 provider，不会恢复已释放的 session 状态。
 稳定 REPL 指引说明 cell 是 async function body、module 使用 dynamic import 或 require，并要求显式
-return 或打印需要展示的值；能力和命令执行依赖当前 request 与 execution world，模型必须先探查 live
-binding、实际 executable 和路径语义，不假设某个平台、shell 或 package runner。
+return 或打印需要展示的值。失败恢复先按状态分类：解析或 preflight 失败且 `state: unchanged`、无外部效果证据时，
+禁止重发完整源码，优先使用 `edit_run_code` 做精确修正并重放完整 cell；`state: partially-applied` 或可能已有外部 effect 时新建短
+`run_code` 并复用已有 binding，完整重写只保留给结构性改动或超出编辑预算的修正。能力和命令执行依赖当前 request
+与 execution world，模型必须先探查 live binding、实际 executable 和路径语义，不假设某个平台、shell 或 package runner。
 
-稳定指引只保留这些跨任务不变量。失败恢复提示由当前 session log 派生为 `tools:ptc-plus-tip/<trigger>/<ordinal>` 保留名称族中的 runtime context：重复绑定失败和当前 execution world 中由诊断确认的 executable、shell 或 path 错误分别提示能力探查或重新确认环境。投影只接受 DSH system-prompt owner 的规范快照，并按命名 section 的有效状态变化重建提示；聚合快照重复同一 section 不增加次数，正文不参与身份判断。
+稳定指引保留这些跨任务不变量和失败恢复的优先动作。动态失败恢复提示由当前 session log 派生为 `tools:ptc-plus-tip/<trigger>/<ordinal>` 保留名称族中的 runtime context：重复绑定失败和当前 execution world 中由诊断确认的 executable、shell 或 path 错误分别提示能力探查或重新确认环境。投影只接受 DSH system-prompt owner 的规范快照，并按命名 section 的有效状态变化重建提示；聚合快照重复同一 section 不增加次数，正文不参与身份判断。
 相同提示受 `tipCooldownMessages` 间隔约束，连续未解决时才升级为详细版本，成功 cell 会重置未解决计数；提示不会改变
 system sections、tool schema 或 tool order，也不假设 Windows、WSL、POSIX、shell 或 package runner。
 
 当前策略位于独立的 `internal/recovery-tips.js` local provider，核心只消费其有界的 named context。未来外部决策插件的接入必须等待稳定的 facts/decision contract；在此之前不猜测跨插件 API，local provider 继续作为 fallback。
+
+## 设置与启用开关
+
+Host half 通过 DSH 公共 settings 服务注册 `ptc-plus` 命名空间，字段清单、默认值与校验来自 `internal/config-spec.js`。
+Client half 通过 `settings.plugin.item` 卡片呈现全部配置。`enabled` 是 kill switch：关闭时只保留 settings 注册和设置卡片，
+不注册 runtime、hook、tool surface 或 system prompt section；设置卡片显示“已启用/已停用”，`code` preset 会话在头部单独显示 `PTC Plus` 指示器。稳定指引不包含 UI 品牌名。
+`enabled` 由 settings watch 即时生效，其余字段仍按启动配置读取，设置卡片标注重启后生效。settings 服务缺失时 Host 回退到 composition config，原有行为不变。
+
+`cordisToolsEnabled` 默认关闭且在启动时读取。Host 只在可见 `run_code` 的 agent scope 中挂载官方 `@deepseek-ai/dsh-tool-cordis`，并让 child fiber 跟随 agent 或 PTC runtime 释放。Cordis schema、guidance 和工具必须在首轮前完整可见；已有完整 surface 保留原 owner，部分同名 surface 拒绝启用。该开关不复制 Cordis 实现，也不改变 code-only direct-tool projection。
 
 ## Prompt 前缀稳定性
 
@@ -75,7 +86,7 @@ CodeRuntime request 已携带的 owner-provided program namespace 会被原样�
 
 每个顶层 `run_code` 是同一 session kernel 的下一格。顶层 binding 跨 cell 保留；默认宽松模式允许一个完整 declarator 全部替换已有变量，严格模式拒绝重声明，关闭 `autoSplitRedeclarations` 时混合新旧名称的解构也在执行前拒绝。cell 始终作为 async function body 求值，支持 block scope、top-level `await` 和普通控制流 return；return lowering 通过顶层 `this` receiver 访问每个 cell 独立生成并在 settlement 清理的 worker-global signal property，因此 lexical `globalThis` 与 `with` object environment 都不能重定向控制流。worker 启动时验证该 receiver 指向 evaluator 的 global context。跨 cell 重声明是 REPL 便利策略，由 `internal/repl-convenience.js` 独立实现；它不是 cell 语言或原生 JavaScript 语义的组成部分。
 
-包裹前的 AST 重写适配模块语法（cell 是 async function body，模块声明在函数体内非法）：全部默认开启且可用 config 关闭（`autoRewriteImports` / `autoStripExports` / `autoSplitRedeclarations`）。原始 Babel Program 在任何 lowering 或 preload 前完成 scope validation；同一 cell 的 value import 与 lexical、hoisted `var`、function 或其他 import 重名会按模块 binding 规则拒绝，block shadow 和 type-only 名称仍合法。静态 `import` 声明产生有序 module preload record；worker 通过短生命周期 ESM adapter 让 Node 从 session cwd 完成解析和 export linkage，再在 cell 编译前通过生成的临时 global identifier 把 namespace 交给另一个持久 lexical identifier。两者都避开当前源码、持久 binding、program binding 与活跃 private namespace，生成的 prologue 直接引用临时 identifier，因此 lexical `globalThis` shadowing 不参与 host capture；临时 global 在 cell settlement 清理。session 未记录 cwd 时，解析基准回退到 worker process cwd；目标模块的依赖保持各自的自然 parent。scope-aware alias lowering 保留 named/default binding 的 live read、只读、shadowing 和跨 cell 重放语义。value import alias 活跃时，原始 Program 上的 direct `eval` 与 `WithStatement` 在任何 preload record 生效前拒绝，因为生成的 namespace property read 无法复现它们的动态 lexical resolution；没有 value alias 的非严格 `with`、type-only import 和局部 shadow 的 `eval` 仍使用普通 JavaScript 语义。顶层 `export` 修饰符剥离（声明保留、`export default` 转为 `__default` 绑定、re-export 转为预加载的副作用模块、type-only export 擦除）；REPL 便利层在 `autoSplitRedeclarations` 开启时按插件定义的兼容规则 lowering 混合新旧名称的顶层解构，关闭时保持原文走既有解析失败路径。无法精确适配的形态在执行前拒绝。改写来源以 `meta.dshPtcPlusRewrites` 平行记录（journal schema 封闭），并经命名 context `tools:ptc-plus-rewrite-info` 在下一轮 model request 快照呈现，不触碰 header 与工具 schema。
+包裹前的 AST 重写适配模块语法（cell 是 async function body，模块声明在函数体内非法）：全部默认开启且可用 config 关闭（`autoRewriteImports` / `autoStripExports` / `autoSplitRedeclarations`）。原始 Babel Program 在任何 lowering 或 preload 前完成 scope validation；同一 cell 的 value import 与 lexical、hoisted `var`、function 或其他 import 重名会按模块 binding 规则拒绝，block shadow 和 type-only 名称仍合法。静态 `import` 声明产生有序 module preload record；worker 通过短生命周期 ESM adapter 让 Node 从 session cwd 完成解析和 export linkage，再在 cell 编译前通过生成的临时 global identifier 把 namespace 交给另一个持久 lexical identifier。两者都避开当前源码、持久 binding、program binding 与活跃 private namespace，生成的 prologue 直接引用临时 identifier，因此 lexical `globalThis` shadowing 不参与 host capture；临时 global 在 cell settlement 清理。session 未记录 cwd 时，解析基准回退到 worker process cwd；目标模块的依赖保持各自的自然 parent。scope-aware alias lowering 保留 named/default binding 的 live read、只读、shadowing 和跨 cell 重放语义。value import alias 活跃时，原始 Program 上的 direct `eval` 与 `WithStatement` 在任何 preload record 生效前拒绝，因为生成的 namespace property read 无法复现它们的动态 lexical resolution；没有 value alias 的非严格 `with`、type-only import 和局部 shadow 的 `eval` 仍使用普通 JavaScript 语义。顶层 `export` 修饰符剥离（声明保留、`export default` 转为 `__default` 绑定、re-export 转为预加载的副作用模块、type-only export 擦除）；REPL 便利层在 `autoSplitRedeclarations` 开启时按插件定义的兼容规则 lowering 混合新旧名称的顶层解构，关闭时保持原文走既有解析失败路径。无法精确适配的形态在执行前拒绝。改写来源以 `meta.dshPtcPlusRewrites` 平行记录（journal schema 封闭）。成功改写不改变下一步决策，因此不产生 runtime context；改写后失败或缺少有效 journal 时，`tools:ptc-plus-rewrite-info` 才在下一轮说明恢复边界。
 
 可确定的计算和 recorded-value capability call 可以推进 durable head。未进入 journal 的 Node/OS 能力、环境输入、时钟、随机数和 timer 进入 sticky `volatile`；live worker 继续可用，cold replay 回到最后 durable frontier。`require(...)` 与动态导入按同一白名单分类：白名单内置模块（assert/buffer/querystring/string_decoder/stream/util/url/zlib）保持 durable，其余 volatile，`worker_threads`/`cluster` 等内核控制模块在执行前以 PTC-C002 拒绝。durable 只描述冷恢复对已结算历史的重放能力；失败 cell 仍可能已经修改 binding 或产生外部 effect，不能由 durability 推导出安全重试。worker thread 是生命周期隔离，不是安全沙箱。
 
@@ -104,7 +115,7 @@ CodeRuntime request 已携带的 owner-provided program namespace 会被原样�
 
 journal 通过 `run_code.output.presentationMeta` 附着到最终 result，再由 `tools/result` 做两阶段确认。缺失、损坏或被替换的 journal 形成 unknown/volatile 边界；未进入 runtime 的 call 由后续 `confirms` 以对应 `tool/call.seq` 证明为 no-op。volatile 源码保留在原 session log，但不参与 cold replay。
 
-durable replay 无法验证某个 node 时，`ptc-plus/recovery-boundary` 作为 log-only session event 记录失败 call 与其 parent frontier，不修改冻结的历史 result。boundary 在进入排序前必须完成 schema 与 event-sequence validation；损坏事件使恢复 fail closed，不能从 fold 中静默消失。折叠器剪除该 node 及依赖后代、重算可重建 checkpoints；kernel 重置 worker 并逐级验证更早 frontier，随后执行当前 live cell。新 durable node 的 parent 始终是 worker 实际拥有的 frontier。
+durable replay 无法验证某个 node 时，当前已结算 `tool/result` 的私有 `meta.dshPtcPlusRecoveryBoundaries` 记录失败 call 与其 parent frontier，不修改冻结的历史 result。boundary 在进入排序前必须完成 schema 与 event-sequence validation；损坏 metadata 使恢复 fail closed，不能从 fold 中静默消失。折叠器剪除该 node 及依赖后代、重算可重建 checkpoints；kernel 重置 worker 并逐级验证更早 frontier，随后执行当前 live cell。新 durable node 的 parent 始终是 worker 实际拥有的 frontier。旧版自定义 boundary event 不由运行时生成，迁移工具必须在 DSH restore 前显式转换它。
 
 诊断由封闭结构确定性渲染，包括语法、preflight、绑定冲突、输出、运行异常和恢复边界。普通成功与首次进入 volatile 不投影 warning/note；恢复分类保留在 journal 和 `repl.state(list)` 中。
 
@@ -118,3 +129,5 @@ durable replay 无法验证某个 node 时，`ptc-plus/recovery-boundary` 作为
 - [Declare Program Bindings At The Owner](adr/0004-declare-program-bindings-at-the-host.md)
 - [Register Edit And Run As A Truthful Composite Tool](adr/0005-temporary-rejected-cell-edit-transport.md)
 - [Track The Latest DSH Public Surface](adr/0017-track-the-latest-dsh-public-surface.md)
+- [Plugin Settings UI and Enabled Kill Switch](adr/0019-plugin-settings-and-kill-switch.md)
+- [Optional Cordis Tools in PTC Mode](adr/0020-optional-cordis-tools-in-ptc-mode.md)

@@ -19,6 +19,7 @@ import {
 } from './module-policy.js'
 import { rewriteLooseRedeclarations } from './repl-convenience.js'
 import { applySourceEdits, mapSourceSpan } from './source-position-map.js'
+import { SKIP_AST_CHILDREN, walkAst } from './ast-traversal.js'
 
 /**
  * Pure AST analysis for PTC cells: binding inventory, durability classification,
@@ -87,25 +88,6 @@ function directBlockBindings(body) {
     }
   }
   return names
-}
-
-const AST_METADATA_KEYS = new Set(['start', 'end', 'loc', 'range'])
-const SKIP_AST_CHILDREN = Symbol('skip AST children')
-
-function walkAst(node, enter, leave = undefined, context = undefined, parent = undefined, parentKey = undefined) {
-  if (node === null || typeof node !== 'object') return
-  const entered = enter(node, parent, parentKey, context)
-  if (entered === SKIP_AST_CHILDREN) return
-  const childContext = entered === undefined ? context : entered
-  for (const [key, value] of Object.entries(node)) {
-    if (AST_METADATA_KEYS.has(key)) continue
-    if (Array.isArray(value)) {
-      for (const child of value) walkAst(child, enter, leave, childContext, node, key)
-    } else {
-      walkAst(value, enter, leave, childContext, node, key)
-    }
-  }
-  leave?.(node, parent, parentKey, childContext)
 }
 
 function functionBindings(node) {
@@ -461,21 +443,18 @@ export function prepareProgram(program, knownBindings, looseTopLevelRedeclaratio
   // split form; it must never see the return rewrite, whose computed
   // globalThis access would mark every returning cell volatile.
   const classification = normalizeClassification(classifyPrepared(executableCode, executableSourceMap))
+  let lowered = { code, sourceMap }
+  if (collisions.length === 0) {
+    lowered = rewriteCellReturns(
+      executableCode,
+      executableSourceMap,
+      unavailableGeneratedNames,
+    )
+  }
   return {
-    ...(collisions.length === 0
-      ? (() => {
-          const lowered = rewriteCellReturns(
-            executableCode,
-            executableSourceMap,
-            unavailableGeneratedNames,
-          )
-          return {
-            code: lowered.code,
-            sourceMap: lowered.sourceMap,
-            returnSignal: lowered.returnSignal,
-          }
-        })()
-      : { code, sourceMap }),
+    code: lowered.code,
+    sourceMap: lowered.sourceMap,
+    ...(lowered.returnSignal === undefined ? {} : { returnSignal: lowered.returnSignal }),
     ...classification,
     declarations,
     imports: classification.imports,

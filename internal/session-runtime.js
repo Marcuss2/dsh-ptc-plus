@@ -1,7 +1,6 @@
 import { diagnostic, renderDiagnostic } from './diagnostic.js'
 import { createFailureTracker, messageOf } from './failure-reporting.js'
 import {
-  appendRecoveryBoundary,
   createJournal,
   liveToolCallSeq,
   normalizeJournal,
@@ -10,31 +9,12 @@ import {
   recoverJournal,
 } from './session-journal.js'
 import { normalizeBindingDescriptors } from './binding-descriptors.js'
-import { validateMaxWallMs } from './runtime-config.js'
+import { resolveConfig } from './runtime-config.js'
 import { WorkerClient } from './worker-client.js'
 import { BindingCatalog, durabilityState, transitionDurability } from './session-state.js'
 import { SessionCellExecutor } from './session-cell-executor.js'
 
 const WORKER_URL = new URL('./kernel-worker.js', import.meta.url)
-const DEFAULTS = Object.freeze({
-  computeMs: 60_000,
-  maxWallMs: 600_000,
-  maxOutputBytes: 64 * 1024 * 1024,
-  maxOldGenerationSizeMb: 512,
-  maxValueNodes: 100_000,
-  maxValueEdges: 1_000_000,
-  maxValueArrayLength: 1_000_000,
-  maxValueBigIntDigits: 100_000,
-  looseTopLevelRedeclarations: true,
-  durableReplay: true,
-  autoRewriteImports: true,
-  autoStripExports: true,
-  autoSplitRedeclarations: true,
-  tipsEnabled: true,
-  tipCooldownMessages: 3,
-  tipEscalationFailures: 2,
-})
-
 function recoveryDiagnostic(count) {
   return diagnostic({
     code: 'PTC-R002',
@@ -47,35 +27,6 @@ function recoveryDiagnostic(count) {
       'do not reference values created only in the skipped suffix',
     ],
   })
-}
-
-function resolveConfig(config) {
-  const resolved = { ...DEFAULTS, ...config }
-  for (const key of [
-    'computeMs', 'maxOutputBytes', 'maxOldGenerationSizeMb',
-    'maxValueNodes', 'maxValueEdges', 'maxValueArrayLength', 'maxValueBigIntDigits',
-  ]) {
-    const value = resolved[key]
-    if (!Number.isSafeInteger(value) || value < 1) {
-      throw new TypeError(`ptc-plus: ${key} must be a positive safe integer`)
-    }
-  }
-  validateMaxWallMs(resolved.maxWallMs)
-  for (const key of [
-    'looseTopLevelRedeclarations', 'durableReplay', 'autoRewriteImports',
-    'autoStripExports', 'autoSplitRedeclarations', 'tipsEnabled',
-  ]) {
-    if (typeof resolved[key] !== 'boolean') {
-      throw new TypeError(`ptc-plus: ${key} must be a boolean`)
-    }
-  }
-  for (const key of ['tipCooldownMessages', 'tipEscalationFailures']) {
-    const value = resolved[key]
-    if (!Number.isSafeInteger(value) || value < 1) {
-      throw new TypeError(`ptc-plus: ${key} must be a positive safe integer`)
-    }
-  }
-  return resolved
 }
 
 function rewritePolicy(config) {
@@ -145,6 +96,21 @@ class SessionKernel {
     }
   }
 
+  assertReconfigurationAllowed(config) {
+    if (this.client.worker !== undefined
+      && config.maxOldGenerationSizeMb !== this.config.maxOldGenerationSizeMb) {
+      throw new Error(
+        'ptc-plus: maxOldGenerationSizeMb cannot change while a session worker is active; retry after the session is disposed',
+      )
+    }
+  }
+
+  reconfigure(config) {
+    this.assertReconfigurationAllowed(config)
+    this.config = config
+    this.client.maxOldGenerationSizeMb = config.maxOldGenerationSizeMb
+  }
+
   rewritePolicy() {
     return rewritePolicy(this.config)
   }
@@ -157,7 +123,11 @@ class SessionKernel {
   }
 
   async execute(request) {
-    if (!this.replayed) {
+    const recoveryBoundaries = []
+    const finishResult = result => recoveryBoundaries.length === 0
+      ? result
+      : { ...result, recoveryBoundaries: recoveryBoundaries.map(boundary => ({ ...boundary })) }
+    if (!this.replayed && this.config.durableReplay) {
       let skipped = 0
       while (!this.replayed) {
         try {
@@ -168,7 +138,7 @@ class SessionKernel {
           if (worker !== undefined) await this.client.reset(worker)
           if (error instanceof ReplayCancelled) {
             this.completeJournal(request.journal, 'noop', error.result)
-            return error.result
+            return finishResult(error.result)
           }
           if (!(error instanceof ReplayFailure)) {
             const result = {
@@ -179,25 +149,32 @@ class SessionKernel {
               },
             }
             this.completeJournal(request.journal, 'noop', result)
-            return result
+            return finishResult(result)
           }
           const frontier = error.node.parent === undefined
             ? undefined
             : this.history.nodes[error.node.parent]
           const previousPathLength = pathToHead(this.history).length
           try {
-            appendRecoveryBoundary(this.session, error.node, frontier)
-            this.history = recoverJournal(this.session, request.callSeq)
+            const boundary = {
+              failedCallSeq: error.node.callSeq,
+              frontierCallSeq: frontier?.callSeq ?? null,
+            }
+            const recovered = recoverJournal(this.session, request.callSeq, {
+              extraBoundaries: [boundary],
+            })
+            recoveryBoundaries.push(boundary)
+            this.history = recovered
           } catch (boundaryError) {
             const result = {
               logs: [],
               error: {
                 kind: 'recovery',
-                message: `cannot persist REPL recovery boundary: ${messageOf(boundaryError)}`,
+                message: `cannot apply REPL recovery boundary: ${messageOf(boundaryError)}`,
               },
             }
             this.completeJournal(request.journal, 'noop', result)
-            return result
+            return finishResult(result)
           }
           const nextPathLength = pathToHead(this.history).length
           skipped += Math.max(1, previousPathLength - nextPathLength)
@@ -206,12 +183,8 @@ class SessionKernel {
       }
       if (skipped > 0) this.recoveryNotice = recoveryDiagnostic(skipped)
     }
-    const notices = []
-    if (this.recoveryNotice !== undefined) {
-      notices.push(this.recoveryNotice)
-      this.recoveryNotice = undefined
-    }
-    const leadingDiagnostics = notices.splice(0)
+    const leadingDiagnostics = this.recoveryNotice === undefined ? [] : [this.recoveryNotice]
+    this.recoveryNotice = undefined
     if (request.journal !== undefined) request.journal.diagnostics.push(...leadingDiagnostics)
     const result = await this.cellExecutor.executeCell(request)
     if (leadingDiagnostics.length > 0) {
@@ -227,7 +200,7 @@ class SessionKernel {
         if (request.journal !== undefined) request.journal.diagnostics.push(hint)
       }
     }
-    return result
+    return finishResult(result)
   }
 
   async replayHistory(request) {
@@ -414,17 +387,33 @@ export class SessionRuntime {
     this.config = resolveConfig(config)
     this.kernels = new Map()
     this.pendingNoops = new Map()
+    this.settlements = new WeakSet()
     this.disposed = false
     this.withInitiator = typeof options.withInitiator === 'function' ? options.withInitiator : undefined
   }
 
   async run(sessionContext, request) {
-    if (this.disposed) return Promise.resolve({ logs: [], error: { kind: 'abort', message: 'PTC runtime disposed' } })
+    const execution = await this.runTentative(sessionContext, request)
+    if (execution.settlement !== undefined) this.finalize(execution.settlement, true)
+    return execution.result
+  }
+
+  reconfigure(config) {
+    const resolved = resolveConfig(config)
+    const kernels = [...this.kernels.values()]
+    for (const kernel of kernels) kernel.assertReconfigurationAllowed(resolved)
+    for (const kernel of kernels) kernel.reconfigure(resolved)
+    this.config = resolved
+  }
+
+  async runTentative(sessionContext, request) {
+    const completed = result => Object.freeze({ result, settlement: undefined })
+    if (this.disposed) return completed({ logs: [], error: { kind: 'abort', message: 'PTC runtime disposed' } })
     let bindingDescriptors
     try {
       bindingDescriptors = normalizeBindingDescriptors(request?.bindings)
     } catch (error) {
-      return { logs: [], error: { kind: 'exception', message: messageOf(error) } }
+      return completed({ logs: [], error: { kind: 'exception', message: messageOf(error) } })
     }
     request = { ...request, bindings: bindingDescriptors.namespaces, bindingDescriptors }
     const { id: sessionId, session, callId, persistedCallSeq, cwd } = sessionOf(sessionContext)
@@ -438,7 +427,7 @@ export class SessionRuntime {
         ? persistedCallSeq ?? liveToolCallSeq(session, callId, 'run_code')
         : undefined
     } catch (error) {
-      return { logs: [], error: { kind: 'recovery', message: `cannot identify current run_code call in session log: ${messageOf(error)}` } }
+      return completed({ logs: [], error: { kind: 'recovery', message: `cannot identify current run_code call in session log: ${messageOf(error)}` } })
     }
     let kernel = this.kernels.get(sessionId)
     if (kernel === undefined) {
@@ -448,7 +437,7 @@ export class SessionRuntime {
           ? recoverJournal(session, callSeq)
           : emptyHistory()
       } catch (error) {
-        return { logs: [], error: { kind: 'recovery', message: `cannot reconstruct REPL from session log: ${messageOf(error)}` } }
+        return completed({ logs: [], error: { kind: 'recovery', message: `cannot reconstruct REPL from session log: ${messageOf(error)}` } })
       }
       kernel = new SessionKernel({
         config: this.config,
@@ -466,13 +455,22 @@ export class SessionRuntime {
       rewritePolicy(this.config),
     )
     const result = await kernel.run({ ...request, journal, callSeq })
-    if (typeof sessionContext === 'object' && sessionContext !== null) {
-      sessionContext.journal = journal
-      sessionContext.kernel = kernel
-      if (result.rewrites !== undefined) sessionContext.rewrites = result.rewrites
-    }
-    const { journal: _ignored, ...publicResult } = result
-    return publicResult
+    const settlement = Object.freeze({
+      journal,
+      kernel,
+      sessionId,
+      ...(result.recoveryBoundaries === undefined
+        ? {}
+        : { recoveryBoundaries: result.recoveryBoundaries }),
+      ...(result.rewrites === undefined ? {} : { rewrites: result.rewrites }),
+    })
+    this.settlements.add(settlement)
+    const {
+      journal: _ignored,
+      recoveryBoundaries: _recoveryBoundaries,
+      ...publicResult
+    } = result
+    return Object.freeze({ result: publicResult, settlement })
   }
 
   noteNoop(sessionId, session, callId) {
@@ -487,16 +485,17 @@ export class SessionRuntime {
     calls.add(callSeq)
   }
 
-  finalize(sessionContext, confirmed) {
-    const journal = sessionContext?.journal
-    const kernel = sessionContext?.kernel
-    if (journal === undefined || kernel === undefined) return
+  finalize(settlement, confirmed) {
+    if (settlement === null || typeof settlement !== 'object' || !this.settlements.delete(settlement)) {
+      throw new TypeError('ptc-plus: finalize requires one unsettled SessionRuntime settlement handle')
+    }
+    const { journal, kernel, sessionId } = settlement
     kernel.finalizeJournal(journal, confirmed)
     if (!confirmed) return
-    const noops = this.pendingNoops.get(String(sessionContext.id))
+    const noops = this.pendingNoops.get(sessionId)
     if (noops === undefined) return
     for (const callSeq of journal.confirms ?? []) noops.delete(callSeq)
-    if (noops.size === 0) this.pendingNoops.delete(String(sessionContext.id))
+    if (noops.size === 0) this.pendingNoops.delete(sessionId)
   }
 
   async disposeSession(sessionId) {

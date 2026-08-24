@@ -6,6 +6,7 @@ import {
   fixture,
   ptcAgent,
 } from './plugin-fixture.js'
+import { RECOVERY_BOUNDARY_KEY } from '../internal/session-journal.js'
 
 function appendEditCall(events, callId, args) {
   const seq = events.length
@@ -88,18 +89,58 @@ test('keeps a derived run tentative until exact outer metadata persists', async 
 
     const restored = fixture()
     t.after(() => restored.dispose())
-    const cold = await restored.run(
+    const coldResult = await restored.runDurable(
       session.id,
       'return [unconfirmedEditValue, typeof afterUnconfirmedEdit]',
       {},
       { session },
     )
-    assert.equal(cold.error, undefined, JSON.stringify(cold))
-    assert.deepEqual(cold.value, [1, 'undefined'])
-    const boundaries = events.filter(event => event.type === 'ptc-plus/recovery-boundary')
+    assert.equal(coldResult.isError, false, JSON.stringify(coldResult))
+    assert.deepEqual(coldResult.value, [1, 'undefined'])
+    appendRunCodeEvents(events, `${label}-cold`, 'return [unconfirmedEditValue, typeof afterUnconfirmedEdit]', coldResult)
+    const boundaries = events.flatMap(event => event.data?.meta?.[RECOVERY_BOUNDARY_KEY] ?? [])
     assert.equal(boundaries.length, expectsRecoveryBoundary ? 1 : 0)
     if (expectsRecoveryBoundary) {
-      assert.deepEqual(boundaries[0].data, { failedCallSeq: callSeq, frontierCallSeq: 1 })
+      assert.deepEqual(boundaries[0], { failedCallSeq: callSeq, frontierCallSeq: 1 })
     }
   }
+})
+
+test('carries derived recovery boundaries through the outer edit result', async (t) => {
+  const events = []
+  const session = appendOnlySession('derived-recovery-boundary', events)
+  const state = fixture()
+  t.after(() => state.dispose())
+  const agent = ptcAgent(session.id, session)
+  const requestSignal = new AbortController().signal
+  await state.assemble(
+    { sections: [], contexts: [], variables: {}, tools: [state.runCodeDefinition] },
+    { agent, scope: agent, signal: requestSignal },
+  )
+  const setupCode = 'let derivedBoundaryValue = 1; return derivedBoundaryValue'
+  const setup = await state.runDurable(session.id, setupCode, {}, { session })
+  appendRunCodeEvents(events, 'derived-boundary-setup', setupCode, setup)
+  appendEditCall(events, 'derived-boundary-edit', { edits: [{ old_string: '= 1', new_string: '= 2' }] })
+
+  const originalExecute = state.ctx.tools.execute
+  state.ctx.tools.execute = async options => {
+    const result = await originalExecute(options)
+    if (options.name !== 'run_code') return result
+    return {
+      ...result,
+      meta: {
+        ...result.meta,
+        [RECOVERY_BOUNDARY_KEY]: [{ failedCallSeq: 9, frontierCallSeq: 1 }],
+      },
+    }
+  }
+  const edit = await state.ctx.tools.execute({
+    callId: 'derived-boundary-edit',
+    name: 'edit_run_code',
+    arguments: { edits: [{ old_string: '= 1', new_string: '= 2' }] },
+    agent,
+    signal: requestSignal,
+  })
+  assert.equal(edit.isError, false, JSON.stringify(edit))
+  assert.deepEqual(edit.meta[RECOVERY_BOUNDARY_KEY], [{ failedCallSeq: 9, frontierCallSeq: 1 }])
 })

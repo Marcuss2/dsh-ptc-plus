@@ -6,7 +6,7 @@
 
 浏览、搜索和 DSH 服务调用使用当前 scope 的 native `tools.*`。canonical result 直接进入 cell，不经过 PTC 参数翻译或结果裁剪。具体值可能 complete、bounded、incremental、open-world 或 unknown；模型/UI rendering 的裁剪不能反推 program value 的完整性。
 
-PTC 模式的 code-only direct-tool projection 只声明模型直接调用真实注册的 `run_code` 与 `edit_run_code`。模型误发的顶层 native call 不属于这个合法 direct protocol；当 live schema 能唯一证明该工具时，transport normalization 将它包装为 `run_code`，cell 再用原始 JSON 参数调用同一 `tools.*` member。参数仍由 DSH owner contract 正式验证，未知、畸形或不一致调用原样交给宿主诊断。该历史规范化只适用于无效的 out-of-surface call，不适用于已经合法声明的 `edit_run_code`。
+PTC 模式的 code-only direct-tool projection 只声明模型直接调用真实注册的 `run_code` 与 `edit_run_code`。模型误发的顶层 native call 不属于这个合法 direct protocol；当 live schema 能唯一证明该工具时，transport normalization 将它包装为 `run_code`，cell 再用原始 JSON 参数调用同一 `tools.*` member。生成源码中的确定性注释明确记录该 cell 由 PTC Plus 从哪个 out-of-surface call 派生，原始 JSON 则以字符串进入 `JSON.parse`，因此空白、数值拼写和 own `__proto__` 等语义不会经过对象重序列化。参数仍由 DSH owner contract 正式验证，未知、畸形或不一致调用原样交给宿主诊断。该历史规范化只适用于无效的 out-of-surface call，不适用于已经合法声明的 `edit_run_code`。
 
 `edit_run_code` 是宿主 composite tool：外层 result 向模型返回精简的编辑状态、值与日志，完整物化源码和 journal 只进入标记为 derived 的私有 metadata。cold replay 消费该记录，不把完整源码重新投影给模型，也不把派生 `run_code` 归因给 assistant。
 

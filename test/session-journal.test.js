@@ -3,20 +3,24 @@ import test from 'node:test'
 import {
   JOURNAL_KEY,
   RECOVERY_BOUNDARY_EVENT,
+  RECOVERY_BOUNDARY_KEY,
   REWRITES_KEY,
-  appendRecoveryBoundary,
   assertStateName,
   createJournal,
   derivedEditResultsEqual,
   journalsEqual,
   liveToolCallSeq,
+  migrateRecoveryBoundaryEvents,
+  normalizeRecoveryBoundaries,
   normalizeDerivedEditResult,
   normalizeJournal,
   normalizeRewrites,
   pathToHead,
+  recoveryBoundariesEqual,
   reduceStateOperations,
   recoverJournal,
   withJournal,
+  withRecoveryBoundaries,
   withRewrites,
 } from '../internal/session-journal.js'
 import { editTargetForCall, projectSessionLog } from '../internal/session-log-view.js'
@@ -181,7 +185,7 @@ test('creates journals, compares semantics, validates names, and merges metadata
   }
 })
 
-test('appends and folds a recovery boundary without mutating frozen history', () => {
+test('folds a recovery boundary from settled tool-result metadata', () => {
   const repeated = journal({
     operations: [
       { action: 'save', name: 'point' },
@@ -195,26 +199,79 @@ test('appends and folds a recovery boundary without mutating frozen history', ()
     resultEvent(2, repeated),
     callEvent(3, 'third', 'const third = 3'),
     resultEvent(3, journal({ operations: [{ action: 'save', name: 'descendant' }] })),
+    callEvent(4, 'current', 'const current = 4'),
+    (() => {
+      const result = resultEvent(4, journal({ operations: [{ action: 'save', name: 'current' }] }))
+      return {
+        ...result,
+        data: {
+          meta: withRecoveryBoundaries(
+            result.data.meta,
+            [{ failedCallSeq: 2, frontierCallSeq: 1 }],
+          ),
+        },
+      }
+    })(),
   ]
-  const session = {
-    get events() { return Object.freeze([...events]) },
-    append(type, data) {
-      const event = { type, data, seq: events.length, time: events.length }
-      events.push(event)
-      return event
-    },
-  }
-  const originalResults = session.events.filter(event => event.type === 'tool/result')
-  const before = recoverJournal(session)
-  appendRecoveryBoundary(session, before.nodes[1], before.nodes[0])
-
-  assert.equal(session.events.at(-1).type, RECOVERY_BOUNDARY_EVENT)
-  assert.deepEqual(session.events.filter(event => event.type === 'tool/result'), originalResults)
+  const session = { get events() { return Object.freeze([...events]) } }
   const recovered = recoverJournal(session)
-  assert.deepEqual(pathToHead(recovered).map(node => node.code), ['const first = 1'])
-  assert.deepEqual([...recovered.checkpoints.keys()], ['point'])
-  assert.throws(() => appendRecoveryBoundary({}, before.nodes[1], before.nodes[0]), /append-only/)
-  assert.throws(() => appendRecoveryBoundary(session, {}, before.nodes[0]), /durable call event/)
+  assert.deepEqual(pathToHead(recovered).map(node => node.code), ['const first = 1', 'const current = 4'])
+  assert.deepEqual([...recovered.checkpoints.keys()], ['point', 'current'])
+  assert.deepEqual(
+    withRecoveryBoundaries(undefined, [{ failedCallSeq: 2, frontierCallSeq: 1 }])[RECOVERY_BOUNDARY_KEY],
+    [{ failedCallSeq: 2, frontierCallSeq: 1 }],
+  )
+  assert.equal(recoveryBoundariesEqual(undefined, undefined), true)
+  assert.equal(recoveryBoundariesEqual(undefined, []), false)
+  assert.equal(recoveryBoundariesEqual(
+    [{ failedCallSeq: 2, frontierCallSeq: 1 }],
+    [{ failedCallSeq: 2, frontierCallSeq: 1 }],
+  ), true)
+  assert.equal(recoveryBoundariesEqual(
+    [{ failedCallSeq: 2, frontierCallSeq: 1 }],
+    [{ failedCallSeq: 3, frontierCallSeq: 1 }],
+  ), false)
+  assert.equal(recoveryBoundariesEqual('invalid', 'invalid'), false)
+})
+
+test('migrates retired recovery events without mutating the source log', () => {
+  const source = [
+    callEvent(0, 'failed', 'const failed = 1'),
+    { seq: 1, type: RECOVERY_BOUNDARY_EVENT, data: { failedCallSeq: 0, frontierCallSeq: null } },
+    callEvent(2, 'current', 'return 2'),
+    {
+      seq: 3,
+      type: 'tool/result',
+      sourceEventSeqs: [2],
+      data: { meta: { [JOURNAL_KEY]: journal() } },
+    },
+  ]
+  const migrated = migrateRecoveryBoundaryEvents(source)
+  assert.equal(migrated.length, 3)
+  assert.equal(migrated.some(event => event.type === RECOVERY_BOUNDARY_EVENT), false)
+  assert.equal(migrated[1].seq, 1)
+  assert.deepEqual(migrated[2].sourceEventSeqs, [1])
+  assert.deepEqual(migrated[2].data.meta[RECOVERY_BOUNDARY_KEY], [{
+    failedCallSeq: 0,
+    frontierCallSeq: null,
+  }])
+  assert.equal(source.length, 4)
+  assert.equal(source[1].type, RECOVERY_BOUNDARY_EVENT)
+  assert.throws(
+    () => migrateRecoveryBoundaryEvents(source.slice(0, 2)),
+    /no later tool\/result settlement/,
+  )
+  assert.throws(
+    () => migrateRecoveryBoundaryEvents([{
+      seq: -1, type: RECOVERY_BOUNDARY_EVENT,
+      data: { failedCallSeq: 0, frontierCallSeq: null },
+    }]),
+    /recovery boundary event sequence/,
+  )
+  assert.throws(
+    () => normalizeRecoveryBoundaries([{ failedCallSeq: 0, frontierCallSeq: null }], -1),
+    /recovery boundary event sequence/,
+  )
 })
 
 test('resolves the unique unpaired live named tool call event', () => {
@@ -293,6 +350,18 @@ test('requires one complete target-linked relation for derived edit replay', () 
     ...structuredClone(derivedMeta),
     [REWRITES_KEY]: {},
   }, 1), true)
+
+  const boundaryDerivedMeta = {
+    ...structuredClone(derivedMeta),
+    [RECOVERY_BOUNDARY_KEY]: [{ failedCallSeq: 1, frontierCallSeq: null }],
+  }
+  assert.deepEqual(normalizeDerivedEditResult(boundaryDerivedMeta, 1).recoveryBoundaries, [
+    { failedCallSeq: 1, frontierCallSeq: null },
+  ])
+  assert.equal(derivedEditResultsEqual(boundaryDerivedMeta, structuredClone(boundaryDerivedMeta), 1), true)
+  const changedBoundary = structuredClone(boundaryDerivedMeta)
+  changedBoundary[RECOVERY_BOUNDARY_KEY][0].failedCallSeq = 2
+  assert.equal(derivedEditResultsEqual(boundaryDerivedMeta, changedBoundary, 1), false)
   assert.equal(derivedEditResultsEqual(derivedMeta, {
     ...structuredClone(derivedMeta),
     [REWRITES_KEY]: [{ kind: 'export', description: 'changed rewrite' }],
@@ -664,15 +733,41 @@ test('marks missing and corrupt recovery data untrusted and rejects invalid hist
   ]
   assert.throws(() => recoverJournal({ events: volatileSave }), /volatile journal cannot save/)
 
-  for (const boundary of [
-    { seq: 1, type: RECOVERY_BOUNDARY_EVENT, data: null },
-    { seq: 1, type: RECOVERY_BOUNDARY_EVENT, data: { failedCallSeq: -1, frontierCallSeq: null } },
-    { type: RECOVERY_BOUNDARY_EVENT, data: { failedCallSeq: 1, frontierCallSeq: null } },
-    { seq: '1', type: RECOVERY_BOUNDARY_EVENT, data: { failedCallSeq: 1, frontierCallSeq: null } },
-    { seq: -1, type: RECOVERY_BOUNDARY_EVENT, data: { failedCallSeq: 1, frontierCallSeq: null } },
+  for (const meta of [
+    null,
+    [{ failedCallSeq: -1, frontierCallSeq: null }],
+    [{ failedCallSeq: 1, frontierCallSeq: null, extra: true }],
+    [{ failedCallSeq: 1 }],
   ]) {
-    assert.throws(() => recoverJournal({ events: [boundary] }), /invalid dsh-ptc-plus recovery boundary/)
+    assert.throws(() => recoverJournal({ events: [
+      callEvent(0, 'bad-boundary', 'return 1'),
+      (() => {
+        const result = resultEvent(0, journal())
+        return {
+          ...result,
+          data: { meta: { ...result.data.meta, [RECOVERY_BOUNDARY_KEY]: meta } },
+        }
+      })(),
+    ] }), /recovery boundar/)
   }
+
+  assert.throws(
+    () => recoverJournal({ events: [{ type: RECOVERY_BOUNDARY_EVENT, seq: 0, data: {} }] }),
+    /legacy recovery boundary requires migration/,
+  )
+
+  assert.throws(
+    () => recoverJournal({ events: [
+      callEvent(0, 'duplicate-boundary', 'return 1'),
+      resultEvent(0, journal()),
+    ] }, undefined, {
+      extraBoundaries: [
+        { failedCallSeq: 0, frontierCallSeq: null },
+        { failedCallSeq: 0, frontierCallSeq: null },
+      ],
+    }),
+    /recovery boundary references an unavailable failed cell/,
+  )
 })
 
 test('preserves a discarded external-effect boundary as an untrusted suffix', () => {
@@ -905,6 +1000,28 @@ test('projects only target-linked derived edit sources with a valid execution jo
     viewCall('other', undefined, undefined, 'read', '{}'),
     viewResult('other', undefined),
   ] } })
-  assert.equal(invalidRun.latestRun, undefined)
+  assert.equal(invalidRun.latestRun.source, 'return 1')
   assert.equal(invalidRun.editableRun.source, 'return 1')
+})
+
+test('preserves the editable run across unrelated native settlements', () => {
+  const events = [
+    { type: 'turn/start' },
+    { ...viewCall('run', 'return 1'), seq: 1 },
+    { ...viewResult('run', viewJournal('durable')), sourceEventSeqs: [1] },
+    { ...viewCall('native', undefined, undefined, 'read', '{}'), seq: 2 },
+    {
+      type: 'tool/result',
+      sourceEventSeqs: [2],
+      data: { message: { source: { callId: 'native' } } },
+    },
+    { ...viewCall('edit', undefined, undefined, 'edit_run_code', '{}'), seq: 3 },
+  ]
+  const view = projectSessionLog({ session: { events } })
+  assert.equal(view.latestRun.source, 'return 1')
+  assert.equal(view.editableRun.source, 'return 1')
+  assert.deepEqual(editTargetForCall({ session: { events } }, 'edit', 3), {
+    source: 'return 1',
+    callSeq: 1,
+  })
 })

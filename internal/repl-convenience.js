@@ -1,5 +1,6 @@
 import { bindingNodes, createGeneratedNameAllocator } from './binding-pattern.js'
 import { applySourceEdits, createMappedTextBuilder, identitySourceMap } from './source-position-map.js'
+import { SKIP_AST_CHILDREN, walkAst } from './ast-traversal.js'
 
 /**
  * Optional compatibility policy for a persistent REPL. The cell language does
@@ -7,23 +8,12 @@ import { applySourceEdits, createMappedTextBuilder, identitySourceMap } from './
  * lexical frames instead of one shared REPL environment.
  */
 
-function walkExpression(node, visit) {
-  if (node === null || typeof node !== 'object') return
-  visit(node)
-  if (node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression') return
-  for (const value of Object.values(node)) {
-    if (Array.isArray(value)) {
-      for (const child of value) walkExpression(child, visit)
-    } else {
-      walkExpression(value, visit)
-    }
-  }
-}
-
 function containsTopLevelAwait(node) {
   let found = false
-  walkExpression(node, current => {
+  walkAst(node, current => {
     if (current.type === 'AwaitExpression') found = true
+    if (current.type === 'FunctionDeclaration' || current.type === 'FunctionExpression'
+      || current.type === 'ArrowFunctionExpression') return SKIP_AST_CHILDREN
   })
   return found
 }

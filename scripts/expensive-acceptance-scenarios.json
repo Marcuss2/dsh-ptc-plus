@@ -239,22 +239,8 @@
         "import-input.txt"
       ],
       "runtimeContexts": {
-        "allowed": [
-          {
-            "name": "tools:ptc-plus-rewrite-info",
-            "maxChars": 2048
-          }
-        ],
-        "requiredTransitions": [
-          {
-            "name": "tools:ptc-plus-rewrite-info",
-            "type": "append"
-          },
-          {
-            "name": "tools:ptc-plus-rewrite-info",
-            "type": "clear"
-          }
-        ],
+        "allowed": [],
+        "requiredTransitions": [],
         "maxSnapshotChars": 8192
       },
       "machineBudget": {
@@ -285,18 +271,8 @@
         "split value: {{right}}"
       ],
       "runtimeContexts": {
-        "allowed": [
-          {
-            "name": "tools:ptc-plus-rewrite-info",
-            "maxChars": 2048
-          }
-        ],
-        "requiredTransitions": [
-          {
-            "name": "tools:ptc-plus-rewrite-info",
-            "type": "append"
-          }
-        ],
+        "allowed": [],
+        "requiredTransitions": [],
         "maxSnapshotChars": 8192
       },
       "machineBudget": {

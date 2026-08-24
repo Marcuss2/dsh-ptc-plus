@@ -102,9 +102,15 @@ export function createDirectSurfaceOwner({
   sessionId,
   toolSchemasForAgent,
 }) {
+  // Composition is anchored to Agent identity because DSH selects presentation
+  // once per composed agent. Request signals bind the exact assembly to stream
+  // execution, while session identity is the fallback for hosts that replace a
+  // signal between those stages. Calls retain the resolved request policy by id
+  // so a later assembly cannot reinterpret an in-flight dispatch.
   const compositions = new Map()
   const canonicalRequests = new WeakMap()
   const sessions = new Map()
+  let currentCanonicalizeToolCalls = canonicalizeToolCalls
   const tipConfig = {
     enabled: runtimeConfig.tipsEnabled,
     cooldownMessages: runtimeConfig.tipCooldownMessages,
@@ -167,6 +173,12 @@ export function createDirectSurfaceOwner({
   }
 
   return Object.freeze({
+    reconfigure(nextConfig) {
+      currentCanonicalizeToolCalls = nextConfig.canonicalizeToolCalls
+      tipConfig.enabled = nextConfig.tipsEnabled
+      tipConfig.cooldownMessages = nextConfig.tipCooldownMessages
+      tipConfig.escalationFailures = nextConfig.tipEscalationFailures
+    },
     async assemble(initialAssembly, context, next) {
       const agent = context?.agent
       const id = sessionId(agent)
@@ -266,7 +278,7 @@ export function createDirectSurfaceOwner({
       const source = policy.presentation === 'code'
         ? canonicalizeToolCallStream(next(), {
           tools: options.tools,
-          nativeSchemas: canonicalizeToolCalls ? policy.nativeSchemas : new Map(),
+          nativeSchemas: currentCanonicalizeToolCalls ? policy.nativeSchemas : new Map(),
           editToolName: EDIT_RUN_CODE,
         })
         : next()

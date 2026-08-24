@@ -56,6 +56,8 @@ test('exports a Cordis config schema with validated runtime defaults', async () 
   const defaults = await Config['~standard'].validate({})
   assert.deepEqual(defaults, {
     value: {
+      enabled: true,
+      cordisToolsEnabled: false,
       computeMs: 60_000,
       maxWallMs: 600_000,
       maxOutputBytes: 64 * 1024 * 1024,
@@ -84,7 +86,7 @@ test('exports a Cordis config schema with validated runtime defaults', async () 
     (await Config['~standard'].validate({ maxWallMs: 2_147_483_648 })).issues[0].path,
     ['maxWallMs'],
   )
-  for (const key of ['canonicalizeToolCalls', 'autoRewriteImports', 'autoStripExports', 'autoSplitRedeclarations', 'tipsEnabled']) {
+  for (const key of ['cordisToolsEnabled', 'canonicalizeToolCalls', 'autoRewriteImports', 'autoStripExports', 'autoSplitRedeclarations', 'tipsEnabled']) {
     assert.throws(() => fixture({ [key]: 'yes' }), new RegExp(`${key} must be a boolean`))
   }
   for (const key of ['tipCooldownMessages', 'tipEscalationFailures']) {
@@ -332,6 +334,71 @@ test('rejects malformed direct runtime requests and hostile tool errors', async 
   }
 })
 
+test('reconfigures an active session kernel without replacing its runtime', async (t) => {
+  const runtime = new SessionRuntime({ computeMs: 100, maxWallMs: 1_000 })
+  t.after(() => runtime.dispose())
+  assert.equal((await runtime.run('reconfigure-session', { program: 'return 1', bindings: [] })).value, 1)
+  runtime.reconfigure({ computeMs: 200, maxWallMs: 2_000 })
+  assert.equal(runtime.config.computeMs, 200)
+  assert.equal(runtime.config.maxWallMs, 2_000)
+})
+
+test('does not replay durable history after durable replay is disabled', async (t) => {
+  const runtime = new SessionRuntime({ computeMs: 100, maxWallMs: 1_000 })
+  t.after(() => runtime.dispose())
+  assert.equal((await runtime.run('replay-disabled', {
+    program: 'const replayOnlyBinding = 7', bindings: [],
+  })).error, undefined)
+  const kernel = runtime.kernels.get('replay-disabled')
+  assert.equal(kernel.history.nodes.length, 1)
+  runtime.reconfigure({ durableReplay: false })
+  assert.equal(kernel.history.nodes.length, 1)
+  await kernel.client.reset(kernel.client.worker)
+  kernel.rollbackToDurable()
+  const result = await runtime.run('replay-disabled', {
+    program: 'return typeof replayOnlyBinding', bindings: [],
+  })
+  assert.equal(result.value, 'undefined')
+})
+
+test('preserves durable ancestors across a temporary replay disable', async (t) => {
+  const runtime = new SessionRuntime({ computeMs: 100, maxWallMs: 1_000 })
+  t.after(() => runtime.dispose())
+  const sessionId = 'replay-toggle'
+  await runtime.run(sessionId, {
+    program: 'const replayAncestor = 7', bindings: [],
+  })
+  runtime.reconfigure({ durableReplay: false })
+  const dependent = await runtime.run(sessionId, {
+    program: 'const replayDescendant = replayAncestor + 1', bindings: [],
+  })
+  assert.equal(dependent.error, undefined)
+  const kernel = runtime.kernels.get(sessionId)
+  assert.equal(kernel.history.nodes.length, 1)
+
+  runtime.reconfigure({ durableReplay: true })
+  await kernel.client.reset(kernel.client.worker)
+  kernel.rollbackToDurable()
+  const restored = await runtime.run(sessionId, {
+    program: 'return [replayAncestor, typeof replayDescendant]', bindings: [],
+  })
+  assert.deepEqual(restored.value, [7, 'undefined'])
+})
+
+test('rejects live worker memory-limit changes without changing runtime config', async (t) => {
+  const runtime = new SessionRuntime({ maxOldGenerationSizeMb: 64 })
+  t.after(() => runtime.dispose())
+  await runtime.run('memory-limit-session', { program: 'return 1', bindings: [] })
+  assert.throws(
+    () => runtime.reconfigure({ maxOldGenerationSizeMb: 128 }),
+    /maxOldGenerationSizeMb cannot change while a session worker is active/,
+  )
+  assert.equal(runtime.config.maxOldGenerationSizeMb, 64)
+  await runtime.disposeSession('memory-limit-session')
+  runtime.reconfigure({ maxOldGenerationSizeMb: 128 })
+  assert.equal(runtime.config.maxOldGenerationSizeMb, 128)
+})
+
 test('handles direct runtime recovery, timeout, volatility, and lifecycle boundaries', async (t) => {
   const timed = new SessionRuntime({ computeMs: 1_000, maxWallMs: 20 })
   t.after(() => timed.dispose())
@@ -340,8 +407,8 @@ test('handles direct runtime recovery, timeout, volatility, and lifecycle bounda
   assert.match(timeout.error.message, /wall-clock ceiling/)
   assert.match(timeout.error.message, /split long-running work into smaller cells/)
 
-  timed.finalize(undefined, true)
-  timed.finalize({}, false)
+  assert.throws(() => timed.finalize(undefined, true), /unsettled SessionRuntime settlement/)
+  assert.throws(() => timed.finalize({}, false), /unsettled SessionRuntime settlement/)
   await timed.disposeSession('absent')
 
   const invalidHistory = new SessionRuntime()
@@ -373,7 +440,7 @@ test('handles direct runtime recovery, timeout, volatility, and lifecycle bounda
   assert.equal((await pending).error.kind, 'abort')
 })
 
-test('rejects every semantic replay mismatch', async (t) => {
+test('contracts every semantic replay mismatch before continuing', async (t) => {
   const cases = [
     {
       name: 'recorded-success-actual-throw',
@@ -421,7 +488,7 @@ test('rejects every semantic replay mismatch', async (t) => {
     const state = fixture()
     t.after(() => state.dispose())
     const result = await state.run(item.name, 'return 1', { call: async () => null }, { session })
-    assert.equal(result.error.kind, 'recovery')
+    assert.equal(result.error, undefined, item.name)
   }
 
   const session = { id: 'recorded-call-mismatch', events: [] }
@@ -440,7 +507,7 @@ test('rejects every semantic replay mismatch', async (t) => {
   } } })
   const state = fixture()
   t.after(() => state.dispose())
-  assert.equal((await state.run(session.id, 'return 1', { call: async () => null }, { session })).error.kind, 'recovery')
+  assert.equal((await state.run(session.id, 'return 1', { call: async () => null }, { session })).error, undefined)
 })
 
 test('covers runtime worker setup and state-operation failures', async (t) => {
@@ -503,32 +570,34 @@ return repl.state({ action: 'delete', name: 'temporary' })
   t.after(() => direct.dispose())
   const context = { id: 'inactive-control', callId: 'one' }
   await direct.run(context, { program: 'return 1', bindings: [] })
-  assert.throws(() => context.kernel.cellExecutor.controlState({ action: 'list' }), /unavailable outside a cell/)
+  const kernel = direct.kernels.get(context.id)
+  assert.throws(() => kernel.cellExecutor.controlState({ action: 'list' }), /unavailable outside a cell/)
 
-  assert.deepEqual(context.kernel.cellExecutor.withControlBinding([], undefined, undefined), [])
-  context.kernel.completeJournal(undefined, 'noop', { logs: [] })
-  context.kernel.cellExecutor.onMessage(null)
-  context.kernel.cellExecutor.onMessage({ type: 'ignored' })
-  context.kernel.client.fail({}, 'stale worker')
-  const savedWorker = context.kernel.client.worker
-  context.kernel.client.worker = {}
-  context.kernel.client.port = undefined
-  context.kernel.active = undefined
-  context.kernel.client.fail(context.kernel.client.worker, 'detached worker')
-  context.kernel.client.worker = savedWorker
+  assert.deepEqual(kernel.cellExecutor.withControlBinding([], undefined, undefined), [])
+  kernel.completeJournal(undefined, 'noop', { logs: [] })
+  kernel.cellExecutor.onMessage(null)
+  kernel.cellExecutor.onMessage({ type: 'ignored' })
+  kernel.client.fail({}, 'stale worker')
+  const savedWorker = kernel.client.worker
+  kernel.client.worker = {}
+  kernel.client.port = undefined
+  kernel.active = undefined
+  kernel.client.fail(kernel.client.worker, 'detached worker')
+  kernel.client.worker = savedWorker
 
   const cleanupFailure = new SessionRuntime()
   const cleanupContext = { id: 'scratch-cleanup', callId: 'one' }
   await cleanupFailure.run(cleanupContext, { program: 'return 1', bindings: [] })
-  const cleanupDirectory = await cleanupContext.kernel.client.scratchReady
-  cleanupContext.kernel.client.scratchReady = Promise.reject(new Error('scratch unavailable'))
-  void cleanupContext.kernel.client.scratchReady.catch(() => {})
+  const cleanupKernel = cleanupFailure.kernels.get(cleanupContext.id)
+  const cleanupDirectory = await cleanupKernel.client.scratchReady
+  cleanupKernel.client.scratchReady = Promise.reject(new Error('scratch unavailable'))
+  void cleanupKernel.client.scratchReady.catch(() => {})
   await cleanupFailure.dispose()
   await rm(cleanupDirectory, { recursive: true, force: true })
 
-  context.kernel.execute = async () => { throw new Error('tail rejection') }
-  await assert.rejects(() => context.kernel.run({}), /tail rejection/)
-  await context.kernel.tail
+  kernel.execute = async () => { throw new Error('tail rejection') }
+  await assert.rejects(() => kernel.run({}), /tail rejection/)
+  await kernel.tail
 })
 
 test('covers remaining schema defaults, no-value children, and expired leases', async (t) => {

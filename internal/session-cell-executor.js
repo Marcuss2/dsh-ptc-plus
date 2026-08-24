@@ -20,6 +20,18 @@ import { ModuleRewriteError } from './cell-rewriter.js'
 import { mapSourcePosition } from './source-position-map.js'
 import { durabilityState, transitionDurability } from './session-state.js'
 
+const OUTPUT_LIMIT_MESSAGE = bytes => `output exceeded ${bytes} bytes; reduce the returned value or keep it in a REPL binding`
+
+function earlyResult(kind, message) {
+  return { logs: [], error: { kind, message } }
+}
+
+function desiredDurability(kernel, replayRecord, prepared) {
+  if (replayRecord !== undefined) return 'durable'
+  if (!kernel.config.durableReplay || kernel.durability.status === 'volatile') return 'volatile'
+  return prepared.durability
+}
+
 function hostCause(error) {
   const candidate = safeProperty(error, 'diagnostic') ?? safeProperty(error, 'cause') ?? error
   const candidateMessage = safeProperty(candidate, 'message')
@@ -159,12 +171,12 @@ export class SessionCellExecutor {
   async executeCell(request, replayRecord = undefined) {
     const kernel = this.kernel
     if (kernel.disposed) {
-      const result = { logs: [], error: { kind: 'abort', message: 'session kernel disposed' } }
+      const result = earlyResult('abort', 'session kernel disposed')
       kernel.completeJournal(request.journal, 'noop', result)
       return result
     }
     if (request.signal?.aborted) {
-      const result = { logs: [], error: { kind: 'abort', message: String(request.signal.reason) } }
+      const result = earlyResult('abort', String(request.signal.reason))
       kernel.completeJournal(request.journal, 'noop', result)
       return result
     }
@@ -186,7 +198,7 @@ export class SessionCellExecutor {
         catalog.importNamespaces,
       )
     } catch (error) {
-      const result = { logs: [], error: { kind: 'exception', message: messageOf(error) } }
+      const result = earlyResult('exception', messageOf(error))
       const failure = error instanceof PreflightError ? preflightDiagnostic(error) : parseDiagnostic(error, request.program)
       result.error.message = renderDiagnostic(failure, request.program)
       kernel.completeJournal(request.journal, 'noop', result, undefined, [failure])
@@ -207,13 +219,13 @@ export class SessionCellExecutor {
     try {
       worker = await kernel.client.ensure()
     } catch (error) {
-      const result = { logs: [], error: { kind: 'worker-exit', message: messageOf(error) } }
+      const result = earlyResult('worker-exit', messageOf(error))
       kernel.completeJournal(request.journal, 'discarded', result)
       kernel.rollbackToDurable()
       return result
     }
     if (request.signal?.aborted) {
-      const result = { logs: [], error: { kind: 'abort', message: String(request.signal.reason) } }
+      const result = earlyResult('abort', String(request.signal.reason))
       kernel.completeJournal(request.journal, 'discarded', result)
       kernel.rollbackToDurable()
       void kernel.client.reset(worker)
@@ -221,9 +233,7 @@ export class SessionCellExecutor {
     }
 
     const journal = request.journal
-    const desiredDurability = replayRecord === undefined
-      ? !kernel.config.durableReplay || kernel.durability.status === 'volatile' ? 'volatile' : prepared.durability
-      : 'durable'
+    const durability = desiredDurability(kernel, replayRecord, prepared)
     const bindings = this.withControlBinding(request.bindingDescriptors, journal, replayRecord)
     const id = ++kernel.sequence
     return new Promise((resolve) => {
@@ -246,7 +256,7 @@ export class SessionCellExecutor {
         appliedBindingCatalog: undefined,
         completion: undefined,
         durability: durabilityState({
-          status: desiredDurability,
+          status: durability,
           reason: kernel.durability.status === 'volatile'
             ? kernel.durability.reason
             : !kernel.config.durableReplay
@@ -261,16 +271,16 @@ export class SessionCellExecutor {
       }
       active.resolve = (result, terminate = false) => kernel.settleCell(active, result, terminate)
       active.onAbort = () => active.resolve(
-        { logs: [], error: { kind: 'abort', message: String(request.signal?.reason) } },
+        earlyResult('abort', String(request.signal?.reason)),
         true,
       )
       active.computeTimer = setInterval(() => {
         if (worker.performance.eventLoopUtilization(started).active > kernel.config.computeMs) {
-          active.resolve({ logs: [], error: { kind: 'timeout', message: `compute budget exhausted (${kernel.config.computeMs}ms busy); split the work into smaller cells` } }, true)
+          active.resolve(earlyResult('timeout', `compute budget exhausted (${kernel.config.computeMs}ms busy); split the work into smaller cells`), true)
         }
       }, Math.min(100, kernel.config.computeMs))
       active.wallTimer = setTimeout(() => {
-        active.resolve({ logs: [], error: { kind: 'timeout', message: `wall-clock ceiling reached (${kernel.config.maxWallMs}ms); split long-running work into smaller cells` } }, true)
+        active.resolve(earlyResult('timeout', `wall-clock ceiling reached (${kernel.config.maxWallMs}ms); split long-running work into smaller cells`), true)
       }, kernel.config.maxWallMs)
       kernel.active = active
       request.signal?.addEventListener('abort', active.onAbort, { once: true })
@@ -285,10 +295,10 @@ export class SessionCellExecutor {
           returnSignal: prepared.returnSignal,
           maxOutputBytes: kernel.config.maxOutputBytes,
           valueLimits: kernel.valueLimits(),
-          durability: desiredDurability,
+          durability,
         })
       } catch (error) {
-        active.resolve({ logs: [], error: { kind: 'worker-exit', message: messageOf(error) } }, true)
+        active.resolve(earlyResult('worker-exit', messageOf(error)), true)
       }
     })
   }
@@ -348,30 +358,43 @@ export class SessionCellExecutor {
   }
 
   onMessage(message) {
-    const kernel = this.kernel
     if (message === null || typeof message !== 'object') return
-    if (message.type === 'volatile' && kernel.active?.id === message.id) {
-      kernel.active.durability = transitionDurability(kernel.active.durability, {
+    const handler = {
+      volatile: this.handleVolatile,
+      call: this.handleCall,
+      'output-limit': this.handleOutputLimit,
+      done: this.handleDone,
+    }[message.type]
+    handler?.call(this, message)
+  }
+
+  handleVolatile(message) {
+    const active = this.kernel.active
+    if (active?.id !== message.id) return
+    active.durability = transitionDurability(active.durability, {
         type: 'volatile',
         reason: typeof message.reason === 'string' ? message.reason : undefined,
-      })
-      return
-    }
-    if (message.type === 'call') {
-      void this.invokeBinding(message)
-      return
-    }
-    if (message.type === 'output-limit' && kernel.active?.id === message.id) {
-      /* c8 ignore next */
-      const logs = Array.isArray(message.logs) && message.logs.every(log => typeof log === 'string') ? message.logs : []
-      kernel.active.resolve({
-        logs: limitLogs(logs),
-        error: { kind: 'output-limit', message: `output exceeded ${kernel.config.maxOutputBytes} bytes; reduce the returned value or keep it in a REPL binding` },
-      }, true)
-      return
-    }
-    if (message.type !== 'done' || kernel.active?.id !== message.id) return
+    })
+  }
 
+  handleCall(message) {
+    void this.invokeBinding(message)
+  }
+
+  handleOutputLimit(message) {
+    const kernel = this.kernel
+    if (kernel.active?.id !== message.id) return
+    /* c8 ignore next */
+    const logs = Array.isArray(message.logs) && message.logs.every(log => typeof log === 'string') ? message.logs : []
+    kernel.active.resolve({
+        logs: limitLogs(logs),
+        error: { kind: 'output-limit', message: OUTPUT_LIMIT_MESSAGE(kernel.config.maxOutputBytes) },
+    }, true)
+  }
+
+  handleDone(message) {
+    const kernel = this.kernel
+    if (kernel.active?.id !== message.id) return
     const active = kernel.active
     const logs = Array.isArray(message.logs) && message.logs.every(log => typeof log === 'string') ? message.logs : []
     if (!['durable', 'volatile'].includes(message.durability)) {
@@ -397,7 +420,7 @@ export class SessionCellExecutor {
     if (bytes > kernel.config.maxOutputBytes) {
       active.resolve({
         logs: limitLogs(logs),
-        error: { kind: 'output-limit', message: `output exceeded ${kernel.config.maxOutputBytes} bytes; reduce the returned value or keep it in a REPL binding` },
+        error: { kind: 'output-limit', message: OUTPUT_LIMIT_MESSAGE(kernel.config.maxOutputBytes) },
       }, true)
       return
     }
@@ -474,7 +497,7 @@ export class SessionCellExecutor {
     const kernel = this.kernel
     const active = kernel.active
     if (active?.worker !== kernel.client.worker || active?.id !== message.runId) {
-      kernel.client.port?.postMessage({ type: 'reply', runId: message.runId, id: message.id, ok: false, error: 'PTC execution lease expired' })
+      kernel.client.postIfAlive({ type: 'reply', runId: message.runId, id: message.id, ok: false, error: 'PTC execution lease expired' })
       return
     }
     const namespace = active.request.bindings.find(binding => binding.global === message.global)

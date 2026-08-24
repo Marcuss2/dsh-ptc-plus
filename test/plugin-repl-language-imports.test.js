@@ -152,7 +152,7 @@ test('fails safe when an export shape is unrecognized and when disabled', async 
   assert.match(rejected.error.message, /PTC-C001/)
 })
 
-test('surfaces binding continuity after a rewritten cell', async (t) => {
+test('keeps successful rewrite provenance out of runtime contexts', async (t) => {
   const state = fixture()
   t.after(() => state.dispose())
   const codeOnlyAssembly = {
@@ -166,45 +166,44 @@ test('surfaces binding continuity after a rewritten cell', async (t) => {
   const agent = ptcAgent(`${session.id}-agent`, session)
   const code = 'export const exportedValue = 1\nreturn exportedValue'
   const observed = await state.runDurable(session.id, code, {}, { session })
+  assert.match(
+    observed.meta.dshPtcPlusRewrites[0].description,
+    /stripped the export modifier from a top-level declaration/,
+  )
   appendRunCodeEvents(session.events, 'export-feedback-cell', code, observed)
   const assembly = await state.assemble(codeOnlyAssembly, { agent, scope: agent, signal: new AbortController().signal })
-  const entries = assembly.contexts.filter(item => item?.name === 'tools:ptc-plus-rewrite-info')
-  assert.equal(entries.length, 1)
-  assert.match(entries[0].text, /completed after these source adjustments/)
-  assert.match(entries[0].text, /stripped the export modifier from a top-level declaration/)
-  assert.match(entries[0].text, /reusing its ordinary top-level bindings/)
+  assert.equal(assembly.contexts.some(item => item?.name === 'tools:ptc-plus-rewrite-info'), false)
   const reexportCode = "export { basename } from 'node:path'\nreturn 1"
   const reexport = await state.runDurable(session.id, reexportCode, {}, { session })
+  assert.match(
+    reexport.meta.dshPtcPlusRewrites[0].description,
+    /converted the re-export of "node:path" into a side-effect import/,
+  )
   appendRunCodeEvents(session.events, 'export-feedback-reexport', reexportCode, reexport)
   const updated = await state.assemble(codeOnlyAssembly, { agent, scope: agent, signal: new AbortController().signal })
-  const updatedEntries = updated.contexts.filter(item => item?.name === 'tools:ptc-plus-rewrite-info')
-  assert.equal(updatedEntries.length, 1)
-  assert.match(updatedEntries[0].text, /converted the re-export of "node:path" into a side-effect import/)
+  assert.equal(updated.contexts.some(item => item?.name === 'tools:ptc-plus-rewrite-info'), false)
 
   const erasedCode = "import type { A } from 'pkg'\nexport type B = A\nreturn 1"
   const erased = await state.runDurable(session.id, erasedCode, {}, { session })
+  assert.deepEqual(
+    erased.meta.dshPtcPlusRewrites.map(rewrite => rewrite.description),
+    ['removed the type-only import of "pkg"', 'removed a type-only export declaration'],
+  )
   appendRunCodeEvents(session.events, 'export-feedback-erased', erasedCode, erased)
   const erasedAssembly = await state.assemble(codeOnlyAssembly, { agent, scope: agent, signal: new AbortController().signal })
-  const erasedEntries = erasedAssembly.contexts.filter(item => item?.name === 'tools:ptc-plus-rewrite-info')
-  assert.equal(erasedEntries.length, 1)
-  assert.match(erasedEntries[0].text, /removed the type-only import of "pkg"/)
-  assert.match(erasedEntries[0].text, /removed a type-only export declaration/)
-  assert.match(erasedEntries[0].text, /do not resend its source/)
+  assert.equal(erasedAssembly.contexts.some(item => item?.name === 'tools:ptc-plus-rewrite-info'), false)
 
-  // A plain cell clears the snapshot; a split redeclaration then surfaces its
-  // own rewrite text.
   const plain = await state.runDurable(session.id, 'const mixExisting = 1', {}, { session })
   appendRunCodeEvents(session.events, 'export-feedback-plain', 'const mixExisting = 1', plain)
-  const cleared = await state.assemble(codeOnlyAssembly, { agent, scope: agent, signal: new AbortController().signal })
-  assert.equal(cleared.contexts.some(item => item?.name === 'tools:ptc-plus-rewrite-info'), false)
   const splitCode = 'const { mixExisting, mixNew } = { mixExisting: 2, mixNew: 3 }\nreturn mixNew'
   const split = await state.runDurable(session.id, splitCode, {}, { session })
+  assert.match(
+    split.meta.dshPtcPlusRewrites[0].description,
+    /split a mixed top-level declaration/,
+  )
   appendRunCodeEvents(session.events, 'export-feedback-split', splitCode, split)
   const splitAssembly = await state.assemble(codeOnlyAssembly, { agent, scope: agent, signal: new AbortController().signal })
-  const splitEntries = splitAssembly.contexts.filter(item => item?.name === 'tools:ptc-plus-rewrite-info')
-  assert.equal(splitEntries.length, 1)
-  assert.match(splitEntries[0].text, /split a mixed top-level declaration/)
-  assert.match(splitEntries[0].text, /reusing its ordinary top-level bindings/)
+  assert.equal(splitAssembly.contexts.some(item => item?.name === 'tools:ptc-plus-rewrite-info'), false)
 })
 
 test('classifies require exactly like dynamic imports', async (t) => {

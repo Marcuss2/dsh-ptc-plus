@@ -144,7 +144,7 @@ pre-execute -> tools/execute -> post-execute
 7. `restore` 命名状态重新建立 trusted durable head；
 8. untrusted suffix 后的首个 `durable` journal从当前 durable head 建立新分支，并清除旧 suffix；
 9. durable node 保存 parent link，命名状态保存 node index；
-10. `ptc-plus/recovery-boundary` 在 event sequence 参与排序前完成规范化；任一损坏 boundary 使恢复失败，合法 boundary 再通过失败 call seq 选择 node，并要求记录的 frontier 恰好是该 node 的 parent；折叠器剪除该 node 及依赖后代，按剩余记录重算 checkpoints，再把 head 设为记录的 frontier。
+10. `meta.dshPtcPlusRecoveryBoundaries` 在 `tool/result` event sequence 参与排序前完成规范化；任一损坏 boundary 使恢复失败，合法 boundary 再通过失败 call seq 选择 node，并要求记录的 frontier 恰好是该 node 的 parent；折叠器剪除该 node 及依赖后代，按剩余记录重算 checkpoints，再把 head 设为记录的 frontier。
 
 第 8 步是必要不变量：冷恢复已经实际丢弃 volatile/unknown heap，因此此后执行成功的 durable cell 不依赖该 heap。如果不把它作为可信重基点，旧 unknown 调用会在每次重启时永久吞掉所有后续状态。
 
@@ -164,7 +164,7 @@ pre-execute -> tools/execute -> post-execute
 - recovery divergence；
 - durable replay 触发 volatile capability。
 
-基础设施失败会终止当前 worker，并通过 DSH 的公开 `Session.append()` 追加 log-only recovery boundary。kernel 从失败 node 的 parent 重新重放；若该 frontier 仍失败则继续向 parent 收缩，直到某个 frontier 验证成功或到达空 REPL。触发恢复的当前 `run_code` 在验证成功前不执行，因此可以在同一次请求中安全继续；如果 session 不提供追加能力、边界无效或历史本身无法折叠，则返回 recovery error。结构损坏的日志没有可证明的 frontier，后续调用会重新读取日志而不会接受一个无法持久表达 ancestry 的新分支。
+基础设施失败会终止当前 worker，并把 log-only recovery boundary 放入当前已结算 `tool/result` 的私有 metadata。kernel 从失败 node 的 parent 重新重放；若该 frontier 仍失败则继续向 parent 收缩，直到某个 frontier 验证成功或到达空 REPL。触发恢复的当前 `run_code` 在验证成功前不执行，因此可以在同一次请求中安全继续；如果 boundary 无效或历史本身无法折叠，则返回 recovery error。结构损坏的日志没有可证明的 frontier，后续调用会重新读取日志而不会接受一个无法持久表达 ancestry 的新分支。已经写入旧版自定义 boundary event 的日志必须先通过显式迁移移除该事件并把 boundary 合并到后续 `tool/result` metadata，迁移失败时不得覆盖原始日志。
 
 ## State Operations
 
@@ -206,7 +206,7 @@ worker 不继承 Electron 的工作目录语义。插件通过现有 `tools/exec
 
 ## 恢复通知
 
-构造 kernel 时若折叠结果含 volatile/unknown suffix，或本次重放追加 recovery boundary，第一次实际执行的 `run_code` 记录并投影 `PTC-R002`。它只统计当前 call 之前实际跳过的历史 cell：
+构造 kernel 时若折叠结果含 volatile/unknown suffix，或本次重放产生 recovery boundary，第一次实际执行的 `run_code` 记录并投影 `PTC-R002`。它只统计当前 call 之前实际跳过的历史 cell：
 
 ```text
 warning[PTC-R002]: restored the durable head and skipped N unreconstructable historical cells

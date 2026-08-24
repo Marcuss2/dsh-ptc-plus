@@ -324,24 +324,15 @@ function uncertaintySignals(text) {
   return patterns.flatMap(pattern => [...text.matchAll(pattern)].map(match => match[0]))
 }
 
-export function analyzeSession(events, expected) {
-  const headerAudit = auditRequestHeaders(events, expected.headerPolicy)
-  const modelRequestAudit = auditModelRequests(events)
-  const contextAudit = auditRuntimeContexts(events, expected.runtimeContexts)
-  const facts = collectTrajectoryFacts(events, {
-    usageKeys: ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens'],
-  })
+export function assertTrajectoryInvariants(events, expected, audits) {
+  const { headerAudit, contextAudit, facts, injections } = audits
   const failures = [...headerAudit.failures, ...contextAudit.failures, ...facts.failures]
   const headers = headerAudit.headers.map(item => item.header)
   const header = headers[0]
   const session = events.find(event => event.type === 'session')
   const system = typeof header?.system === 'string' ? header.system : ''
   const hasPlugin = system.includes(pluginMarker)
-  const injections = initialInjections(events, expected.cwd)
-  const {
-    calls, results, assistantTexts, usage, turnWallMs, finalTurn, timeline,
-  } = facts
-
+  const { calls, results, assistantTexts, finalTurn, timeline } = facts
   const expectedPersona = neutralPersona
     .replace('{{model}}', expected.model)
     .replace('{{cwd}}', expected.cwd)
@@ -384,6 +375,20 @@ export function analyzeSession(events, expected) {
   if (ptcWarnings.length > 0) {
     failures.push('ordinary task emitted ' + ptcWarnings.length + ' non-error PTC diagnostic(s)')
   }
+  return {
+    failures,
+    headers,
+    header,
+    session,
+    system,
+    ptcWarnings,
+    nativeTopLevelCalls,
+  }
+}
+
+export function computeMetrics(facts, audits) {
+  const { modelRequestAudit, contextAudit } = audits
+  const { calls, results, assistantTexts, usage, timeline } = facts
   const source = timeline.map(item => item.code).filter(value => typeof value === 'string')
   const sourceCounts = new Map()
   for (const value of source) sourceCounts.set(value.trim(), (sourceCounts.get(value.trim()) ?? 0) + 1)
@@ -404,15 +409,35 @@ export function analyzeSession(events, expected) {
     tokenTraffic: Object.values(usage).reduce((sum, value) => sum + value, 0),
     runtimeContextChars: contextAudit.totalMessageChars,
   }
-  failures.push(...machineBudgetFailures(machineMetrics, expected.machineBudget, expected.id))
-  const promptBytes = Buffer.byteLength(system)
-  const sourceChars = source.reduce((sum, value) => sum + value.length, 0)
-  const resultOutputChars = [...results.values()].reduce((sum, result) => sum + result.outputChars, 0)
-  const assistantTextChars = allAssistantText.length
-  const ptcWarningCount = ptcWarnings.length
-  const nestedCallCount = timeline.reduce((sum, item) => sum + item.nestedCalls.length, 0)
-  const nestedErrorCount = timeline.reduce((sum, item) => sum + item.nestedCalls.filter(call => !call.ok).length, 0)
-  const nativeTopLevelCallCount = nativeTopLevelCalls.length
+  return {
+    source,
+    repeatedSourceCalls,
+    allAssistantText,
+    finalAnswer,
+    namespaceMentions,
+    machineMetrics,
+    sourceChars: machineMetrics.sourceChars,
+    resultOutputChars: machineMetrics.resultChars,
+    assistantTextChars: machineMetrics.assistantChars,
+    nestedCallCount: timeline.reduce((sum, item) => sum + item.nestedCalls.length, 0),
+    nestedErrorCount: timeline.reduce((sum, item) => sum + item.nestedCalls.filter(call => !call.ok).length, 0),
+  }
+}
+
+export function analyzeSession(events, expected) {
+  const headerAudit = auditRequestHeaders(events, expected.headerPolicy)
+  const modelRequestAudit = auditModelRequests(events)
+  const contextAudit = auditRuntimeContexts(events, expected.runtimeContexts)
+  const facts = collectTrajectoryFacts(events, {
+    usageKeys: ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens'],
+  })
+  const injections = initialInjections(events, expected.cwd)
+  const audits = { headerAudit, modelRequestAudit, contextAudit, facts, injections }
+  const invariants = assertTrajectoryInvariants(events, expected, audits)
+  const metrics = computeMetrics(facts, audits)
+  const { calls, results, usage, turnWallMs, timeline } = facts
+  const { headers, header, session, system, ptcWarnings, nativeTopLevelCalls } = invariants
+  invariants.failures.push(...machineBudgetFailures(metrics.machineMetrics, expected.machineBudget, expected.id))
 
   return {
     scenario: { id: expected.id, title: expected.title, task: expected.task },
@@ -422,7 +447,7 @@ export function analyzeSession(events, expected) {
     model: header?.config,
     prompt: {
       chars: system.length,
-      bytes: promptBytes,
+      bytes: Buffer.byteLength(system),
       lines: system.split(/\r?\n/).length,
       sha256: sha256(system),
       normalizedSha256: sha256(normalizedForWorkspace(system, expected.cwd)),
@@ -448,25 +473,25 @@ export function analyzeSession(events, expected) {
     toolCallCount: calls.size,
     toolResultCount: results.size,
     toolErrorCount: [...results.values()].filter(result => result.isError).length,
-    ptcWarningCount,
-    nativeTopLevelCallCount,
+    ptcWarningCount: ptcWarnings.length,
+    nativeTopLevelCallCount: nativeTopLevelCalls.length,
     canonicalizedCallCount: timeline.filter(item => /^Call .+ inside the session REPL$/.test(item.description ?? '')).length,
-    nestedCallCount,
-    nestedErrorCount,
-    sourceChars,
-    repeatedSourceCalls,
-    resultOutputChars,
-    assistantTextChars,
+    nestedCallCount: metrics.nestedCallCount,
+    nestedErrorCount: metrics.nestedErrorCount,
+    sourceChars: metrics.sourceChars,
+    repeatedSourceCalls: metrics.repeatedSourceCalls,
+    resultOutputChars: metrics.resultOutputChars,
+    assistantTextChars: metrics.assistantTextChars,
     usage,
-    machineMetrics,
+    machineMetrics: metrics.machineMetrics,
     timeline,
-    finalAnswerChars: finalAnswer.length,
-    finalAnswer,
-    questionMarks: (allAssistantText.match(/[?？]/g) ?? []).length,
-    uncertaintySignals: uncertaintySignals(allAssistantText),
-    namespaceMentions,
+    finalAnswerChars: metrics.finalAnswer.length,
+    finalAnswer: metrics.finalAnswer,
+    questionMarks: (metrics.allAssistantText.match(/[?？]/g) ?? []).length,
+    uncertaintySignals: uncertaintySignals(metrics.allAssistantText),
+    namespaceMentions: metrics.namespaceMentions,
     diagnostics: [...new Set(ptcWarnings.map(item => item.message ?? String(item)))],
-    failures: [...new Set(failures)],
+    failures: [...new Set(invariants.failures)],
   }
 }
 
@@ -609,6 +634,271 @@ export async function validateTask(task, oracle, analysis, workspace) {
   return taskValidation({ status: changed ? 'pass' : 'fail', source: 'workspace', expected: oracle })
 }
 
+async function checkedPhase(result, {
+  stdoutPath,
+  stderrPath,
+  failed = value => value.code !== 0,
+  failureMessage,
+}) {
+  await writeFile(stdoutPath, result.stdout)
+  await writeFile(stderrPath, result.stderr)
+  if (failed(result)) throw new Error(failureMessage)
+  return result
+}
+
+async function preflightConfigs({ env, runtime, artifactRoot, tasks, fixture }) {
+  const overlays = {
+    plugin: join(artifactRoot, 'plugin.patch.yml'),
+    baseline: join(artifactRoot, 'baseline.patch.yml'),
+  }
+  const install = await runProcess('pwsh.exe', [
+    '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+    '-File', windowsPath(join(repoRoot, 'scripts', 'install-dev.ps1')), runtime.profile,
+  ], { env: { ...env, DSH_DEV_INSTALL_NO_PAUSE: '1' }, timeoutMs: runtime.wallMs })
+  await checkedPhase(install, {
+    stdoutPath: join(artifactRoot, 'install.stdout.log'),
+    stderrPath: join(artifactRoot, 'install.stderr.log'),
+    failureMessage: `plugin installation failed; see ${relative(repoRoot, artifactRoot)}`,
+  })
+
+  const baseDump = await runProcess('pwsh.exe', [
+    '-NoLogo', '-NoProfile', '-Command',
+    `& dsh --profile '${powershellPath(runtime.profile)}' --dump-config`,
+  ], { env, timeoutMs: runtime.wallMs })
+  await checkedPhase(baseDump, {
+    stdoutPath: join(artifactRoot, 'base-config.stdout.yml'),
+    stderrPath: join(artifactRoot, 'base-config.stderr.log'),
+    failed: value => value.code !== 0 || value.stderr.trim() !== '',
+    failureMessage: `base DSH config preflight failed; see ${relative(repoRoot, artifactRoot)}`,
+  })
+  const baseRows = parseConfigDump(baseDump.stdout, 'base DSH config')
+  await writeFile(overlays.plugin, headlessConfigPatch(baseRows, runtime))
+  await writeFile(overlays.baseline, headlessConfigPatch(baseRows, runtime, { disablePtcPlus: true }))
+
+  const resolvedConfigs = {}
+  for (const variant of ['plugin', 'baseline']) {
+    const dump = await runProcess('pwsh.exe', [
+      '-NoLogo', '-NoProfile', '-Command',
+      `& dsh --profile '${powershellPath(runtime.profile)}' --patch '${powershellPath(windowsPath(overlays[variant]))}' --dump-config`,
+    ], { env, timeoutMs: runtime.wallMs })
+    await checkedPhase(dump, {
+      stdoutPath: join(artifactRoot, `${variant}-config.stdout.yml`),
+      stderrPath: join(artifactRoot, `${variant}-config.stderr.log`),
+      failed: value => value.code !== 0 || value.stderr.trim() !== '',
+      failureMessage: `${variant} DSH config preflight failed; see ${relative(repoRoot, artifactRoot)}`,
+    })
+    resolvedConfigs[variant] = parseConfigDump(dump.stdout, `${variant} DSH config`)
+  }
+  const configPreflight = validateConfigPair(resolvedConfigs.plugin, resolvedConfigs.baseline, runtime)
+  await writeFile(join(artifactRoot, 'manifest.json'), JSON.stringify({
+    runtime,
+    fixture,
+    tasks,
+    configPreflight,
+  }, null, 2) + '\n')
+  return overlays
+}
+
+async function preflightKeyless({ env, runtime, artifactRoot }) {
+  const command = npmCliCommand(['run', 'verify'])
+  const result = await runProcess(command.executable, command.args, {
+    cwd: repoRoot,
+    env,
+    timeoutMs: runtime.wallMs,
+  })
+  await checkedPhase(result, {
+    stdoutPath: join(artifactRoot, 'keyless.stdout.log'),
+    stderrPath: join(artifactRoot, 'keyless.stderr.log'),
+    failed: value => value.code !== 0 || value.timedOut,
+    failureMessage: `keyless request-contract preflight failed; see ${relative(repoRoot, artifactRoot)}/keyless.*.log`,
+  })
+}
+
+async function runAllPairs({ tasks, runtime, runId, artifactRoot, runArm }) {
+  const pairSpecs = tasks.flatMap(task => Array.from(
+    { length: runtime.replicates },
+    (_unused, index) => ({ task, replicate: index + 1 }),
+  ))
+  const runPair = async ({ task, replicate }) => {
+    const pluginFirst = Number.parseInt(sha256(`${runId}:${task.id}:${replicate}:order`).slice(0, 2), 16) % 2 === 0
+    const order = pluginFirst ? ['plugin', 'baseline'] : ['baseline', 'plugin']
+    const result = {}
+    for (let phase = 0; phase < order.length; phase += 1) {
+      const variant = order[phase]
+      result[variant] = await runArm(task, replicate, variant, phase + 1)
+    }
+    return { task, replicate, ...result }
+  }
+  const ordered = orderCanaryFirst(
+    pairSpecs,
+    spec => spec.task.canary === true || spec.task.validator !== 'blind',
+  )
+  const outcomes = await runCanaryThenConcurrent(ordered, runtime.concurrency, async (spec) => {
+    try {
+      return await runPair(spec)
+    } catch (error) {
+      return { task: spec.task, replicate: spec.replicate, error }
+    }
+  }, async (firstPair) => {
+    if (firstPair.error !== undefined) throw firstPair.error
+    const injectionSignature = variant => JSON.stringify(firstPair[variant].prompt.injections.map(item => ({
+      source: item.source,
+      chars: item.chars,
+      normalizedSha256: item.normalizedSha256,
+    })))
+    const failures = [
+      ...firstPair.plugin.failures,
+      ...firstPair.baseline.failures,
+      ...(firstPair.plugin.taskValidation?.machineEvidence?.status === 'pass'
+        ? [] : [`plugin canary machine evidence is ${firstPair.plugin.taskValidation?.machineEvidence?.status ?? 'missing'}`]),
+      ...(firstPair.baseline.taskValidation?.machineEvidence?.status === 'pass'
+        ? [] : [`baseline canary machine evidence is ${firstPair.baseline.taskValidation?.machineEvidence?.status ?? 'missing'}`]),
+      ...(injectionSignature('plugin') === injectionSignature('baseline')
+        ? []
+        : ['initial injections differ across the preflight pair']),
+    ]
+    await writeFile(join(artifactRoot, 'first-pair-preflight.json'), JSON.stringify({
+      taskId: firstPair.task.id,
+      replicate: firstPair.replicate,
+      failures,
+      pluginInjections: firstPair.plugin.prompt.injections,
+      baselineInjections: firstPair.baseline.prompt.injections,
+    }, null, 2) + '\n')
+    if (failures.length > 0) {
+      throw new Error(`first A/B pair failed model-visible context preflight; see ${relative(repoRoot, artifactRoot)}`)
+    }
+  })
+  const errors = outcomes.flatMap(outcome => outcome.error === undefined ? [] : [outcome.error])
+  if (errors.length > 0) {
+    throw new AggregateError(errors, `${errors.length} A/B pair(s) failed before report generation`)
+  }
+  return outcomes
+}
+
+async function assembleReport({
+  tasks,
+  runtime,
+  fixture,
+  fixtureDir,
+  sessions,
+  processes,
+  runId,
+  artifactRoot,
+}) {
+  const pairs = []
+  const blindMap = []
+  for (const task of tasks) {
+    for (let replicate = 1; replicate <= runtime.replicates; replicate += 1) {
+      const plugin = sessions.find(item => item.taskId === task.id && item.replicate === replicate && item.variant === 'plugin')
+      const baseline = sessions.find(item => item.taskId === task.id && item.replicate === replicate && item.variant === 'baseline')
+      const process = Object.fromEntries(['plugin', 'baseline'].map(variant => [
+        variant,
+        processes.find(item => item.taskId === task.id && item.replicate === replicate && item.variant === variant),
+      ]))
+      pairs.push({ taskId: task.id, prompt: task.prompt, replicate, plugin, baseline, process, delta: trajectoryDelta(plugin, baseline) })
+      const flip = Number.parseInt(sha256(`${runId}:${task.id}:${replicate}`).slice(0, 2), 16) % 2 === 0
+      const arms = flip ? [plugin, baseline] : [baseline, plugin]
+      for (let index = 0; index < arms.length; index += 1) {
+        const label = `${task.id}-r${replicate}-arm-${index + 1}`
+        const arm = arms[index]
+        const packet = createBlindPacket(label, task.prompt, arm)
+        await writeFile(join(artifactRoot, `${label}.json`), JSON.stringify(packet, null, 2) + '\n')
+        blindMap.push({ label, taskId: task.id, replicate, variant: arm.variant })
+      }
+    }
+  }
+
+  const contextPairingFailures = []
+  for (const variant of ['plugin', 'baseline']) {
+    const hashes = new Set(sessions.filter(session => session.variant === variant)
+      .map(session => session.prompt.normalizedSha256))
+    if (hashes.size !== 1) contextPairingFailures.push(`${variant} system prompt varied across sessions`)
+  }
+  for (const pair of pairs) {
+    const injectionSignature = session => JSON.stringify(session.prompt.injections.map(item => ({
+      source: item.source,
+      chars: item.chars,
+      normalizedSha256: item.normalizedSha256,
+    })))
+    if (injectionSignature(pair.plugin) !== injectionSignature(pair.baseline)) {
+      contextPairingFailures.push(`${pair.taskId}/r${pair.replicate}: initial injections differ across arms`)
+    }
+  }
+
+  const exemplar = pairs[0]
+  const pluginSystem = normalizedForWorkspace(
+    exemplar.plugin.system ?? await readFile(join(exemplar.plugin.directory, 'system.txt'), 'utf8'),
+    exemplar.plugin.session.cwd,
+  )
+  const baselineSystem = normalizedForWorkspace(
+    exemplar.baseline.system ?? await readFile(join(exemplar.baseline.directory, 'system.txt'), 'utf8'),
+    exemplar.baseline.session.cwd,
+  )
+  const promptComparison = {
+    pluginChars: exemplar.plugin.prompt.chars,
+    baselineChars: exemplar.baseline.prompt.chars,
+    deltaChars: exemplar.plugin.prompt.chars - exemplar.baseline.prompt.chars,
+    pluginOnlyParagraphs: multisetDifference(paragraphs(pluginSystem), paragraphs(baselineSystem)),
+    baselineOnlyParagraphs: multisetDifference(paragraphs(baselineSystem), paragraphs(pluginSystem)),
+    pluginDuplicateParagraphs: exemplar.plugin.prompt.duplicateParagraphs,
+    baselineDuplicateParagraphs: exemplar.baseline.prompt.duplicateParagraphs,
+    sharedInitialInjections: exemplar.plugin.prompt.injections,
+  }
+  const report = {
+    runtime,
+    fixture: {
+      name: fixture.fixtureName,
+      version: fixture.fixtureVersion,
+      contentSha256: fixture.contentSha256,
+      path: relative(repoRoot, fixtureDir),
+    },
+    tasks,
+    promptComparison,
+    contextPairingFailures,
+    aggregate: {
+      plugin: aggregateTrajectories(sessions, 'plugin'),
+      baseline: aggregateTrajectories(sessions, 'baseline'),
+    },
+    sessions: sessions.map(({ directory, ...session }) => ({ ...session, directory: relative(artifactRoot, directory) })),
+    pairs: pairs.map(pair => ({
+      taskId: pair.taskId,
+      prompt: pair.prompt,
+      replicate: pair.replicate,
+      process: pair.process,
+      delta: pair.delta,
+      plugin: pair.plugin,
+      baseline: pair.baseline,
+    })),
+    infrastructureFailures: sessions.flatMap(session => session.failures.map(failure => `${session.taskId}/r${session.replicate}/${session.variant}: ${failure}`)),
+    taskFailures: sessions.filter(session => session.taskValidation?.machineEvidence?.status === 'fail')
+      .map(session => `${session.taskId}/r${session.replicate}/${session.variant}`),
+  }
+  report.infrastructureFailures.push(...contextPairingFailures)
+  Object.assign(report, pendingBlindApproval(
+    report.infrastructureFailures,
+    report.taskFailures,
+    blindMap.length,
+  ))
+  await writeFile(join(artifactRoot, 'blind-map.json'), JSON.stringify(blindMap, null, 2) + '\n')
+  await writeFile(join(artifactRoot, 'blind-review-rubric.md'), [
+    '# Blind trajectory review',
+    '',
+    'Review only the `*-arm-*.json` packets. Do not inspect system prompts, raw sessions, analyses, report files, or `blind-map.json` before submitting scores.',
+    '',
+    'For every packet, score each dimension from 0 to 3 and cite concrete trajectory evidence:',
+    '',
+    '- correctness/evidence: 0 incorrect, 1 major gaps, 2 substantially correct, 3 correct and well-supported;',
+    '- efficiency: 0 severe waste, 1 material avoidable work, 2 minor waste, 3 direct and proportionate;',
+    '- clarity/confidence: 0 confused or unjustifiably blocked, 1 materially hesitant, 2 minor unnecessary caution, 3 clear with evidence-calibrated confidence.',
+    '',
+    'Do not reward or penalize a packet for using one or multiple calls by itself. Flag repeated reads, repeated source, unnecessary retries, unsupported claims, unnecessary user questions, and excessive output separately.',
+    '',
+  ].join('\n'))
+  await writeFile(join(artifactRoot, 'report.json'), JSON.stringify(report, null, 2) + '\n')
+  await writeFile(join(artifactRoot, 'report.md'), reportMarkdown(report))
+  return report
+}
+
 export async function main(env = process.env) {
   const modelRuntime = requiredModelRuntime(env, 'DSH_PTC_AB')
   const host = await preflightHeadlessHost(repoRoot, { env })
@@ -636,65 +926,12 @@ export async function main(env = process.env) {
   try {
     await mkdir(scratchRoot, { recursive: true })
     await materializeFixture(fixtureDir, frozenWorkspace)
-    const overlays = {
-      plugin: join(artifactRoot, 'plugin.patch.yml'),
-      baseline: join(artifactRoot, 'baseline.patch.yml'),
-    }
-    const install = await runProcess('pwsh.exe', [
-      '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
-      '-File', windowsPath(join(repoRoot, 'scripts', 'install-dev.ps1')), runtime.profile,
-    ], { env: { ...env, DSH_DEV_INSTALL_NO_PAUSE: '1' }, timeoutMs: runtime.wallMs })
-    await writeFile(join(artifactRoot, 'install.stdout.log'), install.stdout)
-    await writeFile(join(artifactRoot, 'install.stderr.log'), install.stderr)
-    if (install.code !== 0) throw new Error(`plugin installation failed; see ${relative(repoRoot, artifactRoot)}`)
-
-    const baseDump = await runProcess('pwsh.exe', [
-      '-NoLogo', '-NoProfile', '-Command',
-      `& dsh --profile '${powershellPath(runtime.profile)}' --dump-config`,
-    ], { env, timeoutMs: runtime.wallMs })
-    await writeFile(join(artifactRoot, 'base-config.stdout.yml'), baseDump.stdout)
-    await writeFile(join(artifactRoot, 'base-config.stderr.log'), baseDump.stderr)
-    if (baseDump.code !== 0 || baseDump.stderr.trim() !== '') {
-      throw new Error(`base DSH config preflight failed; see ${relative(repoRoot, artifactRoot)}`)
-    }
-    const baseRows = parseConfigDump(baseDump.stdout, 'base DSH config')
-    await writeFile(overlays.plugin, headlessConfigPatch(baseRows, runtime))
-    await writeFile(overlays.baseline, headlessConfigPatch(baseRows, runtime, { disablePtcPlus: true }))
-    const resolvedConfigs = {}
-    for (const variant of ['plugin', 'baseline']) {
-      const dump = await runProcess('pwsh.exe', [
-        '-NoLogo', '-NoProfile', '-Command',
-        `& dsh --profile '${powershellPath(runtime.profile)}' --patch '${powershellPath(windowsPath(overlays[variant]))}' --dump-config`,
-      ], { env, timeoutMs: runtime.wallMs })
-      await writeFile(join(artifactRoot, `${variant}-config.stdout.yml`), dump.stdout)
-      await writeFile(join(artifactRoot, `${variant}-config.stderr.log`), dump.stderr)
-      if (dump.code !== 0 || dump.stderr.trim() !== '') {
-        throw new Error(`${variant} DSH config preflight failed; see ${relative(repoRoot, artifactRoot)}`)
-      }
-      resolvedConfigs[variant] = parseConfigDump(dump.stdout, `${variant} DSH config`)
-    }
-    const configPreflight = validateConfigPair(resolvedConfigs.plugin, resolvedConfigs.baseline, runtime)
-    await writeFile(join(artifactRoot, 'manifest.json'), JSON.stringify({
-      runtime,
-      fixture,
-      tasks,
-      configPreflight,
-    }, null, 2) + '\n')
+    const overlays = await preflightConfigs({ env, runtime, artifactRoot, tasks, fixture })
     if (env.DSH_PTC_AB_CONFIG_ONLY === '1') {
       console.log(`A/B config preflight completed; artifacts: ${relative(repoRoot, artifactRoot)}`)
       return
     }
-    const keylessCommand = npmCliCommand(['run', 'verify'])
-    const keyless = await runProcess(keylessCommand.executable, keylessCommand.args, {
-      cwd: repoRoot,
-      env,
-      timeoutMs: runtime.wallMs,
-    })
-    await writeFile(join(artifactRoot, 'keyless.stdout.log'), keyless.stdout)
-    await writeFile(join(artifactRoot, 'keyless.stderr.log'), keyless.stderr)
-    if (keyless.code !== 0 || keyless.timedOut) {
-      throw new Error(`keyless request-contract preflight failed; see ${relative(repoRoot, artifactRoot)}/keyless.*.log`)
-    }
+    await preflightKeyless({ env, runtime, artifactRoot })
     const oracles = new Map()
     for (const task of tasks) oracles.set(task.id, await taskOracle(task, frozenWorkspace))
 
@@ -769,176 +1006,14 @@ export async function main(env = process.env) {
         await writeFile(join(directory, 'analysis.json'), JSON.stringify(analysis, null, 2) + '\n')
         const session = { taskId: task.id, prompt: task.prompt, replicate, variant, directory, ...analysis }
         sessions.push(session)
-      processes.push({ taskId: task.id, replicate, variant, phase, ...process })
+        processes.push({ taskId: task.id, replicate, variant, phase, ...process })
         return session
       })
     }
-    const pairSpecs = tasks.flatMap(task => Array.from(
-      { length: runtime.replicates },
-      (_unused, index) => ({ task, replicate: index + 1 }),
-    ))
-    const runPair = async ({ task, replicate }) => {
-      const pluginFirst = Number.parseInt(sha256(`${runId}:${task.id}:${replicate}:order`).slice(0, 2), 16) % 2 === 0
-      const order = pluginFirst ? ['plugin', 'baseline'] : ['baseline', 'plugin']
-      const result = {}
-      for (let phase = 0; phase < order.length; phase += 1) {
-        const variant = order[phase]
-        result[variant] = await runArm(task, replicate, variant, phase + 1)
-      }
-      return { task, replicate, ...result }
-    }
-    const orderedPairSpecs = orderCanaryFirst(pairSpecs, spec => spec.task.canary === true || spec.task.validator !== 'blind')
-    const pairOutcomes = await runCanaryThenConcurrent(orderedPairSpecs, runtime.concurrency, async (spec) => {
-      try {
-        return await runPair(spec)
-      } catch (error) {
-        return { task: spec.task, replicate: spec.replicate, error }
-      }
-    }, async (firstPair) => {
-      if (firstPair.error !== undefined) throw firstPair.error
-      const injectionSignature = variant => JSON.stringify(firstPair[variant].prompt.injections.map(item => ({
-        source: item.source,
-        chars: item.chars,
-        normalizedSha256: item.normalizedSha256,
-      })))
-      const failures = [
-        ...firstPair.plugin.failures,
-        ...firstPair.baseline.failures,
-        ...(firstPair.plugin.taskValidation?.machineEvidence?.status === 'pass'
-          ? [] : [`plugin canary machine evidence is ${firstPair.plugin.taskValidation?.machineEvidence?.status ?? 'missing'}`]),
-        ...(firstPair.baseline.taskValidation?.machineEvidence?.status === 'pass'
-          ? [] : [`baseline canary machine evidence is ${firstPair.baseline.taskValidation?.machineEvidence?.status ?? 'missing'}`]),
-        ...(injectionSignature('plugin') === injectionSignature('baseline')
-          ? []
-          : ['initial injections differ across the preflight pair']),
-      ]
-      await writeFile(join(artifactRoot, 'first-pair-preflight.json'), JSON.stringify({
-        taskId: firstPair.task.id,
-        replicate: firstPair.replicate,
-        failures,
-        pluginInjections: firstPair.plugin.prompt.injections,
-        baselineInjections: firstPair.baseline.prompt.injections,
-      }, null, 2) + '\n')
-      if (failures.length > 0) {
-        throw new Error(`first A/B pair failed model-visible context preflight; see ${relative(repoRoot, artifactRoot)}`)
-      }
+    await runAllPairs({ tasks, runtime, runId, artifactRoot, runArm })
+    const report = await assembleReport({
+      tasks, runtime, fixture, fixtureDir, sessions, processes, runId, artifactRoot,
     })
-    const pairErrors = pairOutcomes.flatMap(outcome => outcome.error === undefined ? [] : [outcome.error])
-    if (pairErrors.length > 0) {
-      throw new AggregateError(pairErrors, `${pairErrors.length} A/B pair(s) failed before report generation`)
-    }
-
-    const pairs = []
-    const blindMap = []
-    for (const task of tasks) {
-      for (let replicate = 1; replicate <= runtime.replicates; replicate += 1) {
-        const plugin = sessions.find(item => item.taskId === task.id && item.replicate === replicate && item.variant === 'plugin')
-        const baseline = sessions.find(item => item.taskId === task.id && item.replicate === replicate && item.variant === 'baseline')
-        const process = Object.fromEntries(['plugin', 'baseline'].map(variant => [
-          variant,
-          processes.find(item => item.taskId === task.id && item.replicate === replicate && item.variant === variant),
-        ]))
-        pairs.push({ taskId: task.id, prompt: task.prompt, replicate, plugin, baseline, process, delta: trajectoryDelta(plugin, baseline) })
-        const flip = Number.parseInt(sha256(`${runId}:${task.id}:${replicate}`).slice(0, 2), 16) % 2 === 0
-        const arms = flip ? [plugin, baseline] : [baseline, plugin]
-        for (let index = 0; index < arms.length; index += 1) {
-          const label = `${task.id}-r${replicate}-arm-${index + 1}`
-          const arm = arms[index]
-          const packet = createBlindPacket(label, task.prompt, arm)
-          await writeFile(join(artifactRoot, `${label}.json`), JSON.stringify(packet, null, 2) + '\n')
-          blindMap.push({ label, taskId: task.id, replicate, variant: arm.variant })
-        }
-      }
-    }
-    const contextPairingFailures = []
-    for (const variant of ['plugin', 'baseline']) {
-      const hashes = new Set(sessions.filter(session => session.variant === variant)
-        .map(session => session.prompt.normalizedSha256))
-      if (hashes.size !== 1) contextPairingFailures.push(`${variant} system prompt varied across sessions`)
-    }
-    for (const pair of pairs) {
-      const injectionSignature = session => JSON.stringify(session.prompt.injections.map(item => ({
-        source: item.source,
-        chars: item.chars,
-        normalizedSha256: item.normalizedSha256,
-      })))
-      if (injectionSignature(pair.plugin) !== injectionSignature(pair.baseline)) {
-        contextPairingFailures.push(`${pair.taskId}/r${pair.replicate}: initial injections differ across arms`)
-      }
-    }
-    const exemplar = pairs[0]
-    const pluginSystem = normalizedForWorkspace(
-      exemplar.plugin.system ?? await readFile(join(exemplar.plugin.directory, 'system.txt'), 'utf8'),
-      exemplar.plugin.session.cwd,
-    )
-    const baselineSystem = normalizedForWorkspace(
-      exemplar.baseline.system ?? await readFile(join(exemplar.baseline.directory, 'system.txt'), 'utf8'),
-      exemplar.baseline.session.cwd,
-    )
-    const pluginParagraphs = paragraphs(pluginSystem)
-    const baselineParagraphs = paragraphs(baselineSystem)
-    const promptComparison = {
-      pluginChars: exemplar.plugin.prompt.chars,
-      baselineChars: exemplar.baseline.prompt.chars,
-      deltaChars: exemplar.plugin.prompt.chars - exemplar.baseline.prompt.chars,
-      pluginOnlyParagraphs: multisetDifference(pluginParagraphs, baselineParagraphs),
-      baselineOnlyParagraphs: multisetDifference(baselineParagraphs, pluginParagraphs),
-      pluginDuplicateParagraphs: exemplar.plugin.prompt.duplicateParagraphs,
-      baselineDuplicateParagraphs: exemplar.baseline.prompt.duplicateParagraphs,
-      sharedInitialInjections: exemplar.plugin.prompt.injections,
-    }
-    const report = {
-      runtime,
-      fixture: {
-        name: fixture.fixtureName,
-        version: fixture.fixtureVersion,
-        contentSha256: fixture.contentSha256,
-        path: relative(repoRoot, fixtureDir),
-      },
-      tasks,
-      promptComparison,
-      contextPairingFailures,
-      aggregate: {
-        plugin: aggregateTrajectories(sessions, 'plugin'),
-        baseline: aggregateTrajectories(sessions, 'baseline'),
-      },
-      sessions: sessions.map(({ directory, ...session }) => ({ ...session, directory: relative(artifactRoot, directory) })),
-      pairs: pairs.map(pair => ({
-        taskId: pair.taskId,
-        prompt: pair.prompt,
-        replicate: pair.replicate,
-        process: pair.process,
-        delta: pair.delta,
-        plugin: pair.plugin,
-        baseline: pair.baseline,
-      })),
-      infrastructureFailures: sessions.flatMap(session => session.failures.map(failure => `${session.taskId}/r${session.replicate}/${session.variant}: ${failure}`)),
-      taskFailures: sessions.filter(session => session.taskValidation?.machineEvidence?.status === 'fail')
-        .map(session => `${session.taskId}/r${session.replicate}/${session.variant}`),
-    }
-    report.infrastructureFailures.push(...contextPairingFailures)
-    Object.assign(report, pendingBlindApproval(
-      report.infrastructureFailures,
-      report.taskFailures,
-      blindMap.length,
-    ))
-    await writeFile(join(artifactRoot, 'blind-map.json'), JSON.stringify(blindMap, null, 2) + '\n')
-    await writeFile(join(artifactRoot, 'blind-review-rubric.md'), [
-      '# Blind trajectory review',
-      '',
-      'Review only the `*-arm-*.json` packets. Do not inspect system prompts, raw sessions, analyses, report files, or `blind-map.json` before submitting scores.',
-      '',
-      'For every packet, score each dimension from 0 to 3 and cite concrete trajectory evidence:',
-      '',
-      '- correctness/evidence: 0 incorrect, 1 major gaps, 2 substantially correct, 3 correct and well-supported;',
-      '- efficiency: 0 severe waste, 1 material avoidable work, 2 minor waste, 3 direct and proportionate;',
-      '- clarity/confidence: 0 confused or unjustifiably blocked, 1 materially hesitant, 2 minor unnecessary caution, 3 clear with evidence-calibrated confidence.',
-      '',
-      'Do not reward or penalize a packet for using one or multiple calls by itself. Flag repeated reads, repeated source, unnecessary retries, unsupported claims, unnecessary user questions, and excessive output separately.',
-      '',
-    ].join('\n'))
-    await writeFile(join(artifactRoot, 'report.json'), JSON.stringify(report, null, 2) + '\n')
-    await writeFile(join(artifactRoot, 'report.md'), reportMarkdown(report))
     if (report.infrastructureFailures.length > 0 || report.taskFailures.length > 0) {
       console.error(`A/B trajectories completed with failures; see ${relative(repoRoot, artifactRoot)}/report.md`)
       process.exitCode = 1

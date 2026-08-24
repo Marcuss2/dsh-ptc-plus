@@ -1,15 +1,47 @@
 # Client UI
 
-`0.1.0` 不提供插件自有 Client UI。PTC Plus 的产品表面是 DSH PTC 模式中的 `run_code` cell、
-用于局部修正最近可编辑 cell 的 `edit_run_code`、输出、诊断和 `repl.state`。增加设置卡片不会改善核心连续求值
-路径，却会引入独立的 React/client bundle、Host settings namespace、额外依赖和第二套验收面。
+PTC Plus 现在提供 DSH Web/Desktop 的**插件设置卡片**，位置在 Settings → Plugin configuration。
 
-因此 package manifest 不声明 `dsh.client`，不导出 `./client`，bundle patch 也不注册 client half。文档与截图应展示真实 DSH Web 会话，而不是一个只复述配置的装饰面板。
+## 设置命名空间
 
-只有出现下列需求之一时才重新评估：
+Host half 通过 DSH 公共 `settings` 服务注册命名空间 `ptc-plus`。字段清单、默认值和校验来自 `internal/config-spec.js`，
+由 `index.js` 的 `Config` schema 与设置注册共用；client half 构建时把同一份字段清单打进 bundle，不在 UI 中复制默认值。
 
-- 用户需要在 UI 中观察或控制无法通过现有 PTC 模式表达的 session 状态；
-- DSH 稳定提供 settings namespace、client slot 与第三方 bundle 构建/测试契约；
-- 能在支持的 Web profile 中完成构建、加载、交互和截图验收。
+## 可用设置
 
-重新评估时，Host half 必须使用 DSH 公共 settings API，Client half 必须遵守官方 `dsh.client` 与 `./client` bundle contract；依赖缺失不能使 Host plugin 加载失败。配置 schema 必须复用 runtime 的同一事实源，不能在 UI 中复制默认值和校验逻辑。
+| 分组 | 字段 | 说明 |
+| --- | --- | --- |
+| 开关 | `enabled` | 关闭后不注册 `run_code`/`edit_run_code`、不修改 system prompt、不创建 session runtime；只保留设置 UI。 |
+| Cordis | `cordisToolsEnabled` | 默认关闭；开启后为 PTC agent 加入创造模式使用的官方 Cordis 工具与指引。 |
+| 计算 | `computeMs` / `maxWallMs` | 单 cell CPU 与墙钟预算。 |
+| 输出 | `maxOutputBytes` / `maxValueNodes` / `maxValueEdges` / `maxValueArrayLength` / `maxValueBigIntDigits` | Value Graph 与输出字节预算。 |
+| Worker | `maxOldGenerationSizeMb` / `maxNestedRunCodeDepth` | kernel worker 内存与嵌套执行深度。 |
+| 行为 | `canonicalizeToolCalls` / `looseTopLevelRedeclarations` / `durableReplay` | REPL 与 transport 策略。 |
+| 模块 | `autoRewriteImports` / `autoStripExports` / `autoSplitRedeclarations` | AST 重写开关。 |
+| 提示 | `tipsEnabled` / `tipCooldownMessages` / `tipEscalationFailures` | 恢复提示策略。 |
+
+## enabled 开关与启用标识
+
+所有字段都是即时生效设置：Host 在 settings watch 中安装、卸载或重配置 runtime。`maxOldGenerationSizeMb` 在活动 worker 存在时因 Node 的创建期限制而拒绝并回滚，其他可重配置字段照常即时应用。关闭后唯一的宿主副作用是注册 settings 命名空间，
+保证设置卡片仍然可读；此时只有 `enabled` 可写，其他控件被禁用。运行时重配置保留 session-bound REPL 和已有 binding，失败时回滚到上一次已应用值。
+
+`cordisToolsEnabled` 默认关闭并即时生效。它不切换 preset，只把官方 Cordis 工具加入或移出 PTC agent 的 `tools.*`；顶层仍为 `run_code` / `edit_run_code`，普通 agent 不继承。Host 缺少所需服务时，启用会失败并回滚。完整工具清单与运行要求见 [运行时参考](runtime-reference.md)。
+
+设置卡片折叠头部显示 `PTC Plus`、`PTC 模式的会话级 TypeScript REPL。`、启用状态和可访问的展开/收起名称；稳定 REPL 指引不承载 UI 品牌名。启用且会话选择 `code` preset 时，`conversation.session.header.actions` 额外显示 `PTC Plus` 指示器。关闭时不注入任何 PTC 指引或工具 surface。
+
+live 配置若因宿主能力缺失或 runtime 安装/重配置失败，会先回滚所有已创建或更新的 owner，再把持久设置回写为上一次已应用值；回滚写入失败时 Host 记录 activation diagnostic，避免静默把配置显示成不存在的 runtime。
+
+## Client bundle
+
+浏览器入口为 `src/client.js`，构建为 `client.js`：
+
+```sh
+npm run build
+```
+
+`package.json` 声明 `dsh.client` 与 `./client` export。`npm run build` 从 `src/client.js` 生成 `client.js`，`npm run build:check` 比较确定性产物；`prepack` 会阻止陈旧 bundle 发布。Client half 只依赖 DSH 注入面提供的 settings、session、slot 与 UI primitive 模块。
+
+## 回退
+
+如果 DSH settings service 不可用，Host half 不会因缺少设置服务而加载失败：设置卡片不可用时直接回退为 composition `config`，
+`enabled` 默认开启，原有运行时行为保持不变。

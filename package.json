@@ -6,10 +6,13 @@
   "main": "./index.js",
   "exports": {
     ".": "./index.js",
+    "./client": "./client.js",
     "./package.json": "./package.json"
   },
   "files": [
     "index.js",
+    "client.js",
+    "src",
     "internal",
     "docs",
     "assets/dsh-ptc-plus-banner.webp",
@@ -26,16 +29,22 @@
     "@babel/code-frame": "^7.29.7",
     "@babel/parser": "^7.29.0",
     "@babel/traverse": "^7.29.0",
+    "@deepseek-ai/dsh-settings": "*",
+    "@deepseek-ai/dsh-tool-cordis": "*",
     "@deepseek-ai/schemastery": "^3.18.1",
     "acorn": "^8.15.0"
   },
   "scripts": {
+    "build": "node scripts/client-bundle.mjs build",
+    "build:check": "node scripts/client-bundle.mjs check",
+    "prepack": "npm run build:check",
     "hooks:install": "node scripts/review-findings.mjs install-hook",
     "review:new": "node scripts/review-findings.mjs create",
     "review:validate": "node scripts/review-findings.mjs validate",
     "review:gate": "node scripts/review-findings.mjs gate",
+    "session:migrate": "node scripts/migrate-session-log.mjs",
     "coverage": "node --test --experimental-test-module-mocks --experimental-test-coverage --test-concurrency=1 --test-coverage-include=\"index.js\" --test-coverage-include=\"internal/*.js\" --test-coverage-lines=100 --test-coverage-branches=95 --test-coverage-functions=100 \"test/*.test.js\"",
-    "verify": "npm run review:validate && node --check index.js && node --check internal/kernel-worker.js && node --check scripts/expensive-headless-acceptance.mjs && node --check scripts/ab-headless-trajectories.mjs && npm run coverage",
+    "verify": "npm run review:validate && npm run build:check && node --check index.js && node --check internal/kernel-worker.js && node --check scripts/migrate-session-log.mjs && node --check scripts/expensive-headless-acceptance.mjs && node --check scripts/ab-headless-trajectories.mjs && npm run coverage",
     "check": "node scripts/review-findings.mjs check",
     "test:expensive": "node scripts/expensive-headless-acceptance.mjs",
     "test:ab": "node scripts/ab-headless-trajectories.mjs"
@@ -60,9 +69,23 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "external": [
+        "react"
+      ],
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-settings-plugins",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ]
     }
   },
   "devDependencies": {
+    "esbuild": "0.28.2",
     "yaml": "^2.9.0"
   }
 }

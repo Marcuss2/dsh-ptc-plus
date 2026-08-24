@@ -5,7 +5,7 @@ import { isAbsolute, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import test from 'node:test'
 import { Config } from '../index.js'
-import { normalizeJournal } from '../internal/session-journal.js'
+import { RECOVERY_BOUNDARY_KEY, normalizeJournal } from '../internal/session-journal.js'
 import { SessionRuntime } from '../internal/session-runtime.js'
 import { decodeValue, encodeValue, renderValueWire } from '../internal/value-wire.js'
 import { JOURNAL_POLICY, appendOnlySession, appendRunCodeEvents, fixture } from './plugin-fixture.js'
@@ -362,8 +362,8 @@ test('restores one imported binding catalog before live and cold continuation', 
 })
 
 test('contracts a broken replay node and continues the current request', async (t) => {
-  const state = fixture({ computeMs: 20, maxWallMs: 1_000 })
-  t.after(() => state.dispose())
+  const runtime = new SessionRuntime({ computeMs: 20, maxWallMs: 1_000 })
+  t.after(() => runtime.dispose())
   const events = []
   const session = appendOnlySession('replay-timeout', events)
   appendRunCodeEvents(events, 'timed-out-history', 'for (;;) {}', {
@@ -385,11 +385,34 @@ test('contracts a broken replay node and continues the current request', async (
     },
   })
 
-  const result = await state.run(session.id, 'return 1', {}, { session })
-  assert.equal(result.value, 1)
-  assert.match(result.logs[0], /Restored the durable head and skipped 1/)
-  const boundary = session.events.find(event => event.type === 'ptc-plus/recovery-boundary')
-  assert.deepEqual(boundary?.data, { failedCallSeq: 0, frontierCallSeq: null })
+  const currentCallSeq = events.length
+  events.push({
+    seq: currentCallSeq,
+    type: 'tool/call',
+    data: {
+      callId: 'current-after-timeout',
+      name: 'run_code',
+      arguments: JSON.stringify({ code: 'return 1', description: 'current' }),
+    },
+  })
+  const execution = await runtime.runTentative(
+    { id: session.id, session, callId: 'current-after-timeout' },
+    { program: 'return 1', bindings: [], signal: new AbortController().signal },
+  )
+  runtime.finalize(execution.settlement, true)
+  assert.equal(execution.result.value, 1)
+  assert.match(execution.result.logs[0], /Restored the durable head and skipped 1/)
+  const resultMeta = {
+    dshPtcPlus: normalizeJournal(execution.settlement.journal),
+    [RECOVERY_BOUNDARY_KEY]: execution.settlement.recoveryBoundaries,
+  }
+  events.push({
+    seq: currentCallSeq + 1,
+    type: 'tool/result',
+    sourceEventSeqs: [currentCallSeq],
+    data: { meta: resultMeta },
+  })
+  assert.deepEqual(resultMeta[RECOVERY_BOUNDARY_KEY], [{ failedCallSeq: 0, frontierCallSeq: null }])
 })
 
 test('contracts a live derived edit node by its persisted outer call sequence', async (t) => {
@@ -415,12 +438,13 @@ test('contracts a live derived edit node by its persisted outer call sequence', 
       callId: name === 'run_code' ? callId : `${callId}:derived`,
       ...(name === 'edit_run_code' ? { persistedCallSeq: call.seq } : {}),
     }
-    const result = await runtime.run(context, {
+    const execution = await runtime.runTentative(context, {
       program,
       bindings: [],
       signal: new AbortController().signal,
     })
-    runtime.finalize(context, true)
+    runtime.finalize(execution.settlement, true)
+    const result = execution.result
     events.push(Object.freeze({
       type: 'tool/result',
       seq: events.length,
@@ -428,7 +452,10 @@ test('contracts a live derived edit node by its persisted outer call sequence', 
       sourceEventSeqs: [call.seq],
       data: {
         meta: {
-          dshPtcPlus: normalizeJournal(context.journal),
+          dshPtcPlus: normalizeJournal(execution.settlement.journal),
+          ...(execution.settlement.recoveryBoundaries === undefined ? {} : {
+            [RECOVERY_BOUNDARY_KEY]: execution.settlement.recoveryBoundaries,
+          }),
           ...(name === 'edit_run_code' ? {
             dshPtcPlusEdit: { targetCallSeq: options.targetCallSeq },
             dshPtcPlusDerivedRun: { code: program, description: 'derived edit' },
@@ -436,7 +463,7 @@ test('contracts a live derived edit node by its persisted outer call sequence', 
         },
       },
     }))
-    return { call, context, result }
+    return { call, context, result, kernel: execution.settlement.kernel }
   }
 
   const parent = await executeConfirmed('live-parent', 'const stableHead = 3')
@@ -452,20 +479,20 @@ test('contracts a live derived edit node by its persisted outer call sequence', 
   )
   assert.equal(child.result.value, 7)
   assert.deepEqual(
-    child.context.kernel.history.nodes.map(node => node.callSeq),
+    child.kernel.history.nodes.map(node => node.callSeq),
     [parent.call.seq, child.call.seq],
   )
 
-  const childNode = child.context.kernel.history.nodes[1]
-  child.context.kernel.history.nodes[1] = Object.freeze({
+  const childNode = child.kernel.history.nodes[1]
+  child.kernel.history.nodes[1] = Object.freeze({
     ...childNode,
     journal: normalizeJournal({
       ...childNode.journal,
       completion: { kind: 'return', hasValue: true, value: encodeValue(999) },
     }),
   })
-  await child.context.kernel.client.reset(child.context.kernel.client.worker)
-  child.context.kernel.rollbackToDurable()
+  await child.kernel.client.reset(child.kernel.client.worker)
+  child.kernel.rollbackToDurable()
 
   const fresh = await executeConfirmed(
     'live-fresh',
@@ -477,13 +504,12 @@ return { stableHead, failedType: typeof failedHead, freshHead }`,
     failedType: 'undefined',
     freshHead: 13,
   })
-  const boundary = events.find(event => event.type === 'ptc-plus/recovery-boundary')
-  assert.deepEqual(boundary?.data, {
+  const boundary = events.find(event => event.data?.meta?.[RECOVERY_BOUNDARY_KEY] !== undefined)
+  assert.deepEqual(boundary?.data.meta[RECOVERY_BOUNDARY_KEY], [{
     failedCallSeq: child.call.seq,
     frontierCallSeq: parent.call.seq,
-  })
-  assert.ok(boundary.seq > fresh.call.seq)
-  assert.ok(boundary.seq < events.at(-1).seq)
+  }])
+  assert.equal(boundary.seq, fresh.call.seq + 1)
 
   const restarted = new SessionRuntime({ computeMs: 100, maxWallMs: 1_000 })
   t.after(() => restarted.dispose())
@@ -581,7 +607,7 @@ test('rejects a malformed recovery boundary before executing the current cell', 
     },
   )
   assert.equal(result.error.kind, 'recovery')
-  assert.match(result.error.message, /invalid dsh-ptc-plus recovery boundary event sequence/)
+  assert.match(result.error.message, /legacy recovery boundary requires migration/)
   assert.equal(runtime.kernels.has(session.id), false)
 })
 
@@ -637,4 +663,68 @@ test('attaches post-recovery cells to the verified frontier across restarts', as
     logs: [],
     value: [3, 7],
   })
+})
+
+test('requires exact recovery boundaries before confirming a contracted cell', async (t) => {
+  const mutations = [
+    meta => {
+      const changed = { ...meta }
+      delete changed[RECOVERY_BOUNDARY_KEY]
+      return changed
+    },
+    meta => ({
+      ...meta,
+      [RECOVERY_BOUNDARY_KEY]: [{ failedCallSeq: 99, frontierCallSeq: null }],
+    }),
+    meta => ({ ...meta, [RECOVERY_BOUNDARY_KEY]: 'invalid' }),
+  ]
+  for (const [index, mutate] of mutations.entries()) {
+    const events = []
+    const session = appendOnlySession(`boundary-confirmation-${index}`, events)
+    appendRunCodeEvents(events, `broken-${index}`, 'for (;;) {}', {
+      meta: {
+        dshPtcPlus: normalizeJournal({
+          version: 3,
+          bindingMode: 'loose',
+          rewritePolicy: JOURNAL_POLICY,
+          status: 'durable',
+          calls: [],
+          operations: [],
+          confirms: [],
+          diagnostics: [],
+          completion: { kind: 'throw', error: { kind: 'timeout', message: 'recorded timeout' } },
+        }),
+      },
+    })
+    const state = fixture({ computeMs: 20, maxWallMs: 1_000 })
+    t.after(() => state.dispose())
+    const contracted = await state.executeRun(
+      session.id,
+      `const boundaryValue${index} = ${index + 1}`,
+      {},
+      { session, finalizeResult: result => ({ ...result, meta: mutate(result.meta) }) },
+    )
+    assert.equal(contracted.raw.error, undefined)
+    const dependent = await state.runDurable(
+      session.id,
+      `return boundaryValue${index}`,
+      {},
+      { session },
+    )
+    assert.equal(dependent.meta.dshPtcPlus.status, 'volatile')
+  }
+
+  const state = fixture()
+  t.after(() => state.dispose())
+  await state.runDurable('unexpected-boundary', 'const unexpectedBoundary = 1', {}, {
+    finalizeResult: result => ({
+      ...result,
+      meta: {
+        ...result.meta,
+        [RECOVERY_BOUNDARY_KEY]: [{ failedCallSeq: 1, frontierCallSeq: null }],
+      },
+    }),
+  })
+  const dependent = await state.runDurable('unexpected-boundary', 'return unexpectedBoundary')
+  assert.equal(dependent.meta.dshPtcPlus.status, 'volatile')
 })

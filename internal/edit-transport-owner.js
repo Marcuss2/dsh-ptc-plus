@@ -3,10 +3,12 @@ import {
   DERIVED_RUN_KEY,
   EDIT_TARGET_KEY,
   JOURNAL_KEY,
+  RECOVERY_BOUNDARY_KEY,
   REWRITES_KEY,
   derivedEditResultsEqual,
   liveToolCallSeq,
   normalizeJournal,
+  normalizeRecoveryBoundaries,
   normalizeRewrites,
   validatedRewrites,
 } from './session-journal.js'
@@ -17,12 +19,39 @@ import { isRecord } from './record-utils.js'
 
 export const EDIT_RUN_CODE = 'edit_run_code'
 
+function unavailableDerivedResult(inner) {
+  if (inner?.isError !== true) {
+    throw new Error('ptc-plus: derived run_code result did not contain a valid execution journal')
+  }
+  return {
+    edited: false,
+    error: inner.error?.message ?? 'derived run_code did not enter the runtime',
+    logs: [],
+  }
+}
+
+function derivedEditResult(inner) {
+  const result = {
+    edited: true,
+    logs: Array.isArray(inner?.value?.logs) ? inner.value.logs : [],
+  }
+  if (inner?.isError === true) {
+    result.error = inner.error?.message ?? 'derived run_code execution failed'
+  } else if (inner?.value !== undefined && !isRecord(inner.value)) {
+    result.value = inner.value
+  } else if (inner?.value?.result !== undefined) {
+    result.value = inner.value.result
+  }
+  return result
+}
+
 export function createEditTransportOwner(ctx, {
   durableReplay,
   executeTentative,
   sessionId,
   toolSchemasForAgent,
 }) {
+  let currentDurableReplay = durableReplay
   const editExecutionMetadata = new WeakMap()
   const editClaims = new Map()
   const pendingSettlements = new Map()
@@ -54,6 +83,9 @@ export function createEditTransportOwner(ctx, {
     }
     if (derived.rewrites !== undefined) {
       meta[REWRITES_KEY] = normalizeRewrites(derived.rewrites)
+    }
+    if (derived.recoveryBoundaries !== undefined) {
+      meta[RECOVERY_BOUNDARY_KEY] = normalizeRecoveryBoundaries(derived.recoveryBoundaries)
     }
     return meta
   }
@@ -97,7 +129,7 @@ export function createEditTransportOwner(ctx, {
     if (typeof ctx.tools.execute !== 'function') {
       throw new Error('ptc-plus: DSH tools.execute is required for derived edit execution')
     }
-    const persistedCallSeq = durableReplay ? persistedTargetCallSeq : undefined
+    const persistedCallSeq = currentDurableReplay ? persistedTargetCallSeq : undefined
     const id = sessionId(agent)
     let claims = editClaims.get(id)
     if (claims === undefined) {
@@ -128,42 +160,19 @@ export function createEditTransportOwner(ctx, {
       const journalValue = isRecord(inner?.meta) && Object.hasOwn(inner.meta, JOURNAL_KEY)
         ? inner.meta[JOURNAL_KEY]
         : undefined
-      if (journalValue === undefined) {
-        if (inner?.isError !== true) {
-          throw new Error('ptc-plus: derived run_code result did not contain a valid execution journal')
-        }
-        return {
-          edited: false,
-          error: inner.error?.message ?? 'derived run_code did not enter the runtime',
-          logs: [],
-        }
-      }
-      let journal = normalizeJournal(journalValue)
-      if (journal.status === 'noop') journal = undefined
-      if (journal === undefined) {
-        if (inner?.isError !== true) {
-          throw new Error('ptc-plus: derived run_code result did not contain a valid execution journal')
-        }
-        return {
-          edited: false,
-          error: inner.error?.message ?? 'derived run_code did not enter the runtime',
-          logs: [],
-        }
-      }
+      const journal = journalValue === undefined ? undefined : normalizeJournal(journalValue)
+      if (journal === undefined || journal.status === 'noop') return unavailableDerivedResult(inner)
       const rewrites = validatedRewrites(inner.meta)
-      const value = {
-        edited: true,
-        logs: Array.isArray(inner?.value?.logs) ? inner.value.logs : [],
-        ...(inner?.isError === true
-          ? { error: inner.error?.message ?? 'derived run_code execution failed' }
-          : inner?.value !== undefined && !isRecord(inner.value)
-            ? { value: inner.value }
-            : inner?.value?.result === undefined ? {} : { value: inner.value.result }),
-      }
+      const recoveryBoundaries = isRecord(inner?.meta)
+        && Object.hasOwn(inner.meta, RECOVERY_BOUNDARY_KEY)
+        ? normalizeRecoveryBoundaries(inner.meta[RECOVERY_BOUNDARY_KEY])
+        : undefined
+      const value = derivedEditResult(inner)
       const derived = {
         targetCallSeq: target.callSeq,
         journal,
         rewrites,
+        recoveryBoundaries,
         code: edited.code,
         description: edited.description,
       }
@@ -193,6 +202,9 @@ export function createEditTransportOwner(ctx, {
 
   return Object.freeze({
     definition,
+    reconfigure(nextConfig) {
+      currentDurableReplay = nextConfig.durableReplay
+    },
     isInstalled(agent) {
       return installedScopes.has(agent)
     },
