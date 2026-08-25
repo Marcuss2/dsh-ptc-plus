@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 import {
   analyzeSession,
   armScratchPaths,
@@ -436,6 +437,13 @@ test('hashes fixture trees deterministically and excludes the manifest', async (
 })
 
 test('materializes stable fixture copies with identical bytes and dirty git state', async (t) => {
+  const repositoryRoot = fileURLToPath(new URL('..', import.meta.url))
+  const fixtureAttribute = execFileSync(
+    'git',
+    ['check-attr', 'eol', '--', 'fixtures/ab-node-project-v1/src/greeting.js'],
+    { cwd: repositoryRoot, encoding: 'utf8' },
+  ).trim()
+  assert.equal(fixtureAttribute, 'fixtures/ab-node-project-v1/src/greeting.js: eol: lf')
   const root = await mkdtemp(join(tmpdir(), 'ptc-ab-fixture-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   const left = join(root, 'left')

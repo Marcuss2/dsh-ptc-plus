@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { access, mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, rm, symlink } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import test from 'node:test'
@@ -9,6 +9,7 @@ import { normalizeJournal } from '../internal/session-journal.js'
 import { SessionRuntime } from '../internal/session-runtime.js'
 import { decodeValue, encodeValue, renderValueWire } from '../internal/value-wire.js'
 import { JOURNAL_POLICY, appendOnlySession, appendRunCodeEvents, fixture } from './plugin-fixture.js'
+import { assertSameFilesystemEntry } from './filesystem-identity.js'
 
 test('cold-replays predecessor journals with bindings and named states intact', async (t) => {
   const events = []
@@ -106,7 +107,6 @@ test('preserves recorded cwd while native paths retain filesystem identity', asy
   await mkdir(physicalCwd)
   const cwd = process.platform === 'win32' ? physicalCwd : join(root, 'alias')
   if (cwd !== physicalCwd) await symlink(physicalCwd, cwd, 'dir')
-  const nativeCwd = await realpath(cwd)
   t.after(() => rm(root, { recursive: true, force: true }))
   const state = fixture({ maxWallMs: 500 })
   t.after(() => state.dispose())
@@ -119,12 +119,13 @@ try { process.chdir('/') } catch (error) { chdirMessage = error.message }
 return { exposed: process.cwd(), native: fs.realpathSync('.'), resolved: path.resolve('.'), chdirMessage }
 `
   const observed = await state.executeRun(session.id, source, {}, { session })
-  assert.deepEqual(observed.raw.value, {
+  const { native, ...recordedSurfaces } = observed.raw.value
+  assert.deepEqual(recordedSurfaces, {
     exposed: cwd,
-    native: nativeCwd,
     resolved: cwd,
     chdirMessage: 'process.chdir is forbidden inside the REPL kernel',
   })
+  await assertSameFilesystemEntry(native, physicalCwd)
 
   const timedOut = await state.run(session.id, 'await new Promise(() => {})', {}, { session })
   assert.equal(timedOut.error.kind, 'timeout')

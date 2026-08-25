@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { access, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { assertSameFilesystemEntry } from './filesystem-identity.js'
 import { appendRunCodeEvents, fixture, ptcAgent } from './plugin-fixture.js'
 
 test('keeps REPL bindings isolated by session', async (t) => {
@@ -452,8 +453,6 @@ test('anchors path.resolve to the session cwd after process.cwd mutation', async
 test('uses the session cwd for child processes while preserving explicit cwd', async (t) => {
   const project = await mkdtemp(join(tmpdir(), 'dsh-ptc-plus-child-cwd-'))
   const explicit = await mkdtemp(join(tmpdir(), 'dsh-ptc-plus-child-explicit-'))
-  const nativeProject = await realpath(project)
-  const nativeExplicit = await realpath(explicit)
   const state = fixture()
   t.after(async () => {
     await state.dispose()
@@ -473,18 +472,21 @@ test('uses the session cwd for child processes while preserving explicit cwd', a
     'return { execFileCwd, execFileDefaultCwd, spawnCwd, execCwd, explicitCwd }',
   ].join('\n')
   const result = await state.run('child-process-cwd', source, {}, { session })
-  assert.deepEqual(result.value, {
-    execFileCwd: nativeProject,
-    execFileDefaultCwd: nativeProject,
-    spawnCwd: nativeProject,
-    execCwd: nativeProject,
-    explicitCwd: nativeExplicit,
-  })
+  assert.deepEqual(Object.keys(result.value), [
+    'execFileCwd',
+    'execFileDefaultCwd',
+    'spawnCwd',
+    'execCwd',
+    'explicitCwd',
+  ])
+  for (const member of ['execFileCwd', 'execFileDefaultCwd', 'spawnCwd', 'execCwd']) {
+    await assertSameFilesystemEntry(result.value[member], project)
+  }
+  await assertSameFilesystemEntry(result.value.explicitCwd, explicit)
 })
 
 test('injects session cwd into execFile callback overloads', async (t) => {
   const project = await mkdtemp(join(tmpdir(), 'dsh-ptc-plus-execfile-callback-'))
-  const nativeProject = await realpath(project)
   const state = fixture()
   t.after(async () => {
     await state.dispose()
@@ -497,12 +499,11 @@ test('injects session cwd into execFile callback overloads', async (t) => {
     "const observed = await new Promise((resolve, reject) => childProcess.execFile(process.execPath, ['-e', source], (error, stdout) => error === null ? resolve(stdout) : reject(error)))",
     'return observed',
   ].join('\n'), {}, { session })
-  assert.equal(result.value, nativeProject)
+  await assertSameFilesystemEntry(result.value, project)
 })
 
 test('preserves child-process promisify results while injecting the session cwd', async (t) => {
   const project = await mkdtemp(join(tmpdir(), 'dsh-ptc-plus-promisify-child-'))
-  const nativeProject = await realpath(project)
   const state = fixture()
   t.after(async () => {
     await state.dispose()
@@ -522,9 +523,23 @@ test('preserves child-process promisify results while injecting the session cwd'
     "try { await promisify(childProcess.exec)(JSON.stringify(process.execPath) + ' -e ' + JSON.stringify(failingSource)) } catch (error) { execError = { code: error.code, stdout: error.stdout, stderr: error.stderr } }",
     'return { execFileResult, execResult, execFileError, execError }',
   ].join('\n'), {}, { session })
-  assert.deepEqual(result.value, {
-    execFileResult: { stdout: nativeProject, stderr: '' },
-    execResult: { stdout: nativeProject, stderr: '' },
+  assert.deepEqual(Object.keys(result.value), [
+    'execFileResult',
+    'execResult',
+    'execFileError',
+    'execError',
+  ])
+  for (const member of ['execFileResult', 'execResult']) {
+    assert.deepEqual(Object.keys(result.value[member]), ['stdout', 'stderr'])
+  }
+  assert.equal(result.value.execFileResult.stderr, '')
+  assert.equal(result.value.execResult.stderr, '')
+  await assertSameFilesystemEntry(result.value.execFileResult.stdout, project)
+  await assertSameFilesystemEntry(result.value.execResult.stdout, project)
+  assert.deepEqual({
+    execFileError: result.value.execFileError,
+    execError: result.value.execError,
+  }, {
     execFileError: { code: 7, stdout: 'out', stderr: 'err' },
     execError: { code: 7, stdout: 'out', stderr: 'err' },
   })
