@@ -106,6 +106,61 @@ test('keeps edit selection model-owned when a partial cell may have caused an ef
   appendEditResult(session.events, 'effect-edit', effectCallSeq, definition.output.presentationMeta(effectArgs, replayed))
 })
 
+test('repairs a long parse-rejected cell without resending its source', async (t) => {
+  const events = [{ type: 'turn/start', seq: 0, data: {} }]
+  const session = { id: 'long-parse-edit', events }
+  const state = fixture({ computeMs: 10_000, maxWallMs: 10_000 })
+  t.after(() => state.dispose())
+  const agent = ptcAgent(session.id, session)
+  const signal = new AbortController().signal
+  await state.assemble(
+    { sections: [], contexts: [], variables: {}, tools: [state.runCodeDefinition] },
+    { agent, scope: agent, signal },
+  )
+
+  const longText = 'x'.repeat(2_100)
+  const rejectedCode = `const longOutput = \`${longText}
+model output \`program IR\` continues
+\`
+return longOutput.length`
+  const rejected = await state.runDurable(
+    session.id,
+    rejectedCode,
+    {},
+    { session, callId: 'long-parse' },
+  )
+  assert.equal(rejected.isError, true)
+  assert.equal(rejected.meta.dshPtcPlus.status, 'noop')
+  assert.equal(rejected.meta.dshPtcPlus.diagnostics[0].stateEffect, 'unchanged')
+  assert.match(rejected.error.message, /when edit_run_code is declared/)
+  assert.match(rejected.error.message, /instead of resending the full source/)
+  appendRunCodeEvents(events, 'long-parse', rejectedCode, rejected)
+
+  const editArgs = {
+    edits: [{ old_string: '`program IR`', new_string: '\\`program IR\\`' }],
+  }
+  const editCallSeq = appendEditCall(events, 'long-parse-edit', editArgs)
+  const edited = await state.ctx.tools.execute({
+    callId: 'long-parse-edit',
+    name: 'edit_run_code',
+    arguments: editArgs,
+    agent,
+    signal,
+  })
+  const expected = `${longText}\nmodel output \`program IR\` continues\n`
+  assert.equal(edited.isError, false)
+  assert.deepEqual(edited.value, { edited: true, logs: [], value: expected.length })
+  assert.equal(JSON.stringify(edited.value).includes(longText), false)
+  assert.equal(JSON.stringify(editArgs).includes(longText), false)
+  assert.equal(events.filter(event => event.type === 'tool/call' && event.data?.name === 'run_code').length, 1)
+  assert.equal(edited.meta.dshPtcPlusDerivedRun.code.length, rejectedCode.length + 2)
+  appendEditResult(events, 'long-parse-edit', editCallSeq, edited.meta)
+
+  assert.deepEqual(await state.run(session.id, 'return longOutput', {}, { session }), {
+    logs: [], value: expected,
+  })
+})
+
 function appendEditCall(events, callId, args) {
   const seq = events.length
   events.push({

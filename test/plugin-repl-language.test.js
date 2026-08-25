@@ -590,10 +590,16 @@ test('renders parse failures with a cell-relative code frame and unchanged state
   assert.equal(diagnostic.code, 'PTC-C001')
   assert.equal(diagnostic.phase, 'parse')
   assert.equal(diagnostic.stateEffect, 'unchanged')
+  assert.deepEqual(diagnostic.help, [
+    'this cell was not executed; when edit_run_code is declared for the current request, use it for a small syntax correction instead of resending the full source',
+  ])
   assert.deepEqual(diagnostic.source, { cell: 'current', start: { line: 1, column: 14 } })
   assert.deepEqual(observed.raw.logs, [])
   assert.match(observed.raw.error.message, /^error\[PTC-C001\]: cell could not be parsed:/)
   assert.match(observed.raw.error.message, /> 1 \| const value =\n    \|              \^/)
+  assert.match(observed.raw.error.message, /help: this cell was not executed; when edit_run_code is declared/)
+  assert.match(observed.raw.error.message, /instead of resending the full source/)
+  assert.doesNotMatch(observed.raw.error.message, /reuse (?:it|the existing bindings)/)
   assert.doesNotMatch(observed.raw.error.message, /\x1b\[/)
   assert.deepEqual(await state.run('parse-diagnostic', 'return typeof value'), {
     logs: [],

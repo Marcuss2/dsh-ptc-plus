@@ -95,7 +95,7 @@ Rewrites are recorded as `meta.dshPtcPlusRewrites` on the tool result (parallel 
 
 | Code | Meaning | State effect |
 | --- | --- | --- |
-| `PTC-C001` | The cell cannot be parsed | Not executed; REPL unchanged |
+| `PTC-C001` | The cell cannot be parsed | Not executed; REPL unchanged; use a declared `edit_run_code` for a small correction instead of resending the full source |
 | `PTC-C002` | Preflight rejected a kernel-control import | Not executed; REPL unchanged |
 | `PTC-N001` | Top-level binding conflict | Not executed; REPL unchanged |
 | `PTC-O001` | Unsupported or over-budget output | Cell executed; earlier mutations may exist |

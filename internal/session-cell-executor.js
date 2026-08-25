@@ -66,7 +66,9 @@ function parseDiagnostic(error, source) {
     ...(line !== undefined && line >= 1 && column !== undefined ? {
       source: { cell: 'current', start: { line, column } },
     } : {}),
-    help: ['repair the reported syntax and retry only this cell'],
+    help: [
+      'this cell was not executed; when edit_run_code is declared for the current request, use it for a small syntax correction instead of resending the full source',
+    ],
   })
 }
 
