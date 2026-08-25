@@ -37,6 +37,10 @@ function rewritePolicy(config) {
   }
 }
 
+function resolvedRuntimeConfig(config) {
+  return Object.freeze(resolveConfig(config))
+}
+
 function emptyHistory() {
   return { nodes: [], head: undefined, checkpoints: new Map(), volatileSuffix: [], available: true }
 }
@@ -72,11 +76,11 @@ class SessionKernel {
     this.sequence = 0
     this.tail = Promise.resolve()
     this.tentatives = new WeakMap()
+    this.workerReservations = new Set()
     this.cellExecutor = new SessionCellExecutor(this)
     this.client = new WorkerClient({
       workerUrl: WORKER_URL,
       cwd,
-      maxOldGenerationSizeMb: config.maxOldGenerationSizeMb,
       onMessage: message => this.cellExecutor.onMessage(message),
       onFailure: message => this.active?.resolve({
         logs: [], error: { kind: 'worker-exit', message },
@@ -86,18 +90,18 @@ class SessionKernel {
     this.disposed = false
   }
 
-  valueLimits() {
+  valueLimits(config = this.config) {
     return {
-      maxNodes: this.config.maxValueNodes,
-      maxEdges: this.config.maxValueEdges,
-      maxArrayLength: this.config.maxValueArrayLength,
-      maxBigIntDigits: this.config.maxValueBigIntDigits,
-      maxStringBytes: this.config.maxOutputBytes,
+      maxNodes: config.maxValueNodes,
+      maxEdges: config.maxValueEdges,
+      maxArrayLength: config.maxValueArrayLength,
+      maxBigIntDigits: config.maxValueBigIntDigits,
+      maxStringBytes: config.maxOutputBytes,
     }
   }
 
   assertReconfigurationAllowed(config) {
-    if (this.client.worker !== undefined
+    if ((this.client.workerLimit !== undefined || this.workerReservations.size > 0)
       && config.maxOldGenerationSizeMb !== this.config.maxOldGenerationSizeMb) {
       throw new Error(
         'ptc-plus: maxOldGenerationSizeMb cannot change while a session worker is active; retry after the session is disposed',
@@ -108,30 +112,35 @@ class SessionKernel {
   reconfigure(config) {
     this.assertReconfigurationAllowed(config)
     this.config = config
-    this.client.maxOldGenerationSizeMb = config.maxOldGenerationSizeMb
   }
 
-  rewritePolicy() {
-    return rewritePolicy(this.config)
+  reserveWorkerConfiguration(config) {
+    const reservation = Object.freeze({ maxOldGenerationSizeMb: config.maxOldGenerationSizeMb })
+    this.workerReservations.add(reservation)
+    return reservation
   }
 
-  run(request) {
-    const execute = () => this.execute(request)
+  releaseWorkerConfiguration(reservation) {
+    this.workerReservations.delete(reservation)
+  }
+
+  run(request, config = this.config) {
+    const execute = () => this.execute(request, config)
     const result = this.tail.then(execute, execute)
     this.tail = result.then(() => undefined, () => undefined)
     return result
   }
 
-  async execute(request) {
+  async execute(request, config) {
     const recoveryBoundaries = []
     const finishResult = result => recoveryBoundaries.length === 0
       ? result
       : { ...result, recoveryBoundaries: recoveryBoundaries.map(boundary => ({ ...boundary })) }
-    if (!this.replayed && this.config.durableReplay) {
+    if (!this.replayed && config.durableReplay) {
       let skipped = 0
       while (!this.replayed) {
         try {
-          await this.replayHistory(request)
+          await this.replayHistory(request, config)
           this.replayed = true
         } catch (error) {
           const worker = this.client.worker
@@ -186,7 +195,7 @@ class SessionKernel {
     const leadingDiagnostics = this.recoveryNotice === undefined ? [] : [this.recoveryNotice]
     this.recoveryNotice = undefined
     if (request.journal !== undefined) request.journal.diagnostics.push(...leadingDiagnostics)
-    const result = await this.cellExecutor.executeCell(request)
+    const result = await this.cellExecutor.executeCell(request, undefined, config)
     if (leadingDiagnostics.length > 0) {
       const rendered = leadingDiagnostics.map(item => renderDiagnostic(item, request.program))
       result.logs = [...rendered, ...result.logs]
@@ -203,12 +212,16 @@ class SessionKernel {
     return finishResult(result)
   }
 
-  async replayHistory(request) {
+  async replayHistory(request, config) {
     this.bindingCatalog = new BindingCatalog()
     const path = pathToHead(this.history)
     for (const node of path) {
       try {
-        const result = await this.cellExecutor.executeCell({ ...request, program: node.code, journal: undefined }, node.journal)
+        const result = await this.cellExecutor.executeCell(
+          { ...request, program: node.code, journal: undefined },
+          node.journal,
+          config,
+        )
         const completion = node.journal.completion
         if (result.error !== undefined && !['exception', 'invalid-output'].includes(result.error.kind)) {
           if (result.error.kind === 'abort') throw new ReplayCancelled(result)
@@ -384,7 +397,7 @@ function sessionOf(sessionContext) {
 
 export class SessionRuntime {
   constructor(config = {}, options = {}) {
-    this.config = resolveConfig(config)
+    this.config = resolvedRuntimeConfig(config)
     this.kernels = new Map()
     this.pendingNoops = new Map()
     this.settlements = new WeakSet()
@@ -399,7 +412,7 @@ export class SessionRuntime {
   }
 
   reconfigure(config) {
-    const resolved = resolveConfig(config)
+    const resolved = resolvedRuntimeConfig(config)
     const kernels = [...this.kernels.values()]
     for (const kernel of kernels) kernel.assertReconfigurationAllowed(resolved)
     for (const kernel of kernels) kernel.reconfigure(resolved)
@@ -409,6 +422,7 @@ export class SessionRuntime {
   async runTentative(sessionContext, request) {
     const completed = result => Object.freeze({ result, settlement: undefined })
     if (this.disposed) return completed({ logs: [], error: { kind: 'abort', message: 'PTC runtime disposed' } })
+    const cellConfig = this.config
     let bindingDescriptors
     try {
       bindingDescriptors = normalizeBindingDescriptors(request?.bindings)
@@ -423,7 +437,7 @@ export class SessionRuntime {
         && (!Number.isSafeInteger(persistedCallSeq) || persistedCallSeq < 0)) {
         throw new Error('persisted tool call sequence must be a non-negative safe integer')
       }
-      callSeq = this.config.durableReplay
+      callSeq = cellConfig.durableReplay
         ? persistedCallSeq ?? liveToolCallSeq(session, callId, 'run_code')
         : undefined
     } catch (error) {
@@ -433,14 +447,14 @@ export class SessionRuntime {
     if (kernel === undefined) {
       let history
       try {
-        history = this.config.durableReplay
+        history = cellConfig.durableReplay
           ? recoverJournal(session, callSeq)
           : emptyHistory()
       } catch (error) {
         return completed({ logs: [], error: { kind: 'recovery', message: `cannot reconstruct REPL from session log: ${messageOf(error)}` } })
       }
       kernel = new SessionKernel({
-        config: this.config,
+        config: cellConfig,
         history,
         cwd,
         session,
@@ -451,10 +465,16 @@ export class SessionRuntime {
     const journal = createJournal(
       /* c8 ignore next */
       this.pendingNoops.get(sessionId) ?? [],
-      this.config.looseTopLevelRedeclarations ? 'loose' : 'strict',
-      rewritePolicy(this.config),
+      cellConfig.looseTopLevelRedeclarations ? 'loose' : 'strict',
+      rewritePolicy(cellConfig),
     )
-    const result = await kernel.run({ ...request, journal, callSeq })
+    const workerReservation = kernel.reserveWorkerConfiguration(cellConfig)
+    let result
+    try {
+      result = await kernel.run({ ...request, journal, callSeq }, cellConfig)
+    } finally {
+      kernel.releaseWorkerConfiguration(workerReservation)
+    }
     const settlement = Object.freeze({
       journal,
       kernel,

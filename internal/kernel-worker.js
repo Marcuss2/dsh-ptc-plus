@@ -315,10 +315,17 @@ function installBindings(message) {
 
   for (const namespace of message.namespaces) {
     const view = Object.create(null)
+    const emptyObjectMembers = new Set(namespace.emptyObjectMembers ?? [])
     for (const member of namespace.members) {
       Object.defineProperty(view, member, {
         enumerable: true,
-        value: args => callHost(message.id, namespace.global, member, args, namespace.errorClass),
+        value: (...args) => callHost(
+          message.id,
+          namespace.global,
+          member,
+          args.length === 0 && emptyObjectMembers.has(member) ? {} : args[0],
+          namespace.errorClass,
+        ),
       })
     }
     Object.freeze(view)
@@ -409,6 +416,7 @@ async function runCell(message) {
         logs: execution.logs,
         error: detail.message,
         errorName: detail.name,
+        ...(detail.toolName === undefined ? {} : { toolName: detail.toolName }),
         ...(error instanceof StaticImportFailure ? { moduleLoadFailed: true } : {}),
         ...(position === undefined ? {} : { position }),
         ...(detail.cause === undefined ? {} : { cause: detail.cause }),

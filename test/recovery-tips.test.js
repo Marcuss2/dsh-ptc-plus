@@ -18,16 +18,10 @@ function view(code, status, contextStep = 0) {
   }
 }
 
-test('long failed cells receive bounded edit guidance only after failure', () => {
+test('long failed cells do not create a runtime context', () => {
   const code = 'x'.repeat(LONG_FAILED_CELL_TIP_CODE_UNITS)
-  const safe = latestRecoveryTip(view(code, 'noop'), { enabled: true, cooldownMessages: 1, escalationFailures: 2 })
-  assert.match(safe.name, /long-cell-failure\/1$/)
-  assert.match(safe.text, /edit_run_code/)
-  assert.match(safe.text, /no-execution/)
-
-  const effectful = latestRecoveryTip(view(code, 'volatile'), { enabled: true, cooldownMessages: 1, escalationFailures: 2 })
-  assert.doesNotMatch(effectful.text, /use `edit_run_code`/)
-  assert.match(effectful.text, /inspect live state/)
+  assert.equal(latestRecoveryTip(view(code, 'noop'), { enabled: true, cooldownMessages: 1, escalationFailures: 2 }), undefined)
+  assert.equal(latestRecoveryTip(view(code, 'volatile'), { enabled: true, cooldownMessages: 1, escalationFailures: 2 }), undefined)
 })
 
 test('short failures and disabled tips remain silent', () => {

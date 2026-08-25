@@ -192,6 +192,9 @@ export function fixture(config = {}, fixtureOptions = {}) {
         bindings: [{
           global: 'tools',
           functions,
+          ...(options.toolEmptyObjectMembers === undefined
+            ? {}
+            : { emptyObjectMembers: options.toolEmptyObjectMembers }),
           errorClass: { name: 'ToolCallError', memberNameProperty: 'toolName' },
         }, ...(options.bindings ?? [])],
         signal: controller.signal,

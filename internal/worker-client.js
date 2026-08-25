@@ -48,13 +48,13 @@ export function normalizeWorkerEnvironment(source, platform = process.platform) 
 
 /** Owns one session kernel's worker process, private port, and scratch directory. */
 export class WorkerClient {
-  constructor({ workerUrl, cwd, maxOldGenerationSizeMb, onMessage, onFailure }) {
+  constructor({ workerUrl, cwd, onMessage, onFailure }) {
     this.workerUrl = workerUrl
     this.cwd = cwd
-    this.maxOldGenerationSizeMb = maxOldGenerationSizeMb
     this.onMessage = onMessage
     this.onFailure = onFailure
     this.worker = undefined
+    this.workerLimit = undefined
     this.workerReady = undefined
     this.port = undefined
     this.scratchReady = undefined
@@ -71,7 +71,10 @@ export class WorkerClient {
     return lastLine === undefined ? undefined : lastLine.slice(0, 300)
   }
 
-  async ensure() {
+  async ensure(maxOldGenerationSizeMb) {
+    if (this.workerLimit !== undefined && this.workerLimit !== maxOldGenerationSizeMb) {
+      throw new Error('ptc-plus: session worker memory limit differs from the submitted cell configuration')
+    }
     if (this.worker !== undefined) return this.workerReady
     if (this.scratchReady === undefined) {
       const scratchRoot = tmpdir()
@@ -80,25 +83,41 @@ export class WorkerClient {
       }
       this.scratchReady = mkdtemp(join(scratchRoot, 'dsh-ptc-plus-'))
     }
-    const scratchDirectory = await this.scratchReady
+    this.workerLimit = maxOldGenerationSizeMb
+    let scratchDirectory
+    try {
+      scratchDirectory = await this.scratchReady
+    } catch (error) {
+      if (this.worker === undefined) this.workerLimit = undefined
+      throw error
+    }
     /* c8 ignore next */
-    if (this.disposed) throw new Error('session kernel disposed')
+    if (this.disposed) {
+      this.workerLimit = undefined
+      throw new Error('session kernel disposed')
+    }
     /* c8 ignore next */
     if (this.worker !== undefined) return this.workerReady
     const environment = normalizeWorkerEnvironment(process.env)
-    const worker = new Worker(this.workerUrl, {
-      env: {
-        ...environment,
-        TEMP: scratchDirectory,
-        TMP: scratchDirectory,
-        TMPDIR: scratchDirectory,
-      },
-      execArgv: [],
-      workerData: this.cwd === undefined ? {} : { cwd: this.cwd },
-      resourceLimits: { maxOldGenerationSizeMb: this.maxOldGenerationSizeMb },
-      stdout: true,
-      stderr: true,
-    })
+    let worker
+    try {
+      worker = new Worker(this.workerUrl, {
+        env: {
+          ...environment,
+          TEMP: scratchDirectory,
+          TMP: scratchDirectory,
+          TMPDIR: scratchDirectory,
+        },
+        execArgv: [],
+        workerData: this.cwd === undefined ? {} : { cwd: this.cwd },
+        resourceLimits: { maxOldGenerationSizeMb: this.workerLimit },
+        stdout: true,
+        stderr: true,
+      })
+    } catch (error) {
+      this.workerLimit = undefined
+      throw error
+    }
     worker.stdout.resume()
     worker.stderr.resume()
     const stderrTail = []
@@ -157,6 +176,7 @@ export class WorkerClient {
   fail(worker, message) {
     if (worker !== this.worker) return
     this.worker = undefined
+    this.workerLimit = undefined
     this.workerReady = undefined
     this.port?.close()
     this.port = undefined
@@ -167,6 +187,7 @@ export class WorkerClient {
   async reset(worker) {
     if (this.worker === worker) {
       this.worker = undefined
+      this.workerLimit = undefined
       this.workerReady = undefined
       this.port?.close()
       this.port = undefined

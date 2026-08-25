@@ -38,6 +38,14 @@ test('normalizes hostile errors and extracts active-cell details', () => {
   assert.deepEqual(errorDetails(hostile, 'ptc-plus-repl-1'), {
     name: 'Error', message: 'Unprintable thrown value',
   })
+
+  const toolError = Object.assign(new Error('denied'), {
+    name: 'ToolCallError',
+    toolName: 'read',
+  })
+  assert.deepEqual(errorDetails(toolError, 'ptc-plus-repl-1'), {
+    name: 'ToolCallError', message: 'denied', toolName: 'read',
+  })
 })
 
 test('bounds diagnostic logs and emits one repeat-failure hint', () => {

@@ -91,6 +91,10 @@ export function errorDetails(error, filename) {
   const message = messageOf(error, 'Unprintable thrown value')
   const rawName = safeProperty(error, 'name')
   const name = typeof rawName === 'string' && rawName.length > 0 ? rawName : 'Error'
+  const rawToolName = safeProperty(error, 'toolName')
+  const toolName = name === 'ToolCallError'
+    ? firstLine(rawToolName)
+    : undefined
   const candidate = safeProperty(error, 'ptcCause')
   const causeMessage = firstLine(safeProperty(candidate, 'message'))
   const causeCode = firstLine(safeProperty(candidate, 'code'))
@@ -101,7 +105,13 @@ export function errorDetails(error, filename) {
         message: causeMessage,
       }
   const position = errorPosition(error, filename)
-  return { name, message, ...(position === undefined ? {} : { position }), ...(cause === undefined ? {} : { cause }) }
+  return {
+    name,
+    message,
+    ...(toolName === undefined ? {} : { toolName }),
+    ...(position === undefined ? {} : { position }),
+    ...(cause === undefined ? {} : { cause }),
+  }
 }
 
 export function createFailureTracker() {

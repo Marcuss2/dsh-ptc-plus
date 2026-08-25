@@ -4,6 +4,7 @@ import { access, rm } from 'node:fs/promises'
 import { isAbsolute } from 'node:path'
 import test from 'node:test'
 import { Config } from '../index.js'
+import { createRuntimeBridgeOwner } from '../internal/runtime-bridge-owner.js'
 import { normalizeJournal } from '../internal/session-journal.js'
 import { SessionRuntime } from '../internal/session-runtime.js'
 import { decodeValue, encodeValue, renderValueWire } from '../internal/value-wire.js'
@@ -227,6 +228,84 @@ return { page, echoed, toolsType: typeof tools, workspaceType: typeof workspace,
     ['tools', 'read'],
     ['tools', 'echo'],
   ])
+})
+
+test('canonicalizes omitted native arguments only when the live schema accepts an empty object', async (t) => {
+  const schemas = [
+    {
+      name: 'zero',
+      parameters: {
+        type: 'object',
+        properties: { detail: { type: 'boolean' } },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'required',
+      parameters: {
+        type: 'object',
+        properties: { id: { type: 'string' } },
+        required: ['id'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'unsupported',
+      parameters: { type: 'object', minProperties: 1 },
+    },
+  ]
+  const events = []
+  const session = { id: 'empty-native-arguments', events }
+  const first = fixture({}, { schemas })
+  t.after(() => first.dispose())
+  const calls = []
+  const source = `
+const implicitEmptyResult = await tools.zero()
+const explicitEmptyResult = await tools.zero({})
+`
+  const recorded = await first.runDurable(session.id, source, {
+    zero: async args => { calls.push(args); return Object.keys(args).length },
+  }, { session })
+
+  assert.equal(recorded.isError, false)
+  assert.deepEqual(calls, [{}, {}])
+  assert.deepEqual(recorded.meta.dshPtcPlus.calls.map(call => decodeValue(call.args)), [{}, {}])
+  appendRunCodeEvents(events, 'empty-native-arguments-call', source, recorded)
+
+  const rejectUndefined = async args => {
+    assert.equal(args, undefined)
+    throw new TypeError('tool arguments must be lossless JSON')
+  }
+  for (const [label, program, functions, bindings = []] of [
+    ['explicit undefined', 'return tools.zero(undefined)', { zero: rejectUndefined }],
+    ['required input', 'return tools.required()', { required: rejectUndefined }],
+    ['unsupported schema', 'return tools.unsupported()', { unsupported: rejectUndefined }],
+    ['owner namespace', 'return domain.zero()', {}, [{ global: 'domain', functions: { zero: rejectUndefined } }]],
+  ]) {
+    const result = await first.run(`empty-native-arguments-${label}`, program, functions, { bindings })
+    assert.equal(result.error?.kind, 'exception')
+    assert.match(result.error.message, /tool arguments must be lossless JSON/)
+  }
+  const untrustedMetadata = await first.run(
+    'empty-native-arguments-untrusted-metadata',
+    'return tools.required()',
+    { required: rejectUndefined },
+    { toolEmptyObjectMembers: ['required'] },
+  )
+  assert.match(untrustedMetadata.error.message, /tool arguments must be lossless JSON/)
+  await first.dispose()
+
+  const restored = fixture({}, { schemas })
+  t.after(() => restored.dispose())
+  let replayDispatches = 0
+  const replay = await restored.run(session.id, 'return { implicitEmptyResult, explicitEmptyResult }', {
+    zero: async () => { replayDispatches += 1; return -1 },
+  }, { session })
+  assert.deepEqual(replay, {
+    logs: [],
+    value: { implicitEmptyResult: 0, explicitEmptyResult: 0 },
+  })
+  assert.equal(replayDispatches, 0)
 })
 
 test('preserves the native canonical tool result without projection validation', async (t) => {
@@ -527,6 +606,86 @@ return code.run({ code: '2', description: 'Exceed child depth limit' })
   assert.equal(overflow.error.kind, 'exception')
   assert.match(overflow.error.message, /recursion depth exceeds configured maximum 2/)
   assert.deepEqual(await state.run('recursive-depth-overflow', 'return 42'), { logs: [], value: 42 })
+})
+
+test('binds nested code.run depth to the submitted cell generation', async (t) => {
+  let releaseGate
+  let gateStarted
+  const gate = new Promise(resolve => { releaseGate = resolve })
+  const started = new Promise(resolve => { gateStarted = resolve })
+  const definition = { name: 'run_code', output: {} }
+  const runtime = {
+    language: 'typescript',
+    isolation: 'worker-thread',
+    async run(request) {
+      const remaining = Number(request.program)
+      if (remaining === 0) return { logs: ['leaf'], value: 0 }
+      const runCode = request.bindings.find(binding => binding.global === 'code').functions.run
+      try {
+        return {
+          logs: [],
+          value: await runCode({
+            code: String(remaining - 1),
+            description: 'Continue recursive evaluation',
+          }),
+        }
+      } catch (error) {
+        return { logs: [], error: { kind: 'exception', message: error.message } }
+      }
+    },
+  }
+  const owner = createRuntimeBridgeOwner({
+    ctx: {
+      codeRuntime: runtime,
+      tools: { get: () => definition },
+    },
+    sessionConfig: {
+      computeMs: 1_000,
+      maxWallMs: 1_000,
+      maxNestedRunCodeDepth: 2,
+    },
+    maxNestedRunCodeDepth: 2,
+    sessionId: agent => agent.id,
+    toolSchemasForAgent: () => [],
+  })
+  t.after(() => owner.dispose())
+  const agent = { id: 'nested-config-generation', session: { id: 'nested-config-generation', events: [] } }
+
+  const execute = async (callId, program, bindings = []) => {
+    const exec = { name: 'run_code', callId, agent }
+    let raw
+    const result = await owner.handleExecute(exec, async () => {
+      raw = await runtime.run({ program, bindings })
+      const meta = definition.output.presentationMeta?.({}, raw.value)
+      return raw.error === undefined
+        ? { isError: false, value: raw.value, content: [], meta }
+        : { isError: true, content: [], error: { message: raw.error.message }, meta }
+    })
+    owner.handleResult(exec, result)
+    return raw
+  }
+
+  const active = execute('nested-generation-active', `
+await tools.wait({})
+return code.run({ code: '1', description: 'Use submitted depth limit' })
+`, [{ global: 'tools', functions: { wait: async () => { gateStarted(); await gate } } }])
+  await started
+  owner.reconfigure({
+    computeMs: 1_000,
+    maxWallMs: 1_000,
+    maxNestedRunCodeDepth: 1,
+  })
+  releaseGate()
+
+  assert.deepEqual((await active).value, {
+    logs: [],
+    result: { logs: ['leaf'], result: 0 },
+  })
+  const next = await execute('nested-generation-next', `
+return code.run({ code: '1', description: 'Use next depth limit' })
+`)
+  assert.equal(next.error.kind, 'exception')
+  assert.match(next.error.message, /recursion depth exceeds configured maximum 1/)
 })
 
 test('validates nested run_code arguments as a closed object', async (t) => {

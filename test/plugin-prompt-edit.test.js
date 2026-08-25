@@ -199,6 +199,61 @@ test('presents one coherent persistent REPL contract to the model', async (t) =>
   assert.equal(state.sections[0].text({}), '')
 })
 
+test('preserves Cordis source bindings after a failed define call', async (t) => {
+  const state = fixture()
+  t.after(() => state.dispose())
+  const source = 'return { plugin: true }'
+  const failed = await state.executeRun(
+    'cordis-binding-reuse',
+    'const clientCode = ' + JSON.stringify(source) + '\nawait tools.cordis_define({ plugin: { kind: "new", idPrefix: "demo" }, name: "demo", purpose: "test", code: { client: clientCode } })',
+    { cordis_define: async () => { throw new Error('dynamic package `code.client` failed to parse') } },
+    {},
+  )
+  assert.equal(failed.raw.error.kind, 'exception')
+  assert.match(failed.raw.error.message, /state: partially-applied/)
+  assert.match(
+    failed.result.meta.dshPtcPlus.diagnostics[0].help.find(item => item.includes('bindings assigned before')),
+    /bindings assigned before this Cordis failure remain live/,
+  )
+  assert.deepEqual(await state.run('cordis-binding-reuse', 'return clientCode'), { logs: [], value: source })
+})
+
+test('does not label an unrelated native ToolCallError as Cordis', async (t) => {
+  const state = fixture(
+    { cordisToolsEnabled: true },
+    { agents: { list: () => [] } },
+  )
+  t.after(() => state.dispose())
+  const failed = await state.executeRun(
+    'unrelated-tool-failure',
+    'await tools.read({ file_path: "missing" })',
+    { read: async () => { throw new Error('Cordis dynamic package text in an unrelated error') } },
+    {},
+  )
+  const help = failed.result.meta.dshPtcPlus.diagnostics[0].help.join('\n')
+  assert.doesNotMatch(help, /this Cordis failure/)
+})
+
+test('renders long-cell recovery advice in the tool error without a runtime context', async (t) => {
+  const state = fixture({ computeMs: 10_000, maxWallMs: 10_000 })
+  t.after(() => state.dispose())
+  const source = `const clientCode = "source"\n${' '.repeat(2_001)}\nawait tools.cordis_define({ code: { client: clientCode } })`
+  const failed = await state.executeRun(
+    'cordis-long-cell',
+    source,
+    { cordis_define: async () => { throw new Error('dynamic package code.client failed to parse') } },
+    {},
+  )
+  assert.match(
+    failed.raw.error.message,
+    /execution may have occurred; inspect live state in a new short `run_code` cell before deciding whether a correction is safe/,
+  )
+  assert.match(
+    failed.result.meta.dshPtcPlus.diagnostics[0].help.join('\n'),
+    /execution may have occurred; inspect live state/,
+  )
+})
+
 test('immutably adapts only the model-visible run_code schema wording', async (t) => {
   const state = fixture()
   t.after(() => state.dispose())

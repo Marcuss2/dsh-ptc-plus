@@ -21,6 +21,27 @@ function normalizeErrorClass(value, globalName) {
   })
 }
 
+function normalizeEmptyObjectMembers(value, globalName, members) {
+  if (value === undefined) return Object.freeze([])
+  if (globalName !== 'tools' || !Array.isArray(value)) {
+    throw new TypeError(`ptc-plus: binding ${globalName} emptyObjectMembers must be an array for tools`)
+  }
+  const available = new Set(members)
+  const seen = new Set()
+  const normalized = value.map((member) => {
+    const memberName = name(member, `binding ${globalName} emptyObjectMembers entry`)
+    if (!available.has(memberName)) {
+      throw new TypeError(`ptc-plus: binding ${globalName} emptyObjectMembers contains unknown member ${JSON.stringify(memberName)}`)
+    }
+    if (seen.has(memberName)) {
+      throw new TypeError(`ptc-plus: binding ${globalName} emptyObjectMembers contains duplicate member ${JSON.stringify(memberName)}`)
+    }
+    seen.add(memberName)
+    return memberName
+  })
+  return Object.freeze(normalized)
+}
+
 export function normalizeBindingDescriptors(bindings) {
   if (!Array.isArray(bindings)) throw new TypeError('ptc-plus: bindings must be an array')
   const reservedNames = new Set()
@@ -44,12 +65,18 @@ export function normalizeBindingDescriptors(bindings) {
       return member
     })
     const errorClass = normalizeErrorClass(namespace.errorClass, globalName)
+    const emptyObjectMembers = normalizeEmptyObjectMembers(
+      namespace.emptyObjectMembers,
+      globalName,
+      members,
+    )
     if (!SOFT_PLUGIN_NAMESPACES.has(globalName)) reservedNames.add(globalName)
     if (errorClass !== undefined) reservedNames.add(errorClass.name)
     return Object.freeze({
       global: globalName,
       functions,
       members: Object.freeze(members),
+      ...(emptyObjectMembers.length === 0 ? {} : { emptyObjectMembers }),
       ...(errorClass === undefined ? {} : { errorClass }),
     })
   })
@@ -59,6 +86,9 @@ export function normalizeBindingDescriptors(bindings) {
     workerDescriptors: Object.freeze(namespaces.map(namespace => Object.freeze({
       global: namespace.global,
       members: namespace.members,
+      ...(namespace.emptyObjectMembers === undefined
+        ? {}
+        : { emptyObjectMembers: namespace.emptyObjectMembers }),
       ...(namespace.errorClass === undefined ? {} : { errorClass: namespace.errorClass }),
     }))),
   })

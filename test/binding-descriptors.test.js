@@ -9,6 +9,7 @@ test('normalizes live binding callables and derives both consumer views', () => 
     {
       global: 'tools',
       functions,
+      emptyObjectMembers: ['read'],
       errorClass: { name: 'ToolError', memberNameProperty: 'toolName' },
     },
     { global: 'capabilities', functions: { find: () => 2 } },
@@ -19,6 +20,7 @@ test('normalizes live binding callables and derives both consumer views', () => 
     {
       global: 'tools',
       members: ['read'],
+      emptyObjectMembers: ['read'],
       errorClass: { name: 'ToolError', memberNameProperty: 'toolName' },
     },
     { global: 'capabilities', members: ['find'] },
@@ -35,6 +37,11 @@ test('rejects malformed binding descriptors before projection', () => {
     [[{ global: 'api', functions: { call: 1 } }], /not an own callable value/],
     [[{ global: 'api', functions: Object.defineProperty({}, 'call', { get() { return () => 1 } }) }], /not an own callable value/],
     [[{ global: 'api', functions: {}, errorClass: { name: 'ApiError' } }], /memberNameProperty/],
+    [[{ global: 'api', functions: {}, emptyObjectMembers: [] }], /must be an array for tools/],
+    [[{ global: 'tools', functions: {}, emptyObjectMembers: null }], /must be an array for tools/],
+    [[{ global: 'tools', functions: { call() {} }, emptyObjectMembers: ['missing'] }], /unknown member/],
+    [[{ global: 'tools', functions: { call() {} }, emptyObjectMembers: ['call', 'call'] }], /duplicate member/],
+    [[{ global: 'tools', functions: { call() {} }, emptyObjectMembers: [''] }], /must be a non-empty string/],
     [[{ global: 'api', functions: {} }, { global: 'api', functions: {} }], /duplicate binding namespace global/],
   ]
   for (const [value, expected] of invalid) {

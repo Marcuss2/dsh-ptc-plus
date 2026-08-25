@@ -22,7 +22,8 @@ function serializeJsonLines(events) {
 
 /** Migrate one decoded session artifact without mutating its parsed events. */
 export function migrateSessionLogText(text) {
-  const events = parseJsonLines(text)
+  const [header, ...events] = parseJsonLines(text)
+  if (header?.type !== 'session') throw new Error('session JSONL does not start with a session header')
   const legacyCount = events.filter(event => event?.type === RECOVERY_BOUNDARY_EVENT).length
   if (legacyCount === 0) {
     return Object.freeze({ changed: false, legacyCount: 0, text })
@@ -31,7 +32,7 @@ export function migrateSessionLogText(text) {
   return Object.freeze({
     changed: true,
     legacyCount,
-    text: serializeJsonLines(migrated),
+    text: serializeJsonLines([header, ...migrated]),
   })
 }
 
@@ -51,11 +52,15 @@ function decodeArtifact(file, options = {}) {
 function encodeArtifact(file, text, options = {}) {
   if (!isCompressed(file)) return writeFile(file, text, 'utf8')
   const run = options.execFileSync ?? execFileSync
-  const encoded = run('zstd', ['-q', '-T0', '-c'], {
-    input: text,
+  const headerEnd = text.indexOf('\n')
+  if (headerEnd < 0) throw new Error('session log does not contain a header line')
+  const encodeFrame = input => run('zstd', ['-q', '-T0', '--check', '-c'], {
+    input,
     maxBuffer: options.maxBuffer ?? 512 * 1024 * 1024,
   })
-  return writeFile(file, encoded)
+  const headerFrame = encodeFrame(text.slice(0, headerEnd + 1))
+  const eventFrame = encodeFrame(text.slice(headerEnd + 1))
+  return writeFile(file, Buffer.concat([headerFrame, eventFrame]))
 }
 
 /**

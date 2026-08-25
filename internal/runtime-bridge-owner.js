@@ -1,5 +1,6 @@
 /** Own the CodeRuntime patch, per-cell lease, journal projection, and session settlement. */
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { assertObjectJsonSchema, validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 import { normalizeBindingDescriptors } from './binding-descriptors.js'
 import { SessionRuntime } from './session-runtime.js'
 import {
@@ -43,6 +44,16 @@ function namespace(global, functions, errorName, memberNameProperty) {
     functions,
     errorClass: { name: errorName, memberNameProperty },
   }
+}
+
+function schemaAcceptsEmptyObject(schema) {
+  const parameters = schema?.parameters
+  try {
+    assertObjectJsonSchema(parameters)
+  } catch {
+    return false
+  }
+  return validateJsonSchemaValue(parameters, {}).length === 0
 }
 
 const PROGRAM_CAPABILITY_METADATA = deepFreeze([
@@ -130,7 +141,13 @@ export function createRuntimeBridgeOwner({
   const pending = new WeakMap()
   let active = true
 
-  const projectBindings = (request, depth, executionToken, inheritedTools = undefined) => {
+  const projectBindings = (
+    request,
+    depth,
+    executionToken,
+    inheritedTools = undefined,
+    cellConfig = currentConfig,
+  ) => {
     const lease = { active: true }
     const release = () => { lease.active = false }
     const bindingDescriptors = normalizeBindingDescriptors(request.bindings)
@@ -150,12 +167,12 @@ export function createRuntimeBridgeOwner({
     const runCode = async (value) => {
       ensureLease()
       const args = nestedRunCodeArguments(value)
-      if (depth >= currentConfig.maxNestedRunCodeDepth) {
-        throw new RangeError(`code.run recursion depth exceeds configured maximum ${currentConfig.maxNestedRunCodeDepth}`)
+      if (depth >= cellConfig.maxNestedRunCodeDepth) {
+        throw new RangeError(`code.run recursion depth exceeds configured maximum ${cellConfig.maxNestedRunCodeDepth}`)
       }
       if (typeof functions[RUN_CODE] === 'function') return functions[RUN_CODE](args)
       const childProjected = projectBindings(
-        { ...request, program: args.code }, depth + 1, executionToken, functions,
+        { ...request, program: args.code }, depth + 1, executionToken, functions, cellConfig,
       )
       let child
       try {
@@ -169,6 +186,14 @@ export function createRuntimeBridgeOwner({
       return { logs: child.logs, ...(child.value === undefined ? {} : { result: child.value }) }
     }
 
+    const schemas = toolSchemasForAgent(executionToken?.agent)
+      .filter(schema => schema?.name === RUN_CODE
+        || (schema?.name !== EDIT_RUN_CODE && typeof functions[schema?.name] === 'function'))
+    const emptyObjectTools = new Set(schemas.flatMap(schema => (
+      typeof schema?.name === 'string' && schemaAcceptsEmptyObject(schema)
+        ? [schema.name]
+        : []
+    )))
     const projected = bindingDescriptors.namespaces.map((binding) => {
       const wrapped = Object.create(null)
       for (const key of binding.members) {
@@ -180,11 +205,15 @@ export function createRuntimeBridgeOwner({
           },
         })
       }
-      return { ...binding, functions: wrapped }
+      const emptyObjectMembers = binding.global === 'tools'
+        ? binding.members.filter(member => emptyObjectTools.has(member))
+        : []
+      return {
+        ...binding,
+        functions: wrapped,
+        ...(binding.global === 'tools' ? { emptyObjectMembers } : {}),
+      }
     })
-    const schemas = toolSchemasForAgent(executionToken?.agent)
-      .filter(schema => schema?.name === RUN_CODE
-        || (schema?.name !== EDIT_RUN_CODE && typeof functions[schema?.name] === 'function'))
     const annotations = Object.fromEntries(schemas.flatMap(schema => (
       typeof schema?.name === 'string' && schema.name !== RUN_CODE
         ? [[schema.name, { replay: 'recorded-value' }]]

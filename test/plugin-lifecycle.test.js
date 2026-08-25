@@ -343,6 +343,139 @@ test('reconfigures an active session kernel without replacing its runtime', asyn
   assert.equal(runtime.config.maxWallMs, 2_000)
 })
 
+test('binds wall-clock configuration to the submitted cell generation', async (t) => {
+  const runtime = new SessionRuntime({ computeMs: 1_000, maxWallMs: 40 })
+  t.after(() => runtime.dispose())
+  const running = runtime.run('wall-config-generation', {
+    program: 'await new Promise(() => {})', bindings: [],
+  })
+
+  while (runtime.kernels.get('wall-config-generation')?.active === undefined) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  runtime.reconfigure({ computeMs: 1_000, maxWallMs: 1_000 })
+
+  const timedOut = await running
+  assert.equal(timedOut.error.kind, 'timeout')
+  assert.match(timedOut.error.message, /wall-clock ceiling reached \(40ms\)/)
+  assert.equal((await runtime.run('wall-config-generation-next', {
+    program: 'await new Promise(resolve => setTimeout(resolve, 60)); return 1', bindings: [],
+  })).value, 1)
+})
+
+test('binds worker and host value budgets to one submitted cell generation', async (t) => {
+  const outputRuntime = new SessionRuntime({
+    computeMs: 1_000,
+    maxWallMs: 1_000,
+    maxOutputBytes: 64,
+  })
+  t.after(() => outputRuntime.dispose())
+  let releaseOutput
+  let outputStarted
+  const outputGate = new Promise(resolve => { releaseOutput = resolve })
+  const outputActive = new Promise(resolve => { outputStarted = resolve })
+  const output = outputRuntime.run('output-config-generation', {
+    program: 'await tools.wait({}); console.log("x".repeat(100)); return 1',
+    bindings: [{ global: 'tools', functions: { wait: async () => { outputStarted(); await outputGate } } }],
+  })
+  await outputActive
+  outputRuntime.reconfigure({
+    computeMs: 1_000,
+    maxWallMs: 1_000,
+    maxOutputBytes: 1_024,
+  })
+  releaseOutput()
+  const outputLimited = await output
+  assert.equal(outputLimited.error.kind, 'output-limit')
+  assert.match(outputLimited.error.message, /output exceeded 64 bytes/)
+  assert.equal((await outputRuntime.run('output-config-generation-next', {
+    program: 'console.log("x".repeat(100)); return 1', bindings: [],
+  })).value, 1)
+
+  const valueRuntime = new SessionRuntime({
+    computeMs: 1_000,
+    maxWallMs: 1_000,
+    maxValueNodes: 1,
+  })
+  t.after(() => valueRuntime.dispose())
+  let releaseValue
+  let valueStarted
+  const valueGate = new Promise(resolve => { releaseValue = resolve })
+  const valueActive = new Promise(resolve => { valueStarted = resolve })
+  const value = valueRuntime.run('value-config-generation', {
+    program: 'await tools.wait({}); return { child: {} }',
+    bindings: [{ global: 'tools', functions: { wait: async () => { valueStarted(); await valueGate } } }],
+  })
+  await valueActive
+  valueRuntime.reconfigure({
+    computeMs: 1_000,
+    maxWallMs: 1_000,
+    maxValueNodes: 10,
+  })
+  releaseValue()
+  const valueLimited = await value
+  assert.equal(valueLimited.error.kind, 'invalid-output')
+  assert.match(valueLimited.error.message, /node budget exceeds 1/)
+  assert.deepEqual(await valueRuntime.run('value-config-generation-next', {
+    program: 'return { child: {} }', bindings: [],
+  }), { logs: [], value: { child: {} } })
+})
+
+test('keeps queued journal and language policy on its submission generation', async (t) => {
+  const runtime = new SessionRuntime({
+    computeMs: 1_000,
+    maxWallMs: 1_000,
+    durableReplay: true,
+    looseTopLevelRedeclarations: true,
+    autoRewriteImports: true,
+    autoStripExports: true,
+    autoSplitRedeclarations: true,
+  })
+  t.after(() => runtime.dispose())
+  await runtime.run('queued-config-generation', {
+    program: 'const queuedGenerationBinding = 1', bindings: [],
+  })
+
+  let releaseBlocker
+  let blockerStarted
+  const blockerGate = new Promise(resolve => { releaseBlocker = resolve })
+  const blockerActive = new Promise(resolve => { blockerStarted = resolve })
+  const blocker = runtime.run('queued-config-generation', {
+    program: 'await tools.wait({})',
+    bindings: [{ global: 'tools', functions: { wait: async () => { blockerStarted(); await blockerGate } } }],
+  })
+  await blockerActive
+  const queued = runtime.runTentative('queued-config-generation', {
+    program: "import { format } from 'node:util'\nconst queuedGenerationBinding = 2\nreturn format('%s', 'value')",
+    bindings: [],
+  })
+  runtime.reconfigure({
+    computeMs: 1_000,
+    maxWallMs: 1_000,
+    durableReplay: false,
+    looseTopLevelRedeclarations: false,
+    autoRewriteImports: false,
+    autoStripExports: false,
+    autoSplitRedeclarations: false,
+  })
+  releaseBlocker()
+  assert.equal((await blocker).error, undefined)
+
+  const execution = await queued
+  assert.equal(execution.result.value, 'value')
+  assert.equal(execution.settlement.journal.bindingMode, 'loose')
+  assert.deepEqual(execution.settlement.journal.rewritePolicy, JOURNAL_POLICY)
+  assert.equal(execution.settlement.journal.status, 'durable')
+  runtime.finalize(execution.settlement, true)
+
+  const next = await runtime.run('queued-config-generation', {
+    program: "import { format } from 'node:util'\nreturn format('%s', 'next')",
+    bindings: [],
+  })
+  assert.equal(next.error.kind, 'exception')
+  assert.match(next.error.message, /may only appear at the top level|Unexpected token|import/)
+})
+
 test('does not replay durable history after durable replay is disabled', async (t) => {
   const runtime = new SessionRuntime({ computeMs: 100, maxWallMs: 1_000 })
   t.after(() => runtime.dispose())
@@ -397,6 +530,28 @@ test('rejects live worker memory-limit changes without changing runtime config',
   await runtime.disposeSession('memory-limit-session')
   runtime.reconfigure({ maxOldGenerationSizeMb: 128 })
   assert.equal(runtime.config.maxOldGenerationSizeMb, 128)
+})
+
+test('reserves the submitted cell memory limit before queued worker creation', async (t) => {
+  const runtime = new SessionRuntime({ maxOldGenerationSizeMb: 64 })
+  t.after(() => runtime.dispose())
+
+  const submitted = runtime.run('queued-memory-limit', { program: 'return 1', bindings: [] })
+  assert.throws(
+    () => runtime.reconfigure({ maxOldGenerationSizeMb: 128 }),
+    /maxOldGenerationSizeMb cannot change while a session worker is active/,
+  )
+  assert.equal((await submitted).value, 1)
+  const firstKernel = runtime.kernels.get('queued-memory-limit')
+  assert.equal(firstKernel.client.workerLimit, 64)
+  assert.equal(firstKernel.client.worker.resourceLimits.maxOldGenerationSizeMb, 64)
+
+  await runtime.disposeSession('queued-memory-limit')
+  runtime.reconfigure({ maxOldGenerationSizeMb: 128 })
+  assert.equal((await runtime.run('new-memory-limit', { program: 'return 2', bindings: [] })).value, 2)
+  const secondKernel = runtime.kernels.get('new-memory-limit')
+  assert.equal(secondKernel.client.workerLimit, 128)
+  assert.equal(secondKernel.client.worker.resourceLimits.maxOldGenerationSizeMb, 128)
 })
 
 test('handles direct runtime recovery, timeout, volatility, and lifecycle boundaries', async (t) => {

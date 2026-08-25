@@ -4,7 +4,6 @@ export const LONG_FAILED_CELL_TIP_CODE_UNITS = 2_000
 const TIP_PREFIXES = Object.freeze({
   'repeated-binding-failure': 'The same binding failure has recurred.',
   'platform-command-failure': 'An executable, shell, or path failed in the current execution world.',
-  'long-cell-failure': 'A long run_code cell failed.',
 })
 
 // TODO(dsh-tips-api): replace this local provider with an adapter after dsh-tips publishes a stable facts and decision interface.
@@ -16,7 +15,7 @@ function tipHistory(view) {
     const next = new Map(snapshot.sections.map(section => [section.name, section.text]))
     for (const [name] of next) {
       if (active.has(name) || seen.has(name)) continue
-      const match = /^tools:ptc-plus-tip\/(repeated-binding-failure|platform-command-failure|long-cell-failure)\/([1-9][0-9]*)$/.exec(name)
+      const match = /^tools:ptc-plus-tip\/(repeated-binding-failure|platform-command-failure)\/([1-9][0-9]*)$/.exec(name)
       if (match === null) continue
       const ordinal = Number(match[2])
       if (!Number.isSafeInteger(ordinal)) continue
@@ -49,10 +48,6 @@ function tipCandidate(view) {
   const codes = new Set(journal.diagnostics.map(diagnostic => diagnostic.code))
   if (codes.has('PTC-W001')) return { id: 'repeated-binding-failure' }
   if (hasPlatformCommandDiagnostic(journal.diagnostics)) return { id: 'platform-command-failure' }
-  if (typeof args.code === 'string' && args.code.length >= LONG_FAILED_CELL_TIP_CODE_UNITS
-    && journal.completion?.kind === 'throw') {
-    return { id: 'long-cell-failure', safeToEdit: journal.status === 'noop' }
-  }
   return undefined
 }
 
@@ -61,16 +56,6 @@ function renderTip(id, detailed, candidate = {}) {
     return detailed
       ? `${TIP_PREFIXES[id]} Re-check the active execution world and the actual executable before retrying. Use direct argv for a normal executable; use a shell only when its syntax or resolution is required. Windows, WSL, POSIX, and package shims have different paths and launch rules.`
       : `${TIP_PREFIXES[id]} Inspect the executable or path in the current execution world and choose direct argv or a shell only when required; do not assume Windows, WSL, POSIX, or one shell.`
-  }
-  if (id === 'long-cell-failure') {
-    if (candidate.safeToEdit) {
-      return detailed
-        ? `${TIP_PREFIXES[id]} No execution effect is recorded, so a small exact or regex correction may be applied with \`edit_run_code\`; it reruns the complete cell and does not resume at the failing line. Do not resend the full source.`
-        : `${TIP_PREFIXES[id]} This failure is recorded as no-execution; use \`edit_run_code\` for a small correction instead of resending the full source.`
-    }
-    return detailed
-      ? `${TIP_PREFIXES[id]} The cell may have executed before failing. Inspect live bindings, tool results, and external state in a new short \`run_code\` cell; do not edit or replay it automatically.`
-      : `${TIP_PREFIXES[id]} Execution may have occurred; inspect live state in a new short \`run_code\` cell before deciding whether a correction is safe.`
   }
   return detailed
     ? `${TIP_PREFIXES[id]} Inspect the live request with \`capabilities.tree()\`, \`capabilities.find()\`, or \`capabilities.inspect()\`, then call the typed member through \`tools.*\`. Do not invent hidden bindings or repeat the same failing expression.`

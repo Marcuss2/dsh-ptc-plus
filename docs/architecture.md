@@ -16,7 +16,7 @@ PTC Plus 把 DSH PTC 模式的顶层 `run_code` 变成与 session 绑定的连�
 使用 code-only direct-tool projection 的 PTC request 始终按固定顺序暴露 `[run_code, edit_run_code]`；插件用 agent scope 的
 `tools.register()` 真实注册 edit transport，并用同一 scope 的 `tools.presentAs('both')` 放行这两个 provider tool call，再把其他 native tool 保留在 program SDK。首次可判定的 prompt assembly 在安装这项 presentation effect 前建立 agent composition owner；注册与 mode 记录都在所属 session、agent 或插件释放时撤销，native-mode 与无关 agent scope 不继承 `edit_run_code`。
 DSH 为一个 agent composition 固定选择 `native`、`code` 或 `both`。首次 assembly 的非空 `tools:code-only` section text 证明 `code`，同名空 section 证明 `both`；只有缺少该 owner signal 时才能从 tool shape 推断。后续 assembly 不重新解释插件自己的 `tools.presentAs('both')` 效果，而是从 agent composition owner 派生 presentation。`code` 独占 direct-tool collapse、顶层 native-call normalization 和 native dispatch rejection；`both` 保留 native direct tools。`code` 与 `both` 都适配 PTC `run_code` schema、program SDK 和 session runtime contexts，只有 `code` 安装并直接执行 `edit_run_code`。model stream 将完整 call 的 session 与 call ID 绑定到由 composition mode 派生的 request policy，dispatch wrapper 替换 cancellation signal 不改变执行判定；result settlement 和 session、agent 或插件释放分别撤销单次 call 与整个 lifecycle。
-若模型误发 live schema 可证明的顶层 native call，stream canonicalizer 会把这个 out-of-surface 调用规范为调用同一 member 的 `run_code`；未知、畸形或不一致输入原样透传。该历史修改只修复无效 direct call。已声明的 `run_code` 与 `edit_run_code` 原样通过，因此 session history、UI 与下一轮 model context 保留合法调用的实际 tool name 和参数。
+若模型误发 live schema 可证明的顶层 native call，stream canonicalizer 会把这个 out-of-surface 调用规范为与模型本应生成的同一 member `run_code`；未知、畸形或不一致输入原样透传。派生 cell 不携带 provenance、纠错提示或其他模型可见标记；普通参数保留原始 JSON，含 own `__proto__` 的参数使用安全字面量，超过 TypeScript parser 安全深度的参数才使用浅层 `JSON.parse` 表达式。该历史修改只修复无效 direct call。已声明的 `run_code` 与 `edit_run_code` 原样通过，因此 session history、UI 与下一轮 model context 保留合法调用的实际 tool name 和参数。
 
 `edit_run_code` 对其持久化 `tool/call` 事件出现时当前 open turn 最近的可编辑 cell 生效，无论该 cell 被拒绝、运行失败，还是成功执行但结果需要微调。执行通过 call event sequence 读取该快照，后续 settlement 或 handler 调度不改变目标；派生 cell 则按外层 `tool/result` event sequence 进入恢复历史，使 cold replay 保持 live kernel 的实际结算顺序。
 调查 tool 不擦除目标；edit 发起后的其他 settlement 不追溯改变其目标；一次成功 edit 生成的新 cell 成为下一次 edit 的目标。调用方必须且只能提交 `edits` 或
@@ -40,7 +40,7 @@ return 或打印需要展示的值。失败恢复先按状态分类：解析或 
 `run_code` 并复用已有 binding，完整重写只保留给结构性改动或超出编辑预算的修正。能力和命令执行依赖当前 request
 与 execution world，模型必须先探查 live binding、实际 executable 和路径语义，不假设某个平台、shell 或 package runner。
 
-稳定指引保留这些跨任务不变量和失败恢复的优先动作。动态失败恢复提示由当前 session log 派生为 `tools:ptc-plus-tip/<trigger>/<ordinal>` 保留名称族中的 runtime context：重复绑定失败和当前 execution world 中由诊断确认的 executable、shell 或 path 错误分别提示能力探查或重新确认环境。投影只接受 DSH system-prompt owner 的规范快照，并按命名 section 的有效状态变化重建提示；聚合快照重复同一 section 不增加次数，正文不参与身份判断。
+稳定指引保留这些跨任务不变量和失败恢复的优先动作。长 cell 失败的短提示直接作为当前 `PTC-X001` 的结构化 `help` 输出，避免一次性建议触发完整 runtime-context 快照；重复绑定失败和当前 execution world 中由诊断确认的 executable、shell 或 path 错误仍由当前 session log 派生为 `tools:ptc-plus-tip/<trigger>/<ordinal>` runtime context，分别提示能力探查或重新确认环境。投影只接受 DSH system-prompt owner 的规范快照，并按命名 section 的有效状态变化重建提示；聚合快照重复同一 section 不增加次数，正文不参与身份判断。
 相同提示受 `tipCooldownMessages` 间隔约束，连续未解决时才升级为详细版本，成功 cell 会重置未解决计数；提示不会改变
 system sections、tool schema 或 tool order，也不假设 Windows、WSL、POSIX、shell 或 package runner。
 
@@ -51,9 +51,9 @@ system sections、tool schema 或 tool order，也不假设 Windows、WSL、POSI
 Host half 通过 DSH 公共 settings 服务注册 `ptc-plus` 命名空间，字段清单、默认值与校验来自 `internal/config-spec.js`。
 Client half 通过 `settings.plugin.item` 卡片呈现全部配置。`enabled` 是 kill switch：关闭时只保留 settings 注册和设置卡片，
 不注册 runtime、hook、tool surface 或 system prompt section；设置卡片显示“已启用/已停用”，`code` preset 会话在头部单独显示 `PTC Plus` 指示器。稳定指引不包含 UI 品牌名。
-所有字段都由 settings watch 即时生效。`maxOldGenerationSizeMb` 在活动 worker 存在时因 Node 的创建期限制而拒绝并回滚；其余字段由各自 owner 重新配置而不替换已有 session-bound binding。settings 服务缺失时 Host 回退到 composition config，原有行为不变。
+所有字段都由 settings watch 即时交给各自 owner，且不替换已有 session-bound binding。每个已提交 cell 固定其提交时的配置代际，timer、worker 消息、program binding bridge、结果校验和诊断共同消费该快照；重配置更新随后提交 cell 的默认值。`maxOldGenerationSizeMb` 在活动 worker 存在时因 Node 的创建期限制而拒绝并回滚。settings 服务缺失时 Host 回退到 composition config，原有行为不变。
 
-`cordisToolsEnabled` 默认关闭且即时生效。Host 只在可见 `run_code` 的 agent scope 中挂载官方 `@deepseek-ai/dsh-tool-cordis`，并让 child fiber 跟随 agent 或 PTC runtime 释放；关闭时立即卸载。Cordis schema、guidance 和工具必须在首轮前完整可见；已有完整 surface 保留原 owner，部分同名 surface 拒绝启用。该开关不复制 Cordis 实现，也不改变 code-only direct-tool projection。
+`cordisToolsEnabled` 默认关闭且即时生效。Host 只在可见 `run_code` 的 agent scope 中挂载官方 `@deepseek-ai/dsh-tool-cordis`，并通过公共 `agentPresets` service 定位 shipped `cordis` preset，再用维护中的 Skill filesystem plugin 把其 companion Skill 目录发布到同一 scope。两个 child fiber、tool guidance 与 `cordis-plugin-development` Skill 是一个 mount；首轮 request 等待完整发布和 scoped Skill load 验证，关闭、agent/runtime 释放或任一激活失败时逆序卸载。工具名、数量、schema 和 guidance 直接来自 official tool fiber，Skill 内容直接来自 shipped preset，Host 均不复制。官方插件同时向 process-global `cordisInspect` 注册 Host provider；owner 将 manifest 相同的 per-agent 注册合并为引用计数 lease，查询委托给当前仍存活的官方 registration，最后一份 lease 释放后才注销 provider。manifest 不一致时启用失败。该开关不切换 preset，也不改变 code-only direct-tool projection。
 
 ## Prompt 前缀稳定性
 
@@ -74,7 +74,7 @@ Client half 通过 `settings.plugin.item` 卡片呈现全部配置。`enabled` �
 
 ## 能力表面
 
-cell 直接使用 DSH 为当前 request 提供的 `tools.*`，不按工具名过滤，不改写 program-call 参数或 canonical result。模型 direct-call 边界与这个 data-plane contract 分离：声明的顶层 transport 是 `run_code` 和 `edit_run_code`；可证明的误发 native call 可先规范为 `run_code`，native member 随后在 cell 内 nested dispatch。所有 native member、`capabilities.*`、`repl.state` 和 `code.run` 共享 cell lease；cell 结束后，捕获的函数统一失效。调用时仍由 DSH 检查 scope、policy、取消和 scheduler。
+cell 直接使用 DSH 为当前 request 提供的 `tools.*`，不按工具名过滤，不翻译已提供的 program-call 参数或 canonical result。只有完全省略参数且 DSH 的 live object schema 验证 `{}` 合法时，worker 才在 encoding 前把 omission 规范为 `{}`；显式 `undefined`、需要输入的 member 与其他 namespace 不变，调用方携带的内部 metadata 不能扩大这项集合。模型 direct-call 边界与这个 data-plane contract 分离：声明的顶层 transport 是 `run_code` 和 `edit_run_code`；可证明的误发 native call 可先规范为 `run_code`，native member 随后在 cell 内 nested dispatch。所有 native member、`capabilities.*`、`repl.state` 和 `code.run` 共享 cell lease；cell 结束后，捕获的函数统一失效。调用时仍由 DSH 检查 scope、policy、取消和 scheduler。
 
 `capabilities.tree/find/inspect` 是描述 API，不是反射调用入口。默认 SDK 只展开这个导航器；`repl.state` 与 `code.run` 保持可调用，但其完整契约只在 explorer 中按需返回。explorer 合并 live tool schema 与插件自有 program-binding 描述；可证明的 metadata 包括名称、描述、输入/输出 schema、authority 和 replay。effect 与 result completeness 没有 owner 证据时保持 `unknown`。探索不会授予权限或触发额外模型调用。
 

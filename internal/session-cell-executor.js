@@ -19,6 +19,7 @@ import { PreflightError, prepareProgram } from './cell-analysis.js'
 import { ModuleRewriteError } from './cell-rewriter.js'
 import { mapSourcePosition } from './source-position-map.js'
 import { durabilityState, transitionDurability } from './session-state.js'
+import { LONG_FAILED_CELL_TIP_CODE_UNITS } from './recovery-tips.js'
 
 const OUTPUT_LIMIT_MESSAGE = bytes => `output exceeded ${bytes} bytes; reduce the returned value or keep it in a REPL binding`
 
@@ -26,9 +27,9 @@ function earlyResult(kind, message) {
   return { logs: [], error: { kind, message } }
 }
 
-function desiredDurability(kernel, replayRecord, prepared) {
+function desiredDurability(kernel, replayRecord, prepared, config) {
   if (replayRecord !== undefined) return 'durable'
-  if (!kernel.config.durableReplay || kernel.durability.status === 'volatile') return 'volatile'
+  if (!config.durableReplay || kernel.durability.status === 'volatile') return 'volatile'
   return prepared.durability
 }
 
@@ -106,7 +107,13 @@ function collisionDiagnostic(collisions) {
   })
 }
 
-function exceptionDiagnostic({ error, cause, position, declared }) {
+function exceptionDiagnostic({
+  error,
+  cause,
+  position,
+  declared,
+  longCellFailure = false,
+}) {
   const message = firstLine(error.message, 'Unknown exception')
   const rawName = typeof error.name === 'string' && error.name.length > 0
     ? error.name
@@ -127,7 +134,15 @@ function exceptionDiagnostic({ error, cause, position, declared }) {
     ...(source === undefined ? {} : { source }),
     help: [
       'inspect existing bindings and retry only the failing expression',
-      ...(declared.size === 0
+      ...(error.name === 'ToolCallError'
+        && typeof error.toolName === 'string'
+        && error.toolName.startsWith('cordis_')
+        ? ['bindings assigned before this Cordis failure remain live; reuse them instead of resending large source']
+        : []),
+      ...(longCellFailure
+        ? ['execution may have occurred; inspect live state in a new short `run_code` cell before deciding whether a correction is safe']
+        : []),
+      ...(declared.size === 0 || longCellFailure
         ? []
         : ['use fresh names for one-off top-level bindings after partial execution; later declarations may be uninitialized']),
     ],
@@ -168,7 +183,7 @@ export class SessionCellExecutor {
     this.kernel = kernel
   }
 
-  async executeCell(request, replayRecord = undefined) {
+  async executeCell(request, replayRecord = undefined, config = this.kernel.config) {
     const kernel = this.kernel
     if (kernel.disposed) {
       const result = earlyResult('abort', 'session kernel disposed')
@@ -186,14 +201,18 @@ export class SessionCellExecutor {
     let looseTopLevelRedeclarations
     try {
       looseTopLevelRedeclarations = replayRecord === undefined
-        ? kernel.config.looseTopLevelRedeclarations
+        ? config.looseTopLevelRedeclarations
         : replayRecord.bindingMode === 'loose'
       prepared = prepareProgram(
         request.program,
         catalog.knownBindings,
         looseTopLevelRedeclarations,
         request.bindingDescriptors.reservedNames,
-        replayRecord === undefined ? kernel.rewritePolicy() : replayRecord.rewritePolicy,
+        replayRecord === undefined ? {
+          autoRewriteImports: config.autoRewriteImports,
+          autoStripExports: config.autoStripExports,
+          autoSplitRedeclarations: config.autoSplitRedeclarations,
+        } : replayRecord.rewritePolicy,
         catalog.importBindings,
         catalog.importNamespaces,
       )
@@ -217,7 +236,7 @@ export class SessionCellExecutor {
 
     let worker
     try {
-      worker = await kernel.client.ensure()
+      worker = await kernel.client.ensure(config.maxOldGenerationSizeMb)
     } catch (error) {
       const result = earlyResult('worker-exit', messageOf(error))
       kernel.completeJournal(request.journal, 'discarded', result)
@@ -233,7 +252,8 @@ export class SessionCellExecutor {
     }
 
     const journal = request.journal
-    const durability = desiredDurability(kernel, replayRecord, prepared)
+    const durability = desiredDurability(kernel, replayRecord, prepared, config)
+    const valueLimits = kernel.valueLimits(config)
     const bindings = this.withControlBinding(request.bindingDescriptors, journal, replayRecord)
     const id = ++kernel.sequence
     return new Promise((resolve) => {
@@ -255,11 +275,13 @@ export class SessionCellExecutor {
         diagnostics: [],
         appliedBindingCatalog: undefined,
         completion: undefined,
+        config,
+        valueLimits,
         durability: durabilityState({
           status: durability,
           reason: kernel.durability.status === 'volatile'
             ? kernel.durability.reason
-            : !kernel.config.durableReplay
+            : !config.durableReplay
               ? 'durable replay disabled by configuration'
               : prepared.reason || undefined,
         }),
@@ -275,13 +297,13 @@ export class SessionCellExecutor {
         true,
       )
       active.computeTimer = setInterval(() => {
-        if (worker.performance.eventLoopUtilization(started).active > kernel.config.computeMs) {
-          active.resolve(earlyResult('timeout', `compute budget exhausted (${kernel.config.computeMs}ms busy); split the work into smaller cells`), true)
+        if (worker.performance.eventLoopUtilization(started).active > config.computeMs) {
+          active.resolve(earlyResult('timeout', `compute budget exhausted (${config.computeMs}ms busy); split the work into smaller cells`), true)
         }
-      }, Math.min(100, kernel.config.computeMs))
+      }, Math.min(100, config.computeMs))
       active.wallTimer = setTimeout(() => {
-        active.resolve(earlyResult('timeout', `wall-clock ceiling reached (${kernel.config.maxWallMs}ms); split long-running work into smaller cells`), true)
-      }, kernel.config.maxWallMs)
+        active.resolve(earlyResult('timeout', `wall-clock ceiling reached (${config.maxWallMs}ms); split long-running work into smaller cells`), true)
+      }, config.maxWallMs)
       kernel.active = active
       request.signal?.addEventListener('abort', active.onAbort, { once: true })
       if (request.signal?.aborted) {
@@ -293,8 +315,8 @@ export class SessionCellExecutor {
           type: 'run', id, program: prepared.code, namespaces: bindings.workerDescriptors,
           moduleLoads: prepared.moduleLoads,
           returnSignal: prepared.returnSignal,
-          maxOutputBytes: kernel.config.maxOutputBytes,
-          valueLimits: kernel.valueLimits(),
+          maxOutputBytes: config.maxOutputBytes,
+          valueLimits,
           durability,
         })
       } catch (error) {
@@ -383,12 +405,13 @@ export class SessionCellExecutor {
 
   handleOutputLimit(message) {
     const kernel = this.kernel
-    if (kernel.active?.id !== message.id) return
+    const active = kernel.active
+    if (active?.id !== message.id) return
     /* c8 ignore next */
     const logs = Array.isArray(message.logs) && message.logs.every(log => typeof log === 'string') ? message.logs : []
-    kernel.active.resolve({
+    active.resolve({
         logs: limitLogs(logs),
-        error: { kind: 'output-limit', message: OUTPUT_LIMIT_MESSAGE(kernel.config.maxOutputBytes) },
+        error: { kind: 'output-limit', message: OUTPUT_LIMIT_MESSAGE(active.config.maxOutputBytes) },
     }, true)
   }
 
@@ -417,10 +440,10 @@ export class SessionCellExecutor {
       return
     }
     const bytes = Buffer.byteLength(JSON.stringify({ logs, value: message.value }), 'utf8')
-    if (bytes > kernel.config.maxOutputBytes) {
+    if (bytes > active.config.maxOutputBytes) {
       active.resolve({
         logs: limitLogs(logs),
-        error: { kind: 'output-limit', message: OUTPUT_LIMIT_MESSAGE(kernel.config.maxOutputBytes) },
+        error: { kind: 'output-limit', message: OUTPUT_LIMIT_MESSAGE(active.config.maxOutputBytes) },
       }, true)
       return
     }
@@ -429,6 +452,7 @@ export class SessionCellExecutor {
         kind: 'exception',
         name: typeof message.errorName === 'string' ? message.errorName : 'Error',
         message: message.error,
+        ...(typeof message.toolName === 'string' ? { toolName: message.toolName } : {}),
       }
       const actualFailure = exceptionDiagnostic({
         error: rawError,
@@ -442,6 +466,7 @@ export class SessionCellExecutor {
               active.prepared.sourceMap,
             ),
         declared: message.moduleLoadFailed === true ? new Set() : active.prepared.declared,
+        longCellFailure: active.request.program.length >= LONG_FAILED_CELL_TIP_CODE_UNITS,
       })
       active.appliedBindingCatalog = message.moduleLoadFailed === true
         ? active.priorBindingCatalog
@@ -469,7 +494,7 @@ export class SessionCellExecutor {
         || (message.hasValue ? message.value === undefined : message.value !== undefined)) {
         throw new TypeError('invalid PTC completion envelope')
       }
-      const value = message.hasValue ? normalizeValueWire(message.value, kernel.valueLimits()) : undefined
+      const value = message.hasValue ? normalizeValueWire(message.value, active.valueLimits) : undefined
       active.completion = {
         hasValue: message.hasValue,
         ...(message.hasValue ? { value } : {}),
@@ -477,13 +502,13 @@ export class SessionCellExecutor {
       active.appliedBindingCatalog = active.priorBindingCatalog.advance(active.prepared)
       if (active.replay?.completion?.kind === 'return'
         && (active.replay.completion.hasValue !== message.hasValue
-          || (message.hasValue && !valueWiresEqual(active.replay.completion.value, value, kernel.valueLimits())))) {
+          || (message.hasValue && !valueWiresEqual(active.replay.completion.value, value, active.valueLimits)))) {
         active.resolve({ logs, error: { kind: 'recovery', message: 'cell replay produced a different completion value' } }, true)
         return
       }
       active.resolve({
         logs,
-        ...(message.hasValue ? { value: projectValueWire(value, kernel.valueLimits()) } : {}),
+        ...(message.hasValue ? { value: projectValueWire(value, active.valueLimits) } : {}),
       })
     } catch (error) {
       const failure = invalidOutputDiagnostic(messageOf(error))
@@ -509,8 +534,8 @@ export class SessionCellExecutor {
     let argsWire
     let args
     try {
-      argsWire = normalizeValueWire(message.args, kernel.valueLimits())
-      args = decodeValue(argsWire, kernel.valueLimits())
+      argsWire = normalizeValueWire(message.args, active.valueLimits)
+      args = decodeValue(argsWire, active.valueLimits)
     } catch (error) {
       kernel.client.post({ type: 'reply', runId: message.runId, id: message.id, ok: false, error: messageOf(error) })
       return
@@ -519,7 +544,7 @@ export class SessionCellExecutor {
     if (active.replay !== undefined) {
       active.replayIndex += 1
       if (recorded === undefined || recorded.global !== message.global || recorded.member !== message.member
-        || !valueWiresEqual(recorded.args, argsWire, kernel.valueLimits())) {
+        || !valueWiresEqual(recorded.args, argsWire, active.valueLimits)) {
         kernel.client.post({ type: 'reply', runId: message.runId, id: message.id, ok: false, error: 'session log replay diverged at a host binding call' })
         return
       }
@@ -541,7 +566,7 @@ export class SessionCellExecutor {
       const value = kernel.withInitiator === undefined || agent === undefined
         ? await invoke()
         : await kernel.withInitiator(agent, invoke)
-      const valueWire = encodeValue(value, kernel.valueLimits())
+      const valueWire = encodeValue(value, active.valueLimits)
       if (call !== undefined) {
         call.ok = true
         call.value = valueWire

@@ -20,6 +20,23 @@ function Get-ExecutablePath {
     return $Command.Name
 }
 
+function Import-LatestWindowsPath {
+    $pathValues = @(
+        [Environment]::GetEnvironmentVariable('Path', 'Process')
+        [Environment]::GetEnvironmentVariable('Path', 'Machine')
+        [Environment]::GetEnvironmentVariable('Path', 'User')
+    )
+    $expandedValues = @($pathValues | Where-Object {
+        -not [string]::IsNullOrWhiteSpace($_)
+    } | ForEach-Object {
+        [Environment]::ExpandEnvironmentVariables($_)
+    })
+
+    if ($expandedValues.Count -gt 0) {
+        $env:Path = $expandedValues -join [IO.Path]::PathSeparator
+    }
+}
+
 function Invoke-ExternalCommand {
     param(
         [Parameter(Mandatory = $true)]
@@ -96,11 +113,19 @@ if ([string]::IsNullOrWhiteSpace($packageName)) {
 }
 
 $npmCommand = Get-Command npm -ErrorAction SilentlyContinue
+$dshCommand = Get-Command dsh -ErrorAction SilentlyContinue
+
+# Explorer can retain the PATH from before Desktop or npm installed the DSH shim.
+if ($null -eq $npmCommand -or $null -eq $dshCommand) {
+    Import-LatestWindowsPath
+    $npmCommand = Get-Command npm -ErrorAction SilentlyContinue
+    $dshCommand = Get-Command dsh -ErrorAction SilentlyContinue
+}
+
 if ($null -eq $npmCommand) {
     throw 'npm was not found on PATH. Install Node.js before running this script.'
 }
 
-$dshCommand = Get-Command dsh -ErrorAction SilentlyContinue
 if ($null -eq $dshCommand) {
     throw 'dsh was not found on PATH. Install the dsh CLI before running this script.'
 }

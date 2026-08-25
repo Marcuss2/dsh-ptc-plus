@@ -44,6 +44,7 @@ function replGuidance(
   autoRewriteImports,
   autoStripExports,
   autoSplitRedeclarations,
+  cordisToolsEnabled,
 ) {
   const redeclaration = looseTopLevelRedeclarations
     ? 'Repeated top-level `const`/`let` declarations replace existing bindings.'
@@ -61,6 +62,9 @@ function replGuidance(
   const recovery = durableReplay
     ? 'Direct Node/OS access remains live but is not replayed after a kernel restart.'
     : 'Durable replay is disabled for this profile. Bindings remain reusable only in the current process; a new kernel starts empty.'
+  const cordisRecovery = cordisToolsEnabled
+    ? 'When using Cordis tools, keep large host or client source in a top-level binding before the Cordis call. A Cordis parse or validation error is a runtime failure: bindings assigned before that failure remain live, so retry only the Cordis call with the existing binding instead of resending the source. Treat that binding as the read-only input for the retry.'
+    : ''
   return `\`run_code\` continues one persistent PTC REPL. Ordinary top-level bindings remain available to later cells, so reuse them instead of resending setup code. Choose the smallest cell that answers the request and return only the value the next step needs.
 
 The host may append a bounded recovery context after a qualifying failure. Treat that context as a session-log-derived diagnostic: use \`edit_run_code\` only when it explicitly proves a complete-cell rerun is safe; otherwise inspect live state in a new short \`run_code\` cell.
@@ -71,7 +75,7 @@ Expressions that are neither returned nor printed produce no output. Keep large 
 ## Available capabilities
 Use \`capabilities.tree()\`, \`capabilities.find()\`, and \`capabilities.inspect()\` to discover the current request's live \`tools.*\` members before calling an unfamiliar binding. Prefer direct current-cell work; reserve \`code.run\` for source already held as data.
 
-Native tool availability, executable names, shells, and path syntax depend on the current DSH profile and execution world; inspect them instead of assuming Windows, WSL, POSIX, or a particular shell. ${recovery}`
+Native tool availability, executable names, shells, and path syntax depend on the current DSH profile and execution world; inspect them instead of assuming Windows, WSL, POSIX, or a particular shell. ${recovery}${cordisToolsEnabled ? ` ${cordisRecovery}` : ''}`
 }
 
 /** Register the session-bound REPL runtime. */
@@ -81,11 +85,14 @@ function installPtCRuntime(ctx, resolvedConfig, toolSchemasForAgent, sessionId) 
   let runtimeBridge
   let editTransport
   let directSurface
+  let ready
+  let pendingCordisActivation
   const disposers = []
   let disposed = false
   async function dispose() {
     if (disposed) return
     disposed = true
+    pendingCordisActivation?.cancel()
     const failures = []
     for (const dispose of [...disposers].reverse()) {
       if (typeof dispose !== 'function') continue
@@ -104,10 +111,55 @@ function installPtCRuntime(ctx, resolvedConfig, toolSchemasForAgent, sessionId) 
     }
     if (failures.length > 0) throw new AggregateError(failures, 'ptc-plus runtime disposal failed')
   }
+  const awaitCordisToolsOwner = async (owner, cancelled) => {
+    try {
+      await Promise.race([owner.ready, cancelled])
+      return owner
+    } catch (error) {
+      let rollbackError
+      try {
+        await owner.dispose()
+      } catch (caught) {
+        rollbackError = caught
+      }
+      if (cordisTools === owner) cordisTools = undefined
+      if (rollbackError !== undefined) {
+        throw new AggregateError(
+          [error, rollbackError],
+          'ptc-plus: Cordis activation and rollback failed',
+          { cause: error },
+        )
+      }
+      throw error
+    }
+  }
+  const activateCordisToolsOwner = async () => {
+    const owner = createCordisToolsOwner(ctx)
+    let cancel
+    const cancelled = new Promise((_resolve, reject) => {
+      cancel = () => reject(new Error('ptc-plus: Cordis activation cancelled'))
+    })
+    const activation = { owner, cancel }
+    cordisTools = owner
+    pendingCordisActivation = activation
+    try {
+      return await awaitCordisToolsOwner(owner, cancelled)
+    } finally {
+      if (pendingCordisActivation === activation) pendingCordisActivation = undefined
+    }
+  }
+  const cancelCordisActivation = () => pendingCordisActivation?.cancel()
   try {
     cordisTools = activeConfig.cordisToolsEnabled
       ? createCordisToolsOwner(ctx)
       : undefined
+    if (cordisTools !== undefined) {
+      const initialCordisTools = cordisTools
+      ready = awaitCordisToolsOwner(initialCordisTools, new Promise(() => {})).catch(error => {
+        if (cordisTools === initialCordisTools) cordisTools = undefined
+        throw error
+      })
+    }
     runtimeBridge = createRuntimeBridgeOwner({
       ctx,
       sessionConfig: activeConfig,
@@ -139,6 +191,7 @@ function installPtCRuntime(ctx, resolvedConfig, toolSchemasForAgent, sessionId) 
           activeConfig.autoRewriteImports,
           activeConfig.autoStripExports,
           activeConfig.autoSplitRedeclarations,
+          activeConfig.cordisToolsEnabled,
         )
       },
     }))
@@ -187,17 +240,20 @@ function installPtCRuntime(ctx, resolvedConfig, toolSchemasForAgent, sessionId) 
       rollbacks.push(() => directSurface.reconfigure(previousConfig))
 
       if (nextConfig.cordisToolsEnabled && cordisTools === undefined) {
-        cordisTools = createCordisToolsOwner(ctx)
+        await activateCordisToolsOwner()
       } else if (!nextConfig.cordisToolsEnabled && cordisTools !== undefined) {
         const currentCordis = cordisTools
-        cordisTools = undefined
         try {
           await currentCordis.dispose()
+          cordisTools = undefined
         } catch (error) {
           try {
-            cordisTools = createCordisToolsOwner(ctx)
+            await activateCordisToolsOwner()
           /* c8 ignore next */
-          } catch (rollbackError) { throw new AggregateError([error, rollbackError], 'ptc-plus: Cordis reconfiguration and rollback failed', { cause: error }) }
+          } catch (rollbackError) {
+            cordisTools = currentCordis
+            throw new AggregateError([error, rollbackError], 'ptc-plus: Cordis reconfiguration and rollback failed', { cause: error })
+          }
           throw error
         }
       }
@@ -217,7 +273,7 @@ function installPtCRuntime(ctx, resolvedConfig, toolSchemasForAgent, sessionId) 
     }
   }
 
-  return Object.freeze({ dispose, reconfigure })
+  return Object.freeze({ cancelCordisActivation, dispose, reconfigure, ready })
 }
 
 /** Register the session-bound REPL runtime. */
@@ -230,64 +286,167 @@ export function apply(ctx, config = {}) {
     const id = agent?.session?.id ?? agent?.id
     return id === undefined ? undefined : String(id)
   }
-  let runtime
-  let installed = false
+  let committed
+  let activating
   let disposed = false
-  let lifecycleTail = Promise.resolve()
-  let pendingOperations = 0
-  const trackLifecycle = operation => {
-    pendingOperations += 1
+  let transitionTail = Promise.resolve()
+  let pendingTransitions = 0
+  const trackTransition = operation => {
+    pendingTransitions += 1
     const tracked = Promise.resolve(operation)
-    lifecycleTail = Promise.allSettled([tracked])
-    const settle = () => { pendingOperations -= 1 }
+    transitionTail = Promise.allSettled([tracked])
+    const settle = () => { pendingTransitions -= 1 }
     tracked.then(settle, settle)
     return tracked
   }
-  const enqueueLifecycle = task => {
-    const operation = lifecycleTail.then(task, task)
-    return trackLifecycle(operation)
+  const enqueueTransition = task => {
+    const operation = transitionTail.then(task, task)
+    return trackTransition(operation)
+  }
+  const deferred = () => {
+    let resolve
+    let reject
+    const promise = new Promise((onResolve, onReject) => {
+      resolve = onResolve
+      reject = onReject
+    })
+    return { promise, resolve, reject }
+  }
+  const disposeRuntime = record => {
+    if (record?.disposal !== undefined) return record.disposal
+    record.disposal = record.runtime.dispose()
+    return record.disposal
+  }
+  const activationError = (error, cleanupError) => new AggregateError(
+    [error, cleanupError],
+    'ptc-plus: runtime activation and cleanup failed',
+    { cause: error },
+  )
+  const cancelActivation = record => {
+    if (record === undefined) return Promise.resolve()
+    record.cancelled = true
+    if (activating === record) activating = undefined
+    const cleanup = record.runtime === undefined ? Promise.resolve() : disposeRuntime(record)
+    if (record.runtime !== undefined && record.trackedDisposal === undefined) {
+      record.trackedDisposal = trackTransition(cleanup)
+    }
+    cleanup.then(
+      () => record.completion.resolve({ status: 'superseded' }),
+      error => record.completion.reject(error),
+    )
+    return cleanup
+  }
+  const startActivation = record => {
+    if (record.cancelled || disposed || activating !== record) {
+      record.completion.resolve({ status: 'superseded' })
+      return
+    }
+    if (ctx.codeRuntime.language !== 'typescript') {
+      throw new Error('ptc-plus: unsupported code runtime language ' + JSON.stringify(ctx.codeRuntime.language) + '; only "typescript" is supported')
+    }
+    let candidate
+    try {
+      candidate = installPtCRuntime(ctx, record.config, toolSchemasForAgent, sessionId)
+      record.runtime = candidate
+    } catch (error) {
+      const cleanup = error?.[INSTALL_CLEANUP]
+      if (cleanup === undefined) throw error
+      const trackedCleanup = trackTransition(cleanup)
+      void trackedCleanup.then(
+        () => record.completion.reject(error),
+        cleanupError => record.completion.reject(activationError(error, cleanupError)),
+      )
+      if (activating === record) activating = undefined
+      return
+    }
+    const promote = () => {
+      if (record.cancelled || disposed || activating !== record) return
+      activating = undefined
+      committed = record
+      record.completion.resolve({ status: 'applied' })
+    }
+    if (candidate.ready === undefined) {
+      promote()
+      return
+    }
+    void Promise.resolve(candidate.ready).then(promote, async error => {
+      if (record.cancelled) return
+      const cleanup = disposeRuntime(record)
+      const trackedCleanup = record.trackedDisposal === undefined
+        ? (record.trackedDisposal = trackTransition(cleanup))
+        : record.trackedDisposal
+      if (activating === record) activating = undefined
+      try {
+        await trackedCleanup
+      } catch (cleanupError) {
+        record.completion.reject(activationError(error, cleanupError))
+        return
+      }
+      record.completion.reject(error)
+    })
+  }
+  const beginActivation = (nextConfig, generation, prerequisite) => {
+    const completion = deferred()
+    const record = {
+      config: nextConfig,
+      generation,
+      runtime: undefined,
+      disposal: undefined,
+      trackedDisposal: undefined,
+      cancelled: false,
+      completion,
+    }
+    activating = record
+    const start = () => startActivation(record)
+    if (prerequisite !== undefined || pendingTransitions > 0) {
+      void enqueueTransition(async () => {
+        if (prerequisite !== undefined) await prerequisite
+        start()
+      }).catch(error => {
+        if (activating === record) activating = undefined
+        completion.reject(error)
+      })
+    } else {
+      try {
+        start()
+      } catch (error) {
+        if (activating === record) activating = undefined
+        throw error
+      }
+    }
+    return completion.promise
   }
   const controller = {
-    install(nextConfig) {
-      if (installed || disposed) return lifecycleTail
-      const install = () => {
-        if (installed || disposed) return
-        try {
-          if (ctx.codeRuntime.language !== 'typescript') {
-            throw new Error('ptc-plus: unsupported code runtime language ' + JSON.stringify(ctx.codeRuntime.language) + '; only "typescript" is supported')
-          }
-          runtime = installPtCRuntime(ctx, nextConfig, toolSchemasForAgent, sessionId)
-        } catch (error) {
-          const cleanup = error?.[INSTALL_CLEANUP]
-          if (cleanup !== undefined) trackLifecycle(cleanup)
-          throw error
-        }
-        installed = true
+    apply(nextConfig, generation) {
+      if (disposed) return Promise.resolve({ status: 'superseded' })
+      if (activating !== undefined) {
+        const cleanup = cancelActivation(activating)
+        return beginActivation(nextConfig, generation, cleanup)
       }
-      if (pendingOperations > 0) return enqueueLifecycle(install)
-      install()
-      return lifecycleTail
-    },
-    uninstall() {
-      if (!installed && pendingOperations === 0) return lifecycleTail
-      if (installed) {
-        const current = runtime
-        runtime = undefined
-        installed = false
-        return enqueueLifecycle(() => current.dispose())
-      }
-      return enqueueLifecycle(async () => {
-        if (!installed) return
-        const current = runtime
-        runtime = undefined
-        installed = false
-        await current.dispose()
+      if (committed === undefined) return beginActivation(nextConfig, generation)
+      const current = committed
+      if (!nextConfig.cordisToolsEnabled) current.runtime.cancelCordisActivation()
+      return enqueueTransition(async () => {
+        if (disposed || committed !== current) return { status: 'superseded' }
+        await current.runtime.reconfigure(nextConfig)
+        current.config = nextConfig
+        current.generation = generation
+        return { status: 'applied' }
       })
     },
-    reconfigure(nextConfig) {
-      if (!installed || disposed) return lifecycleTail
-      const current = runtime
-      return enqueueLifecycle(() => current?.reconfigure(nextConfig))
+    uninstall() {
+      const activationCleanup = activating === undefined
+        ? Promise.resolve()
+        : cancelActivation(activating)
+      const current = committed
+      committed = undefined
+      const committedCleanup = current === undefined
+        ? Promise.resolve()
+        : trackTransition(disposeRuntime(current))
+      return Promise.all([activationCleanup, committedCleanup]).then(() => undefined)
+    },
+    committedConfig() {
+      return committed?.config
     },
     async dispose() {
       disposed = true
@@ -297,51 +456,27 @@ export function apply(ctx, config = {}) {
   ctx.effect(() => async () => controller.dispose(), 'ptc-plus runtime lifecycle')
 
   let configSource = () => resolvedConfig
-  let activeConfig = resolvedConfig
   let configurationGeneration = 0
   let settingsWriter
-  let activationRollback = false
   let configurationRollback = false
   const reportActivationFailure = (error) => {
     ctx.logger?.warn?.('ptc-plus: runtime activation failed', error)
   }
-  const handleActivationFailure = async (error) => {
-    if (activationRollback) return
-    activationRollback = true
-    try {
-      // Failed installation cleanup is tracked and all-settled by the lifecycle queue.
-      await controller.uninstall()
-      reportActivationFailure(error)
-      if (settingsWriter?.update === undefined) return
-      try {
-        await settingsWriter.update(settingsNamespace(SETTINGS_NAMESPACE), { enabled: false })
-      } catch (rollbackError) {
-        reportActivationFailure(new Error(
-          `ptc-plus: failed to roll back enabled setting: ${rollbackError.message}`,
-          { cause: error },
-        ))
-      }
-    } finally {
-      activationRollback = false
-    }
-  }
-  const handleConfigurationFailure = async (error, previousConfig, generation) => {
-    reportActivationFailure(new Error(
-      `ptc-plus: live configuration failed: ${error.message}`,
-      { cause: error },
-    ))
-    // A newer settings update may already be queued behind this operation.
-    // Its desired state must win; an older failure must not restore stale data.
+  const handleConfigurationFailure = async (error, generation) => {
+    reportActivationFailure(error)
     if (generation !== configurationGeneration || configurationRollback) return
     configurationRollback = true
     try {
       if (settingsWriter?.update === undefined) return
-      const patch = Object.fromEntries(CONFIG_FIELDS.map(field => [field.key, previousConfig[field.key]]))
+      const previousConfig = controller.committedConfig()
+      const patch = previousConfig === undefined
+        ? { enabled: false }
+        : Object.fromEntries(CONFIG_FIELDS.map(field => [field.key, previousConfig[field.key]]))
       try {
         await settingsWriter.update(settingsNamespace(SETTINGS_NAMESPACE), patch)
       } catch (rollbackError) {
         reportActivationFailure(new Error(
-          `ptc-plus: failed to roll back live configuration: ${rollbackError.message}`,
+          `ptc-plus: failed to roll back runtime configuration: ${rollbackError.message}`,
           { cause: error },
         ))
       }
@@ -349,31 +484,31 @@ export function apply(ctx, config = {}) {
       configurationRollback = false
     }
   }
-  const reconcile = () => {
+  const reconcile = (propagateFailure = false) => {
     const current = resolveConfig(configSource())
     const generation = ++configurationGeneration
     if (!current.enabled) {
-      void controller.uninstall().catch(error => reportActivationFailure(new Error(
-        `ptc-plus: runtime disable failed: ${error.message}`,
-        { cause: error },
+      const operation = controller.uninstall()
+      if (propagateFailure) return operation
+      void operation.catch(error => reportActivationFailure(new Error(
+          `ptc-plus: runtime disable failed: ${error.message}`,
+          { cause: error },
       )))
       return
     }
-    if (activationRollback || configurationRollback) return
+    if (configurationRollback) return
     try {
-      const operation = installed
-        ? controller.reconfigure(current)
-        : controller.install(current)
-      void Promise.resolve(operation).then(() => {
-        activeConfig = current
-      }).catch(error => {
-        if (installed) return handleConfigurationFailure(error, activeConfig, generation)
-        return handleActivationFailure(error)
-      })
+      const operation = Promise.resolve(controller.apply(current, generation))
+      if (propagateFailure) {
+        return operation.catch(error => {
+          reportActivationFailure(error)
+          throw error
+        })
+      }
+      void operation.catch(error => handleConfigurationFailure(error, generation))
     } catch (error) {
       if (settingsWriter === undefined) throw error
-      if (installed) void handleConfigurationFailure(error, activeConfig, generation)
-      else void handleActivationFailure(error)
+      void handleConfigurationFailure(error, generation)
     }
   }
   if (typeof ctx.inject === 'function') {
@@ -393,5 +528,5 @@ export function apply(ctx, config = {}) {
       },
     )
   }
-  reconcile()
+  if (configurationGeneration === 0) return reconcile(settingsWriter === undefined)
 }
