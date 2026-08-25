@@ -6,7 +6,8 @@ not achieve the intended result. PTC Plus therefore registers `edit_run_code` as
 
 ```ts
 edit_run_code({
-  edits: Array<{ old_string: string; new_string: string }>
+  edits: Array<{ old_string: string; new_string: string }>,
+  expected_target_call_seq?: number
 })
 
 edit_run_code({
@@ -15,7 +16,8 @@ edit_run_code({
     flags: string
     replacement: string
     expected_matches: number
-  }>
+  }>,
+  expected_target_call_seq?: number
 })
 ```
 
@@ -65,7 +67,11 @@ session-log projection captures the eligible target at the edit call event and a
 source only when its target sequence matches that snapshot and its journal is valid and non-noop,
 so live and recovered eligibility derive from the same persisted relation.
 
-The caller sends exactly one of `edits` or `regex_edits`. Exact edits contain at most 16 items; each
+The caller sends exactly one of `edits` or `regex_edits`, plus an optional non-negative
+`expected_target_call_seq` precondition. The precondition must equal the call sequence of the target
+captured for the persisted edit event; a mismatch returns an unedited result before derived
+dispatch. Ordinary model-authored edits omit it and retain latest-target selection. Exact edits
+contain at most 16 items; each
 non-empty `old_string` must differ from `new_string` and occur exactly once in the target. Regular
 expression edits also contain at most 16 items, use unique `gimsu` flags, reject zero-length matches,
 and require an exact `expected_matches` count. All ranges resolve against the original target and
@@ -97,6 +103,22 @@ No edit-specific runtime context is emitted. The truthful call/result pair alrea
 operation and outcome; changing an aggregate runtime-context snapshot merely to restate that fact
 would repeat unrelated policy context. Rewrite feedback and unrelated recovery tips retain their
 own independently justified lifecycles.
+
+A live `PTC-C001` at the exact source EOF may carry a validated one-call repair. The analyzer tries
+only the three single-token suffixes `}`, `)`, and `]` against the same binding catalog, reserved
+bindings, redeclaration mode, rewrite policy, and import state as the rejected cell. Exactly one
+candidate must complete preparation without a binding collision, and the existing exact editor
+must be able to express it from a bounded unique source suffix. The rejected call must also have a
+persistent event sequence. The diagnostic then renders those already-validated
+`edit_run_code({ edits: [...], expected_target_call_seq })` arguments on one help line. At dispatch,
+the precondition binds the proof to that rejected cell even if another matching source has become
+editable. This evidence takes precedence over the generic source-length recommendation, but remains
+conditional on
+`edit_run_code` being declared for that request. Zero or multiple candidates, non-EOF errors,
+editor budget failures, missing target identity, and candidates rejected later in preparation
+retain the generic guidance.
+The plugin never applies this repair itself: syntax/preflight acceptance does not prove model
+intent, and explicit edit dispatch preserves DSH authority and truthful history.
 
 ## Alternatives considered
 

@@ -14,6 +14,7 @@ export const EDIT_LIMITS = Object.freeze({
 
 const EDIT_RUN_CODE_EXECUTION_DESCRIPTION = 'Edit and run TypeScript cell'
 const REGEX_EDIT_RUN_CODE_EXECUTION_DESCRIPTION = 'Regex-edit and run TypeScript cell'
+export const EXPECTED_TARGET_CALL_SEQ = 'expected_target_call_seq'
 
 const REGEX_MATCH_SCRIPT = `(() => {
   const replacements = []
@@ -254,7 +255,7 @@ function assemble(source, replacements) {
 export function editRunCodeSchema() {
   return {
     name: 'edit_run_code',
-    description: 'Make a small exact or regular-expression change to the most recent eligible cell captured when this edit call is dispatched, then run the complete corrected cell. A successful edit becomes the next eligible cell. Use this only when replaying the whole cell is safe. If earlier code may already have caused an external effect, use a new run_code cell and its existing variables instead; this tool does not resume at the error location. Send exactly one atomic edits or regex_edits array. Choose edits for a few unique literal fragments; choose regex_edits when one counted pattern covers repeated fragments. Every resolved range must be non-overlapping in the original cell.',
+    description: 'Make a small exact or regular-expression change to the most recent eligible cell captured when this edit call is dispatched, then run the complete corrected cell. A successful edit becomes the next eligible cell. Use this only when replaying the whole cell is safe. If earlier code may already have caused an external effect, use a new run_code cell and its existing variables instead; this tool does not resume at the error location. Send exactly one atomic edits or regex_edits array, plus expected_target_call_seq only when a diagnostic supplies it to bind a validated repair to its rejected cell. Choose edits for a few unique literal fragments; choose regex_edits when one counted pattern covers repeated fragments. Every resolved range must be non-overlapping in the original cell.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -285,6 +286,10 @@ export function editRunCodeSchema() {
             required: ['pattern', 'flags', 'replacement', 'expected_matches'],
           },
         },
+        [EXPECTED_TARGET_CALL_SEQ]: {
+          type: 'integer', minimum: 0,
+          description: 'Optional target precondition copied from a validated diagnostic. The edit is rejected if the captured cell has another call sequence.',
+        },
       },
       oneOf: [{ required: ['edits'] }, { required: ['regex_edits'] }],
     },
@@ -296,32 +301,41 @@ export function editRejectedCell(value, source, timeoutMs = DEFAULT_REGEX_TIMEOU
     return rejection('edit_run_code expects an object with exactly one edits or regex_edits array')
   }
   const keys = Object.keys(value)
-  if (keys.length !== 1 || !['edits', 'regex_edits'].includes(keys[0]) || !Array.isArray(value[keys[0]])) {
+  const operationKeys = keys.filter(key => key === 'edits' || key === 'regex_edits')
+  if (operationKeys.length !== 1 || keys.length > 2
+    || keys.some(key => !['edits', 'regex_edits', EXPECTED_TARGET_CALL_SEQ].includes(key))
+    || !Array.isArray(value[operationKeys[0]])) {
     return rejection('edit_run_code expects exactly one edits or regex_edits array')
   }
+  if (Object.hasOwn(value, EXPECTED_TARGET_CALL_SEQ)
+    && (!Number.isSafeInteger(value[EXPECTED_TARGET_CALL_SEQ])
+      || value[EXPECTED_TARGET_CALL_SEQ] < 0)) {
+    return rejection('edit_run_code expected_target_call_seq must be a non-negative safe integer')
+  }
   if (source === undefined) return rejection('no run_code cell is currently eligible for safe editing')
-  const resolved = keys[0] === 'edits'
+  const operation = operationKeys[0]
+  const resolved = operation === 'edits'
     ? exactReplacements(value.edits, source)
     : regexReplacements(value.regex_edits, source, timeoutMs)
   if (resolved.error !== undefined) return rejection(resolved.error)
   const replacements = resolved.replacements.sort((left, right) => left.start - right.start)
   for (let index = 1; index < replacements.length; index += 1) {
     if (replacements[index].start < replacements[index - 1].end) {
-      return rejection(`${keys[0]}[${replacements[index].index}] overlaps ${keys[0]}[${replacements[index - 1].index}] in the target cell`)
+      return rejection(`${operation}[${replacements[index].index}] overlaps ${operation}[${replacements[index - 1].index}] in the target cell`)
     }
   }
   const preflight = preflightAssembly(source, replacements)
   if (preflight.error !== undefined) {
-    return rejection(keys[0] === 'regex_edits' ? preflight.error.replace(/^edits/, 'regex_edits') : preflight.error)
+    return rejection(operation === 'regex_edits' ? preflight.error.replace(/^edits/, 'regex_edits') : preflight.error)
   }
   const assembled = assemble(source, preflight.replacements)
   if (assembled.error !== undefined) {
-    return rejection(keys[0] === 'regex_edits' ? assembled.error.replace(/^edits/, 'regex_edits') : assembled.error)
+    return rejection(operation === 'regex_edits' ? assembled.error.replace(/^edits/, 'regex_edits') : assembled.error)
   }
   return Object.freeze({
     edited: true,
     code: assembled.code,
-    description: keys[0] === 'edits'
+    description: operation === 'edits'
       ? EDIT_RUN_CODE_EXECUTION_DESCRIPTION
       : REGEX_EDIT_RUN_CODE_EXECUTION_DESCRIPTION,
   })

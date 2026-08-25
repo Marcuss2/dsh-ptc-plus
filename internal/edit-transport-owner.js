@@ -12,7 +12,11 @@ import {
   normalizeRewrites,
   validatedRewrites,
 } from './session-journal.js'
-import { editRejectedCell, editRunCodeSchema } from './rejected-cell-editor.js'
+import {
+  EXPECTED_TARGET_CALL_SEQ,
+  editRejectedCell,
+  editRunCodeSchema,
+} from './rejected-cell-editor.js'
 import { editTargetForCall, projectSessionLog } from './session-log-view.js'
 import { RUN_CODE } from './runtime-bridge-owner.js'
 import { isRecord } from './record-utils.js'
@@ -126,6 +130,13 @@ export function createEditTransportOwner(ctx, {
     }
     const edited = editRejectedCell(args, target.source)
     if (!edited.edited) return edited
+    const expectedTargetCallSeq = args[EXPECTED_TARGET_CALL_SEQ]
+    if (expectedTargetCallSeq !== undefined && expectedTargetCallSeq !== target.callSeq) {
+      return {
+        edited: false,
+        reason: `validated repair targets run_code call ${expectedTargetCallSeq}, but this edit captured call ${target.callSeq}`,
+      }
+    }
     if (typeof ctx.tools.execute !== 'function') {
       throw new Error('ptc-plus: DSH tools.execute is required for derived edit execution')
     }

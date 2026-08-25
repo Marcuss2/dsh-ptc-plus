@@ -20,7 +20,7 @@ DSH 为一个 agent composition 固定选择 `native`、`code` 或 `both`。首�
 
 `edit_run_code` 对其持久化 `tool/call` 事件出现时当前 open turn 最近的可编辑 cell 生效，无论该 cell 被拒绝、运行失败，还是成功执行但结果需要微调。执行通过 call event sequence 读取该快照，后续 settlement 或 handler 调度不改变目标；派生 cell 则按外层 `tool/result` event sequence 进入恢复历史，使 cold replay 保持 live kernel 的实际结算顺序。
 调查 tool 不擦除目标；edit 发起后的其他 settlement 不追溯改变其目标；一次成功 edit 生成的新 cell 成为下一次 edit 的目标。调用方必须且只能提交 `edits` 或
-`regex_edits` 之一。`internal/rejected-cell-editor.js` 统一拥有 schema、匹配、replacement 语义、预算和原子源码组装；
+`regex_edits` 之一，并可携带 `expected_target_call_seq` 作为目标前置条件；它与 call event 已捕获目标不一致时，在任何派生 dispatch 前返回未编辑结果。`internal/rejected-cell-editor.js` 统一拥有 schema、匹配、replacement 语义、预算和原子源码组装；
 所有位置都针对原始目标源码解析，全部范围不得重叠，预算通过后才以单次线性扫描物化结果。
 
 注册工具通过 DSH 公共 `tools.execute()` 将完整修改后源码派生执行为 `run_code`。外层历史仍是模型真实发出的
@@ -39,6 +39,8 @@ return 或打印需要展示的值。失败恢复先按状态分类：解析或 
 禁止重发完整源码，优先使用 `edit_run_code` 做精确修正并重放完整 cell；`state: partially-applied` 或可能已有外部 effect 时新建短
 `run_code` 并复用已有 binding，完整重写只保留给结构性改动或超出编辑预算的修正。能力和命令执行依赖当前 request
 与 execution world，模型必须先探查 live binding、实际 executable 和路径语义，不假设某个平台、shell 或 package runner。
+
+live `PTC-C001` 若精确落在源码 EOF，独立的 bounded analyzer 只把追加单个 `}`、`)`、`]` 的三个源码分别送入该 cell 提交时的同一 preparation context。仅当唯一候选通过、无 binding collision，现有 exact editor 能从不超过固定预算的唯一尾部物化同一源码，并且 runtime 已取得该 rejected `run_code` 的持久 call sequence 时，诊断才输出一行可直接调用的 `edit_run_code({ edits: [...], expected_target_call_seq })`。edit transport 把该 sequence 与其 call event 捕获的目标比较，目标已变化时不编辑也不派生执行。这项 validated repair 优先于长度阈值，但只证明语法/preflight 接受；插件不自动 dispatch，也不改写原始 `run_code`。非 EOF、多候选、多 token、超预算、缺少目标身份或后续 preparation 拒绝均回到原有 length-adaptive help。
 
 稳定指引保留这些跨任务不变量和失败恢复的优先动作。长 cell 失败的短提示直接作为当前 `PTC-X001` 的结构化 `help` 输出，避免一次性建议触发完整 runtime-context 快照；重复绑定失败和当前 execution world 中由诊断确认的 executable、shell 或 path 错误仍由当前 session log 派生为 `tools:ptc-plus-tip/<trigger>/<ordinal>` runtime context，分别提示能力探查或重新确认环境。投影只接受 DSH system-prompt owner 的规范快照，并按命名 section 的有效状态变化重建提示；聚合快照重复同一 section 不增加次数，正文不参与身份判断。
 相同提示受 `tipCooldownMessages` 间隔约束，连续未解决时才升级为详细版本，成功 cell 会重置未解决计数；提示不会改变

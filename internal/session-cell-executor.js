@@ -20,6 +20,7 @@ import { PreflightError, prepareProgram } from './cell-analysis.js'
 import { ModuleRewriteError } from './cell-rewriter.js'
 import { mapSourcePosition } from './source-position-map.js'
 import { durabilityState, transitionDurability } from './session-state.js'
+import { validatedEofClosureRepair } from './validated-parse-repair.js'
 
 const OUTPUT_LIMIT_MESSAGE = bytes => `output exceeded ${bytes} bytes; reduce the returned value or keep it in a REPL binding`
 
@@ -49,7 +50,7 @@ function isBindingReferenceError(error) {
       || /Cannot access ['"][^'"]+['"] before initialization/.test(error.message))
 }
 
-function parseDiagnostic(error, source) {
+function parseCellPosition(error) {
   const cellPosition = error instanceof ModuleRewriteError ? error.cellPosition : undefined
   const line = Number.isSafeInteger(cellPosition?.line)
     ? cellPosition.line
@@ -57,18 +58,29 @@ function parseDiagnostic(error, source) {
   const column = Number.isSafeInteger(cellPosition?.column)
     ? cellPosition.column
     : Number.isSafeInteger(error?.loc?.column) ? error.loc.column + 1 : undefined
+  return line !== undefined && line >= 1 && column !== undefined
+    ? { line, column }
+    : undefined
+}
+
+function parseDiagnostic(error, source, position, repair) {
   return diagnostic({
     code: 'PTC-C001',
     severity: 'error',
     phase: 'parse',
     message: `cell could not be parsed: ${oneLineMessage(error)}`,
     stateEffect: 'unchanged',
-    ...(line !== undefined && line >= 1 && column !== undefined ? {
-      source: { cell: 'current', start: { line, column } },
-    } : {}),
-    help: source.length >= LONG_CELL_CODE_UNITS
-      ? ['this cell was not executed; when edit_run_code is declared for the current request and the correction is small and localized, use it to avoid resending this long source; otherwise retry only this cell with corrected source in run_code']
-      : ['this cell was not executed; correct the reported syntax and retry only this cell with run_code'],
+    ...(position === undefined ? {} : {
+      source: { cell: 'current', start: position },
+    }),
+    help: repair === undefined
+      ? source.length >= LONG_CELL_CODE_UNITS
+        ? ['this cell was not executed; when edit_run_code is declared for the current request and the correction is small and localized, use it to avoid resending this long source; otherwise retry only this cell with corrected source in run_code']
+        : ['this cell was not executed; correct the reported syntax and retry only this cell with run_code']
+      : [
+          `this cell was not executed; validated syntax repair: append ${JSON.stringify(repair.delimiter)} at the end of this cell`,
+          `when edit_run_code is declared for the current request, call ${repair.invocation} to apply this correction and rerun the cell; otherwise retry only this cell with the corrected source in run_code`,
+        ],
   })
 }
 
@@ -198,29 +210,41 @@ export class SessionCellExecutor {
       return result
     }
 
-    let prepared
     const catalog = kernel.bindingCatalog.inputs()
-    let looseTopLevelRedeclarations
+    const looseTopLevelRedeclarations = replayRecord === undefined
+      ? config.looseTopLevelRedeclarations
+      : replayRecord.bindingMode === 'loose'
+    const rewritesEnabled = replayRecord === undefined ? {
+      autoRewriteImports: config.autoRewriteImports,
+      autoStripExports: config.autoStripExports,
+      autoSplitRedeclarations: config.autoSplitRedeclarations,
+    } : replayRecord.rewritePolicy
+    const prepareCell = program => prepareProgram(
+      program,
+      catalog.knownBindings,
+      looseTopLevelRedeclarations,
+      request.bindingDescriptors.reservedNames,
+      rewritesEnabled,
+      catalog.importBindings,
+      catalog.importNamespaces,
+    )
+    let prepared
     try {
-      looseTopLevelRedeclarations = replayRecord === undefined
-        ? config.looseTopLevelRedeclarations
-        : replayRecord.bindingMode === 'loose'
-      prepared = prepareProgram(
-        request.program,
-        catalog.knownBindings,
-        looseTopLevelRedeclarations,
-        request.bindingDescriptors.reservedNames,
-        replayRecord === undefined ? {
-          autoRewriteImports: config.autoRewriteImports,
-          autoStripExports: config.autoStripExports,
-          autoSplitRedeclarations: config.autoSplitRedeclarations,
-        } : replayRecord.rewritePolicy,
-        catalog.importBindings,
-        catalog.importNamespaces,
-      )
+      prepared = prepareCell(request.program)
     } catch (error) {
       const result = earlyResult('exception', messageOf(error))
-      const failure = error instanceof PreflightError ? preflightDiagnostic(error) : parseDiagnostic(error, request.program)
+      const position = parseCellPosition(error)
+      const repair = error instanceof PreflightError || replayRecord !== undefined
+        ? undefined
+        : validatedEofClosureRepair({
+            source: request.program,
+            position,
+            prepare: prepareCell,
+            targetCallSeq: request.sourceCallSeq,
+          })
+      const failure = error instanceof PreflightError
+        ? preflightDiagnostic(error)
+        : parseDiagnostic(error, request.program, position, repair)
       result.error.message = renderDiagnostic(failure, request.program)
       kernel.completeJournal(request.journal, 'noop', result, undefined, [failure])
       return result

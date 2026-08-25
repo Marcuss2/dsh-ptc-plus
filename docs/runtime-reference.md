@@ -8,9 +8,11 @@ The default loose binding mode lets a complete top-level `const` or `let` declar
 
 Every capability namespace is leased to one cell. Captured `tools`, `capabilities`, `repl`, `code`, or member functions expire when that cell ends.
 
-For PTC mode requests using the code-only direct-tool projection, PTC Plus presents two tools in stable order: `run_code` and `edit_run_code`. The latter edits the most recent eligible cell visible when the edit call is dispatched, including a cell that completed successfully but needs a small adjustment. That target remains fixed while the call is in flight; later tool settlements cannot retarget it. The edit accepts exactly one atomic `edits` or `regex_edits` array; invalid or unavailable edits return `{ edited: false, reason }` without executing source or consuming the target.
+For PTC mode requests using the code-only direct-tool projection, PTC Plus presents two tools in stable order: `run_code` and `edit_run_code`. The latter edits the most recent eligible cell visible when the edit call is dispatched, including a cell that completed successfully but needs a small adjustment. That target remains fixed while the call is in flight; later tool settlements cannot retarget it. The edit accepts exactly one atomic `edits` or `regex_edits` array and an optional `expected_target_call_seq` precondition. Invalid, unavailable, or mismatched-target edits return `{ edited: false, reason }` without executing source or consuming the target.
 
 `edit_run_code` is a real registered tool call. Session history and later model requests retain its original name and delta arguments. The plugin executes the materialized source as a host-derived `run_code`, returns only the edit status, value, and logs to the model, and keeps the complete source plus journal in private replay metadata. It does not rewrite assistant history or emit edit-specific runtime context.
+
+When a live parse error occurs exactly at the cell EOF, PTC Plus checks the three single-closing-token corrections `}`, `)`, and `]` with the same preparation context. If exactly one correction succeeds, the existing editor can express it from a bounded unique suffix, and the rejected call has a persistent event identity, `PTC-C001` includes a directly callable `edit_run_code({ edits: [...], expected_target_call_seq })` invocation. The guard must match the target captured when the edit call is persisted, so a later editable cell suppresses execution even when the same literal replacement would match it. The plugin does not apply or execute the correction automatically; ambiguous, broader, and unbound repairs keep the ordinary length-adaptive guidance.
 
 Only values explicitly returned or printed appear in a cell result:
 
@@ -95,7 +97,7 @@ Rewrites are recorded as `meta.dshPtcPlusRewrites` on the tool result (parallel 
 
 | Code | Meaning | State effect |
 | --- | --- | --- |
-| `PTC-C001` | The cell cannot be parsed | Not executed; REPL unchanged; retry a short corrected cell with `run_code`, or use a declared `edit_run_code` for a small localized correction to a long cell; resend with `run_code` for broad or ambiguous repairs |
+| `PTC-C001` | The cell cannot be parsed | Not executed; REPL unchanged; a uniquely validated and target-bound single-token EOF closure includes a directly callable declared `edit_run_code` repair; otherwise retry a short corrected cell with `run_code`, use edit for a localized long-cell correction, and resend with `run_code` for broad, ambiguous, or unbound repairs |
 | `PTC-C002` | Preflight rejected a kernel-control import | Not executed; REPL unchanged |
 | `PTC-N001` | Top-level binding conflict | Not executed; REPL unchanged |
 | `PTC-O001` | Unsupported or over-budget output | Cell executed; earlier mutations may exist |

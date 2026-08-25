@@ -162,6 +162,176 @@ return longOutput.length`
   })
 })
 
+test('executes the validated EOF repair invocation projected by the diagnostic', async (t) => {
+  const events = [{ type: 'turn/start', seq: 0, data: {} }]
+  const session = { id: 'validated-parse-edit', events }
+  const state = fixture()
+  t.after(() => state.dispose())
+  const agent = ptcAgent(session.id, session)
+  const signal = new AbortController().signal
+  await state.assemble(
+    { sections: [], contexts: [], variables: {}, tools: [state.runCodeDefinition] },
+    { agent, scope: agent, signal },
+  )
+
+  const rejectedCode = '{\n  const closureValue = 42\n  return closureValue;'
+  const rejectedCallSeq = appendRunCall(events, 'validated-parse', rejectedCode)
+  const rejected = await state.runDurable(
+    session.id,
+    rejectedCode,
+    {},
+    { session, callId: 'validated-parse' },
+  )
+  assert.equal(rejected.isError, true)
+  assert.equal(rejected.meta.dshPtcPlus.status, 'noop')
+  const diagnostic = rejected.meta.dshPtcPlus.diagnostics[0]
+  assert.deepEqual(diagnostic.help.slice(0, 1), [
+    'this cell was not executed; validated syntax repair: append "}" at the end of this cell',
+  ])
+  const invocation = /call edit_run_code\((\{.*\})\) to apply this correction/.exec(diagnostic.help[1])
+  assert.notEqual(invocation, null)
+  const editArgs = JSON.parse(invocation[1])
+  assert.equal(JSON.stringify(editArgs).includes(rejectedCode), false)
+  assert.equal(editArgs.expected_target_call_seq, rejectedCallSeq)
+  appendRunResult(events, 'validated-parse', rejectedCallSeq, rejected)
+
+  const editCallSeq = appendEditCall(events, 'validated-parse-edit', editArgs)
+  const edited = await state.ctx.tools.execute({
+    callId: 'validated-parse-edit',
+    name: 'edit_run_code',
+    arguments: editArgs,
+    agent,
+    signal,
+  })
+  assert.equal(edited.isError, false)
+  assert.deepEqual(edited.value, { edited: true, logs: [], value: 42 })
+  assert.equal(edited.meta.dshPtcPlusDerivedRun.code, `${rejectedCode}}`)
+  appendEditResult(events, 'validated-parse-edit', editCallSeq, edited.meta)
+})
+
+test('rejects a validated EOF repair after a newer matching cell becomes editable', async (t) => {
+  const events = [{ type: 'turn/start', seq: 0, data: {} }]
+  const session = { id: 'stale-validated-parse-edit', events }
+  const state = fixture()
+  t.after(() => state.dispose())
+  const agent = ptcAgent(session.id, session)
+  await state.assemble(
+    { sections: [], contexts: [], variables: {}, tools: [state.runCodeDefinition] },
+    { agent, scope: agent, signal: new AbortController().signal },
+  )
+
+  const rejectedCode = 'if (true) {'
+  const rejectedCallSeq = appendRunCall(events, 'stale-parse', rejectedCode)
+  const rejected = await state.runDurable(
+    session.id,
+    rejectedCode,
+    {},
+    { session, callId: 'stale-parse' },
+  )
+  const diagnostic = rejected.meta.dshPtcPlus.diagnostics[0]
+  const invocation = /call edit_run_code\((\{.*\})\) to apply this correction/.exec(diagnostic.help[1])
+  assert.notEqual(invocation, null)
+  const editArgs = JSON.parse(invocation[1])
+  assert.equal(editArgs.expected_target_call_seq, rejectedCallSeq)
+  appendRunResult(events, 'stale-parse', rejectedCallSeq, rejected)
+
+  const laterCode = 'const marker = "{"; return 7'
+  const laterCallSeq = appendRunCall(events, 'later-matching-cell', laterCode)
+  const later = await state.runDurable(
+    session.id,
+    laterCode,
+    {},
+    { session, callId: 'later-matching-cell' },
+  )
+  appendRunResult(events, 'later-matching-cell', laterCallSeq, later)
+  const editCallSeq = appendEditCall(events, 'stale-parse-edit', editArgs)
+
+  const execute = state.ctx.tools.execute
+  let derivedDispatches = 0
+  state.ctx.tools.execute = async (request) => {
+    if (request.name === 'run_code') derivedDispatches += 1
+    return execute(request)
+  }
+  const edited = await execute({
+    callId: 'stale-parse-edit',
+    name: 'edit_run_code',
+    arguments: editArgs,
+    agent,
+  })
+  assert.equal(edited.isError, false)
+  assert.deepEqual(edited.value, {
+    edited: false,
+    reason: `validated repair targets run_code call ${rejectedCallSeq}, but this edit captured call ${laterCallSeq}`,
+  })
+  assert.equal(derivedDispatches, 0)
+  assert.deepEqual(edited.meta, {})
+  appendEditResult(events, 'stale-parse-edit', editCallSeq)
+})
+
+test('suppresses a target-bound EOF repair for derived edit parse rejection', async (t) => {
+  const events = [{ type: 'turn/start', seq: 0, data: {} }]
+  const session = { id: 'derived-parse-rejection', events }
+  const state = fixture()
+  t.after(() => state.dispose())
+  const agent = ptcAgent(session.id, session)
+  const signal = new AbortController().signal
+  await state.assemble(
+    { sections: [], contexts: [], variables: {}, tools: [state.runCodeDefinition] },
+    { agent, scope: agent, signal },
+  )
+
+  const source = 'if (true) {}'
+  const setup = await state.runDurable(
+    session.id,
+    source,
+    {},
+    { session, callId: 'derived-parse-setup' },
+  )
+  appendRunCodeEvents(events, 'derived-parse-setup', source, setup)
+
+  const editArgs = { edits: [{ old_string: '{}', new_string: '{' }] }
+  appendEditCall(events, 'derived-parse-edit', editArgs)
+  const edited = await state.ctx.tools.execute({
+    callId: 'derived-parse-edit',
+    name: 'edit_run_code',
+    arguments: editArgs,
+    agent,
+    signal,
+  })
+
+  assert.equal(edited.isError, false)
+  assert.equal(edited.value.edited, false)
+  assert.match(edited.value.error, /correct the reported syntax and retry only this cell with run_code/)
+  assert.doesNotMatch(edited.value.error, /validated syntax repair|expected_target_call_seq/)
+  assert.deepEqual(edited.meta, {})
+})
+
+function appendRunCall(events, callId, code) {
+  const seq = events.length
+  events.push({
+    type: 'tool/call',
+    seq,
+    data: {
+      callId,
+      name: 'run_code',
+      arguments: JSON.stringify({ code, description: 'test cell' }),
+    },
+  })
+  return seq
+}
+
+function appendRunResult(events, callId, callSeq, result) {
+  events.push({
+    type: 'tool/result',
+    seq: events.length,
+    sourceEventSeqs: [callSeq],
+    data: {
+      message: { source: { callId } },
+      ...(result.meta === undefined ? {} : { meta: result.meta }),
+    },
+  })
+}
+
 function appendEditCall(events, callId, args) {
   const seq = events.length
   events.push({

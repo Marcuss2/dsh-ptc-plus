@@ -73,6 +73,8 @@ edit_run_code({ edits: [{ old_string: 'deps.length', new_string: 'deps' }] })
 
 Only the diff goes in. The full source stays out of the conversation. Exact replacements and regular expressions both have limits, so a bad pattern cannot hang.
 
+When a rejected cell has exactly one validated missing closing token at the end, its diagnostic includes the complete `edit_run_code(...)` call needed to apply that correction and rerun the cell. That generated call carries an `expected_target_call_seq` precondition, so it is rejected without execution if another cell becomes the edit target first. PTC Plus never applies the suggestion automatically; ambiguous repairs or repairs without a persistent target identity still require corrected source.
+
 ### Module syntax
 
 DSH PTC mode executes each `run_code` as an async function body, where static `import` and `export` declarations are invalid. PTC Plus adapts those forms before execution with AST analysis.

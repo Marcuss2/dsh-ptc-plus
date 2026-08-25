@@ -73,6 +73,8 @@ edit_run_code({ edits: [{ old_string: 'deps.length', new_string: 'deps' }] })
 
 模型只发改动，完整源码留在对话之外。精确文本替换和正则替换都有限制，坏的正则不会卡住。
 
+当被拒 cell 的末尾可唯一验证为缺少一个闭合符时，诊断会直接给出应用该修正并重运行所需的完整 `edit_run_code(...)` 调用。生成的调用带有 `expected_target_call_seq` 前置条件；如果另一个 cell 已先成为 edit 目标，它会拒绝且不执行。PTC Plus 不会自动应用这项建议；有歧义或没有持久目标身份的修复仍需提交修正后的源码。
+
 ### 模块语法
 
 DSH 的 PTC 模式把每个 `run_code` 当作 async function body 执行，静态 `import` 和 `export` 声明在这个函数体里无效。PTC Plus 会在执行前用 AST 分析适配这些形式。

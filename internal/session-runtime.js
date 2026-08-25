@@ -432,14 +432,22 @@ export class SessionRuntime {
     request = { ...request, bindings: bindingDescriptors.namespaces, bindingDescriptors }
     const { id: sessionId, session, callId, persistedCallSeq, cwd } = sessionOf(sessionContext)
     let callSeq
+    let sourceCallSeq
     try {
       if (persistedCallSeq !== undefined
         && (!Number.isSafeInteger(persistedCallSeq) || persistedCallSeq < 0)) {
         throw new Error('persisted tool call sequence must be a non-negative safe integer')
       }
-      callSeq = cellConfig.durableReplay
-        ? persistedCallSeq ?? liveToolCallSeq(session, callId, 'run_code')
-        : undefined
+      if (cellConfig.durableReplay) {
+        sourceCallSeq = liveToolCallSeq(session, callId, 'run_code')
+        callSeq = persistedCallSeq ?? sourceCallSeq
+      } else {
+        try {
+          sourceCallSeq = liveToolCallSeq(session, callId, 'run_code')
+        } catch {
+          sourceCallSeq = undefined
+        }
+      }
     } catch (error) {
       return completed({ logs: [], error: { kind: 'recovery', message: `cannot identify current run_code call in session log: ${messageOf(error)}` } })
     }
@@ -471,7 +479,7 @@ export class SessionRuntime {
     const workerReservation = kernel.reserveWorkerConfiguration(cellConfig)
     let result
     try {
-      result = await kernel.run({ ...request, journal, callSeq }, cellConfig)
+      result = await kernel.run({ ...request, journal, callSeq, sourceCallSeq }, cellConfig)
     } finally {
       kernel.releaseWorkerConfiguration(workerReservation)
     }

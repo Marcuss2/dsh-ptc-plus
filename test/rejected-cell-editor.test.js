@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { EDIT_LIMITS, editRejectedCell, editRunCodeSchema } from '../internal/rejected-cell-editor.js'
+import {
+  EDIT_LIMITS,
+  EXPECTED_TARGET_CALL_SEQ,
+  editRejectedCell,
+  editRunCodeSchema,
+} from '../internal/rejected-cell-editor.js'
 
 function rejected(value, source = 'alpha beta gamma', timeoutMs) {
   const result = editRejectedCell(value, source, timeoutMs)
@@ -15,6 +20,11 @@ test('publishes the closed edit tool schema', () => {
   assert.deepEqual(schema.parameters.oneOf, [{ required: ['edits'] }, { required: ['regex_edits'] }])
   assert.equal(schema.parameters.properties.edits.maxItems, EDIT_LIMITS.exactEdits)
   assert.equal(schema.parameters.properties.regex_edits.maxItems, EDIT_LIMITS.regexEdits)
+  assert.deepEqual(schema.parameters.properties[EXPECTED_TARGET_CALL_SEQ], {
+    type: 'integer',
+    minimum: 0,
+    description: 'Optional target precondition copied from a validated diagnostic. The edit is rejected if the captured cell has another call sequence.',
+  })
   assert.match(schema.description, /most recent eligible cell captured when this edit call is dispatched/)
   assert.match(schema.description, /successful edit becomes the next eligible cell/)
   assert.match(schema.description, /run the complete corrected cell/)
@@ -28,6 +38,8 @@ test('validates exact edit sets and applies them atomically', () => {
     [{}, 'x', /expects exactly one/],
     [{ edits: [], extra: true }, 'x', /expects exactly one/],
     [{ edits: 'x' }, 'x', /expects exactly one/],
+    [{ edits: [], expected_target_call_seq: '1' }, 'x', /non-negative safe integer/],
+    [{ edits: [], expected_target_call_seq: -1 }, 'x', /non-negative safe integer/],
     [{ edits: [] }, 'x', /at least one/],
     [{ edits: Array.from({ length: 17 }, () => ({ old_string: 'x', new_string: 'y' })) }, 'x', /at most 16/],
     [{ edits: [null] }, 'x', /must be an object/],
@@ -54,6 +66,15 @@ test('validates exact edit sets and applies them atomically', () => {
     description: 'Edit and run TypeScript cell',
   })
   assert.equal(Object.isFrozen(result), true)
+
+  assert.deepEqual(editRejectedCell({
+    edits: [{ old_string: 'alpha', new_string: 'A' }],
+    expected_target_call_seq: 12,
+  }, 'alpha'), {
+    edited: true,
+    code: 'A',
+    description: 'Edit and run TypeScript cell',
+  })
 
   const expensive = 'x'.repeat(EDIT_LIMITS.exactSearchCodeUnits / 32 + 1)
   assert.match(rejected({ edits: Array.from({ length: 16 }, (_, index) => ({
