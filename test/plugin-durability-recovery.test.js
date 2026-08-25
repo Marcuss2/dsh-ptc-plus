@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { access, mkdtemp, rm } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import test from 'node:test'
@@ -100,9 +100,14 @@ test('uses the session header cwd without inheriting the host process cwd', asyn
   assert.deepEqual(unrecordedRun.raw.logs, [])
 })
 
-test('aligns native and exposed cwd and rejects process.chdir divergence', async (t) => {
-  const cwd = await mkdtemp(join(tmpdir(), 'ptc-plus-cwd-'))
-  t.after(() => rm(cwd, { recursive: true, force: true }))
+test('preserves recorded cwd while native paths retain filesystem identity', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'ptc-plus-cwd-'))
+  const physicalCwd = join(root, 'physical')
+  await mkdir(physicalCwd)
+  const cwd = process.platform === 'win32' ? physicalCwd : join(root, 'alias')
+  if (cwd !== physicalCwd) await symlink(physicalCwd, cwd, 'dir')
+  const nativeCwd = await realpath(cwd)
+  t.after(() => rm(root, { recursive: true, force: true }))
   const state = fixture({ maxWallMs: 500 })
   t.after(() => state.dispose())
   const session = { id: 'native-session-cwd', header: { cwd }, events: [] }
@@ -116,7 +121,7 @@ return { exposed: process.cwd(), native: fs.realpathSync('.'), resolved: path.re
   const observed = await state.executeRun(session.id, source, {}, { session })
   assert.deepEqual(observed.raw.value, {
     exposed: cwd,
-    native: cwd,
+    native: nativeCwd,
     resolved: cwd,
     chdirMessage: 'process.chdir is forbidden inside the REPL kernel',
   })

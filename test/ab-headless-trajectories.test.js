@@ -26,12 +26,13 @@ const persona = 'You are a coding agent powered by the {{model}} model. Your wor
 const runtime = { toolsMode: 'code', permissionMode: 'danger-full-access' }
 
 test('separates opaque arm scratch trees from evaluator artifacts', () => {
-  const scratch = armScratchPaths('X:\\scratch-root', 'opaque-123')
-  assert.equal(scratch.directory, 'X:\\scratch-root\\runs\\opaque-123')
-  assert.equal(scratch.workspace, 'X:\\scratch-root\\runs\\opaque-123\\workspace')
+  const scratchRoot = join(tmpdir(), 'ptc-ab-scratch')
+  const scratch = armScratchPaths(scratchRoot, 'opaque-123')
+  assert.equal(scratch.directory, join(scratchRoot, 'runs', 'opaque-123'))
+  assert.equal(scratch.workspace, join(scratchRoot, 'runs', 'opaque-123', 'workspace'))
   assert.equal(JSON.stringify(scratch).includes('plugin'), false)
   assert.equal(JSON.stringify(scratch).includes('baseline'), false)
-  assert.throws(() => armScratchPaths('X:\\scratch-root', '../plugin'), /arm scratch nonce/)
+  assert.throws(() => armScratchPaths(scratchRoot, '../plugin'), /arm scratch nonce/)
 })
 
 test('redacts workspace identity from every blind packet text field', () => {

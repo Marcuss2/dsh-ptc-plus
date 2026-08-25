@@ -1,10 +1,21 @@
 import { readFile } from 'node:fs/promises'
+import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
 const require = createRequire(import.meta.url)
+
+test('keeps generated client bundle checkout bytes stable', () => {
+  const root = fileURLToPath(new URL('..', import.meta.url))
+  const attribute = execFileSync('git', ['check-attr', 'eol', '--', 'client.js'], {
+    cwd: root,
+    encoding: 'utf8',
+  }).trim()
+  assert.equal(attribute, 'client.js: eol: lf')
+})
 
 test('checked client bundle is loadable through the DSH module loader contract', async () => {
   const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')

@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { appendRunCodeEvents, fixture, ptcAgent } from './plugin-fixture.js'
+import { writeRawFilenameFixture } from './raw-filename-fixture.js'
 
 test('preflights every cross-cell binding collision with one actionable diagnostic', async (t) => {
   const state = fixture({ looseTopLevelRedeclarations: false })
@@ -661,6 +662,7 @@ test('keeps rewrite-time diagnostics on exact original cell spans', async (t) =>
 
 test('preserves cwd-aware public properties on wrapped filesystem functions', async (t) => {
   const project = await mkdtemp(join(tmpdir(), 'dsh-ptc-plus-fs-properties-'))
+  const nativeProject = await realpath(project)
   await writeFile(join(project, 'value.txt'), 'session-value')
   await mkdir(join(project, 'relative-dir'))
   await writeFile(join(project, 'relative-dir', 'entry.txt'), 'session-entry')
@@ -686,8 +688,8 @@ test('preserves cwd-aware public properties on wrapped filesystem functions', as
   ].join('\n'), {}, { session })
   assert.equal(result.error, undefined)
   assert.deepEqual(result.value, {
-    asyncPath: join(project, 'value.txt'),
-    syncPath: join(project, 'value.txt'),
+    asyncPath: join(nativeProject, 'value.txt'),
+    syncPath: join(nativeProject, 'value.txt'),
     exists: true,
     directoryEntries: ['entry.txt'],
     opendirSelfReference: true,
@@ -721,13 +723,16 @@ test('preserves relative symlink target payloads', { skip: process.platform === 
 
 test('preserves raw bytes in relative Buffer filesystem paths', { skip: process.platform === 'win32' }, async (t) => {
   const project = await mkdtemp(join(tmpdir(), 'dsh-ptc-plus-buffer-cwd-'))
-  const filename = Buffer.from([0x72, 0x61, 0x77, 0x2d, 0x80])
-  await writeFile(Buffer.concat([Buffer.from(`${project}/`), filename]), 'session-value')
-  const state = fixture()
   t.after(async () => {
-    await state.dispose()
     await rm(project, { recursive: true, force: true })
   })
+  const filename = Buffer.from([0x72, 0x61, 0x77, 0x2d, 0x80])
+  if (await writeRawFilenameFixture(project, filename, 'session-value') === undefined) {
+    t.skip('The active filesystem cannot represent arbitrary POSIX filename bytes')
+    return
+  }
+  const state = fixture()
+  t.after(() => state.dispose())
   const session = { events: [], header: { cwd: project } }
   const result = await state.run('buffer-path-cwd', [
     "const fs = require('node:fs')",

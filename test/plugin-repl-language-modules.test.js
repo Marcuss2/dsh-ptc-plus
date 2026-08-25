@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -452,6 +452,8 @@ test('anchors path.resolve to the session cwd after process.cwd mutation', async
 test('uses the session cwd for child processes while preserving explicit cwd', async (t) => {
   const project = await mkdtemp(join(tmpdir(), 'dsh-ptc-plus-child-cwd-'))
   const explicit = await mkdtemp(join(tmpdir(), 'dsh-ptc-plus-child-explicit-'))
+  const nativeProject = await realpath(project)
+  const nativeExplicit = await realpath(explicit)
   const state = fixture()
   t.after(async () => {
     await state.dispose()
@@ -472,16 +474,17 @@ test('uses the session cwd for child processes while preserving explicit cwd', a
   ].join('\n')
   const result = await state.run('child-process-cwd', source, {}, { session })
   assert.deepEqual(result.value, {
-    execFileCwd: project,
-    execFileDefaultCwd: project,
-    spawnCwd: project,
-    execCwd: project,
-    explicitCwd: explicit,
+    execFileCwd: nativeProject,
+    execFileDefaultCwd: nativeProject,
+    spawnCwd: nativeProject,
+    execCwd: nativeProject,
+    explicitCwd: nativeExplicit,
   })
 })
 
 test('injects session cwd into execFile callback overloads', async (t) => {
   const project = await mkdtemp(join(tmpdir(), 'dsh-ptc-plus-execfile-callback-'))
+  const nativeProject = await realpath(project)
   const state = fixture()
   t.after(async () => {
     await state.dispose()
@@ -494,11 +497,12 @@ test('injects session cwd into execFile callback overloads', async (t) => {
     "const observed = await new Promise((resolve, reject) => childProcess.execFile(process.execPath, ['-e', source], (error, stdout) => error === null ? resolve(stdout) : reject(error)))",
     'return observed',
   ].join('\n'), {}, { session })
-  assert.equal(result.value, project)
+  assert.equal(result.value, nativeProject)
 })
 
 test('preserves child-process promisify results while injecting the session cwd', async (t) => {
   const project = await mkdtemp(join(tmpdir(), 'dsh-ptc-plus-promisify-child-'))
+  const nativeProject = await realpath(project)
   const state = fixture()
   t.after(async () => {
     await state.dispose()
@@ -519,8 +523,8 @@ test('preserves child-process promisify results while injecting the session cwd'
     'return { execFileResult, execResult, execFileError, execError }',
   ].join('\n'), {}, { session })
   assert.deepEqual(result.value, {
-    execFileResult: { stdout: project, stderr: '' },
-    execResult: { stdout: project, stderr: '' },
+    execFileResult: { stdout: nativeProject, stderr: '' },
+    execResult: { stdout: nativeProject, stderr: '' },
     execFileError: { code: 7, stdout: 'out', stderr: 'err' },
     execError: { code: 7, stdout: 'out', stderr: 'err' },
   })

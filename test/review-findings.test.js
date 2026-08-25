@@ -18,6 +18,7 @@ import {
   validateReviewLedger,
   verificationCommand,
 } from '../scripts/review-findings.mjs'
+import { writeRawFilenameFixture } from './raw-filename-fixture.js'
 
 const templateText = await readFile(TEMPLATE_PATH, 'utf8')
 
@@ -408,10 +409,15 @@ test('preserves raw POSIX filename bytes in source fingerprints', async (t) => {
     t.skip('The active Git cannot represent arbitrary POSIX filename bytes')
     return
   }
-  const file = Buffer.concat([
-    Buffer.from(root), Buffer.from(path.sep), Buffer.from([0x72, 0x61, 0x77, 0x2d, 0xff]),
-  ])
-  await writeFile(file, 'base\n')
+  const file = await writeRawFilenameFixture(
+    root,
+    Buffer.from([0x72, 0x61, 0x77, 0x2d, 0xff]),
+    'base\n',
+  )
+  if (file === undefined) {
+    t.skip('The active filesystem cannot represent arbitrary POSIX filename bytes')
+    return
+  }
   execFileSync('git', ['add', '--all'], { cwd: root })
   execFileSync('git', ['-c', 'user.name=PTC Test', '-c', 'user.email=ptc@example.test',
     'commit', '--quiet', '-m', 'base'], { cwd: root })
