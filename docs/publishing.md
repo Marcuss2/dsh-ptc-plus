@@ -14,6 +14,30 @@
 
 在 `cordis.patch.yml` 和解析后的 DSH 配置中，`id: ptc-plus` 标识插件配置项，`name: dsh-ptc-plus` 标识待加载的包。内部错误前缀、runtime context 名称和 worker 临时路径会按所属子系统使用 `ptc-plus` 或 `dsh-ptc-plus`；它们不是另外的公开产品名。
 
+## 发布权限与流水线
+
+npm 发布遵循 [ADR 0022](adr/0022-stage-npm-releases-with-oidc.md)，使用 `.github/workflows/release.yml` 声明的 Trusted Publisher，不向 GitHub 保存 npm write token。npm package settings 必须把 publisher 精确绑定到 `muyuanjin/dsh-ptc-plus`、workflow filename `release.yml` 和 environment `npm-release`，且只允许 `npm stage publish`。Publishing access 选择页面中最严格且标记为 recommended 的 2FA 选项；npm 文档称其为 `Require two-factor authentication and disallow tokens`，当前 npm 页面也可能显示 `Require two-factor authentication and disallow bypass 2fa tokens (recommended)`。不要从滚动变化的标签推断账户中已不存在传统 token。OIDC 只把经过验证的 tarball 放入 npm staging，维护者仍须在 npm CLI 或 npmjs.com 检查 staged package 并以 2FA approve，包才会进入公开 registry。
+
+普通 `CI` 只响应 `main` push 与 pull request。发布前创建 annotated `v<package.version>` tag，原子推送 release commit 与 tag，等待该 commit 的 `CI` 成功，然后以该 tag 作为 ref 显式运行 `Release` workflow。workflow 不接受另一个 tag input，并会重新证明 dispatch 的 `GITHUB_REF`、`GITHUB_SHA`、annotated tag target、checkout HEAD、manifest 版本和成功 CI 的 SHA 完全一致；release job 使用 GitHub-hosted Node `24.15.0`、npm `12.0.2`、无 package-manager cache 和最小 `id-token: write` 权限，构建一个 tarball、执行 clean-consumer smoke，再对同一文件执行 `npm stage publish`。`package.json#allowScripts` 显式拒绝当前不需要的 `esbuild` install script；`replace-registry-host=always` 让 release install 将 lockfile 中的 registry tarball 路由到显式 npm 官方 registry，而不放宽 npm 12 的 Git/remote dependency 默认拒绝。
+
+```powershell
+git tag -a "v$((Get-Content package.json | ConvertFrom-Json).version)" -m "v$((Get-Content package.json | ConvertFrom-Json).version)"
+git push --atomic origin main "v$((Get-Content package.json | ConvertFrom-Json).version)"
+gh workflow run release.yml --ref "v$((Get-Content package.json | ConvertFrom-Json).version)"
+```
+
+workflow 成功只表示 package 已 staged，并非已经公开发布。维护者从 workflow 日志或 npmjs.com 的 Staged Packages 页面取得 stage id，检查 metadata 和下载的 tarball 后执行：
+
+```powershell
+npm.cmd stage view '<stage-id>' --json --registry=https://registry.npmjs.org/
+npm.cmd stage download '<stage-id>' --registry=https://registry.npmjs.org/
+npm.cmd stage approve '<stage-id>' --registry=https://registry.npmjs.org/
+```
+
+`npm stage approve` 必须完成 npm 2FA。approve 后 npm 会进行 publish-time malware scan；公开可安装通常延迟约 5 分钟，高峰或需进一步检查时可能超过 15 分钟。发布自动化必须轮询明确版本并允许该延迟，不能把 approve 返回等同于 registry 已可安装。扫描确认版本可用后再发布对应 GitHub Release。staged 内容错误时使用 `npm stage reject <stage-id>` 并完成 2FA，不能移动既有 tag 或用同一版本覆盖。
+
+首次 OIDC staging 成功后，检查 npm 账户的 Access Tokens，并撤销所有仍可对本包执行 publish 或 stage 的 granular/automation token，尤其是 bypass-2FA token；在 Trusted Publisher 尚未实测成功前保留恢复路径，不能把未验证的凭据切换当成完成。后续 workflow 不保存或读取 npm token，定期清点用于发现账户侧重新引入的发布凭据。
+
 ## Release checklist
 
 1. 在 Node `22.19.0` 与 Node 24.x 上运行 `npm ci`、`npm run build:check` 和 `npm run check`；Node 24.x 还应覆盖 Windows、Linux 与 macOS。仓库 CI 定义同一矩阵。
@@ -22,7 +46,7 @@
 4. 在 Windows 与 Linux CLI/Web 实机启动临时 profile。macOS 由原生 runner 验证 CLI/Web；Windows 与 macOS Desktop 从托盘打开当前 profile 的 DSH Terminal 安装，重启 Desktop 后做一次 PTC 模式 smoke。Desktop 当前发布平台不包括 Linux。
 5. 只有在明确授权模型消耗后才运行 `npm run test:expensive` 与 `npm run test:ab`。发布结论以结构化测试结果为准，不把一次模型样本推广为普遍保证。
 6. 确认 npm 包名可用、待发布版本高于 registry 版本、README 截图来自真实 DSH 会话，并核对 repository、homepage、bugs、license 与 `dsh-plugin` topic。
-7. 最后检查 `npm pack --silent --json` 的名称、版本、大小与文件列表，再创建并推送 release commit/tag，随后发布同一 commit 产生的 tarball。
+7. 最后检查 `npm pack --silent --json` 的名称、版本、大小与文件列表，创建 annotated release tag，并确认 tag commit 已通过 `CI`。运行 `Release` workflow 将同一源码产生的 tarball送入 npm staging；人工检查并以 2FA approve 后，等待 registry 扫描完成，再创建 GitHub Release。
 
 远程仓库、registry、签名凭据、目标平台运行状态和模型额度都属于发布时事实，不能由本地 manifest 推断。
 

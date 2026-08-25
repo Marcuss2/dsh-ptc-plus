@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
 
 permissions:
@@ -25,8 +27,8 @@ jobs:
             node: 24
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -40,7 +42,7 @@ jobs:
           pack_dir="$(mktemp -d)"
           consumer_dir="$(mktemp -d)"
           trap 'rm -rf -- "$pack_dir" "$consumer_dir"' EXIT
-          archive="$(npm pack --silent --pack-destination "$pack_dir" --json | node -e "let input=''; process.stdin.on('data', chunk => input += chunk); process.stdin.on('end', () => process.stdout.write(JSON.parse(input)[0].filename))")"
+          archive="$(npm pack --silent --pack-destination "$pack_dir" --json | node scripts/npm-pack-filename.mjs)"
           cd "$consumer_dir"
           npm init --yes
           npm install --ignore-scripts "$pack_dir/$archive"

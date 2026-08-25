@@ -1,0 +1,128 @@
+name: Release
+run-name: Stage ${{ github.ref_name }} for npm approval
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate-target:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      package-name: ${{ steps.target.outputs.package-name }}
+      package-version: ${{ steps.target.outputs.package-version }}
+      release-sha: ${{ steps.target.outputs.release-sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - id: target
+        name: Validate tag and successful CI identity
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/tags/$RELEASE_TAG"
+          test "$(git cat-file -t "refs/tags/$RELEASE_TAG")" = tag
+          test "$(git rev-list -n 1 "refs/tags/$RELEASE_TAG")" = "$(git rev-parse HEAD)"
+
+          release_sha="$(git rev-parse HEAD)"
+          test "$GITHUB_SHA" = "$release_sha"
+
+          package_name="$(node -p "require('./package.json').name")"
+          package_version="$(node -p "require('./package.json').version")"
+          test "$RELEASE_TAG" = "v$package_version"
+
+          successful_runs="$(gh api --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+            -f head_sha="$release_sha" \
+            -f status=completed \
+            -f per_page=100 \
+            --jq '[.workflow_runs[] | select(.event == "push" and .head_branch == "main" and .conclusion == "success")] | length')"
+          test "$successful_runs" -ge 1
+
+          echo "package-name=$package_name" >> "$GITHUB_OUTPUT"
+          echo "package-version=$package_version" >> "$GITHUB_OUTPUT"
+          echo "release-sha=$release_sha" >> "$GITHUB_OUTPUT"
+
+  stage:
+    needs: validate-target
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: npm-release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+      NPM_CONFIG_REPLACE_REGISTRY_HOST: always
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.validate-target.outputs.release-sha }}
+      - name: Revalidate immutable release target
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/tags/$RELEASE_TAG"
+          test "$(git cat-file -t "refs/tags/$RELEASE_TAG")" = tag
+          test "$(git rev-list -n 1 "refs/tags/$RELEASE_TAG")" = "$(git rev-parse HEAD)"
+          test "$GITHUB_SHA" = "${{ needs.validate-target.outputs.release-sha }}"
+          test "$(git rev-parse HEAD)" = "${{ needs.validate-target.outputs.release-sha }}"
+          test "$RELEASE_TAG" = "v${{ needs.validate-target.outputs.package-version }}"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.15.0
+          registry-url: https://registry.npmjs.org/
+          package-manager-cache: false
+      - name: Install release npm CLI
+        run: npm install --global npm@12.0.2 --ignore-scripts
+      - name: Verify and pack the release artifact
+        id: pack
+        shell: bash
+        env:
+          PACKAGE_NAME: ${{ needs.validate-target.outputs.package-name }}
+          PACKAGE_VERSION: ${{ needs.validate-target.outputs.package-version }}
+        run: |
+          set -euo pipefail
+          if npm view "$PACKAGE_NAME@$PACKAGE_VERSION" version >/dev/null 2>&1; then
+            echo "$PACKAGE_NAME@$PACKAGE_VERSION is already published" >&2
+            exit 1
+          fi
+
+          npm ci
+          npm run build:check
+          npm audit
+          npx --yes publint@0.3.24
+          git diff --exit-code
+
+          pack_dir="$(mktemp -d)"
+          consumer_dir="$(mktemp -d)"
+          archive="$(npm pack --silent --pack-destination "$pack_dir" --json | node scripts/npm-pack-filename.mjs)"
+          archive_path="$pack_dir/$archive"
+          sha512sum "$archive_path"
+
+          cd "$consumer_dir"
+          npm init --yes
+          npm install --ignore-scripts "$archive_path"
+          node --input-type=module -e "const plugin = await import('$PACKAGE_NAME'); if (plugin.name !== 'ptc-plus' || typeof plugin.apply !== 'function') throw new Error('invalid package exports')"
+          cd "$GITHUB_WORKSPACE"
+
+          echo "archive-path=$archive_path" >> "$GITHUB_OUTPUT"
+      - name: Stage package on npm for maintainer 2FA approval
+        shell: bash
+        run: npm stage publish "${{ steps.pack.outputs.archive-path }}" --access public --provenance

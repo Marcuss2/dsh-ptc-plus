@@ -1,16 +1,33 @@
-# dsh-ptc-plus
-
-[English](README.md) | 简体中文
-
-[![Node.js ^22.19.0 || >=24.0.0](https://img.shields.io/badge/Node.js-%5E22.19.0%20%7C%7C%20%3E%3D24.0.0-5fa04e?logo=nodedotjs&logoColor=white)](package.json)
-[![npm version](https://img.shields.io/npm/v/dsh-ptc-plus?logo=npm)](https://www.npmjs.com/package/dsh-ptc-plus)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-PTC%20mode-4b6bfb)](https://github.com/deepseek-ai/deepseek-harness)
-[![Status: community plugin](https://img.shields.io/badge/Status-community%20plugin-lightgrey)](docs/publishing.md)
+<p align="center">
+  <img src="assets/dsh-ptc-plus-banner.webp" width="100%" alt="dsh-ptc-plus 横幅">
+</p>
 
 <p align="center">
-  <img src="assets/dsh-ptc-plus-banner.webp" alt="dsh-ptc-plus 横幅">
+  <a href="README.md">English</a> ·
+  <strong>简体中文</strong>
 </p>
+
+<p align="center">
+  <a href="#%E9%BB%98%E8%AE%A4-ptc-%E6%A8%A1%E5%BC%8F%E7%9A%84%E9%97%AE%E9%A2%98">问题</a> ·
+  <a href="#%E4%B8%89%E4%B8%AA%E6%9C%80%E7%9B%B4%E6%8E%A5%E7%9A%84%E5%9C%BA%E6%99%AF">场景</a> ·
+  <a href="#%E8%AE%BE%E7%BD%AE">设置</a> ·
+  <a href="#%E8%8C%83%E5%9B%B4">范围</a> ·
+  <a href="#%E5%AE%89%E8%A3%85">安装</a> ·
+  <a href="#%E6%96%87%E6%A1%A3">文档</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DeepSeek Harness PTC mode" src="https://img.shields.io/badge/DeepSeek%20Harness-PTC%20mode-4b6bfb"></a>
+  <a href="package.json"><img alt="Node.js ^22.19.0 || >=24.0.0" src="https://img.shields.io/badge/Node.js-%5E22.19.0%20%7C%7C%20%3E%3D24.0.0-5fa04e?logo=nodedotjs&logoColor=white"></a>
+  <a href="https://www.npmjs.com/package/dsh-ptc-plus"><img alt="npm version" src="https://img.shields.io/npm/v/dsh-ptc-plus?logo=npm"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg"></a>
+</p>
+
+<p align="center">
+  <a href="https://awesome-dsh-plugin.com/zh/"><img alt="Awesome DSH Plugin" src="https://awesome-dsh-plugin.com/badge.svg"></a>
+</p>
+
+---
 
 **PTC Plus 给 DSH 的 PTC 模式一个会话绑定的持久 TypeScript REPL。** 每次 `run_code` 都在同一个会话里继续。上一次 `run_code` 的变量、导入和结果，下一次还能直接用。
 
@@ -139,6 +156,6 @@ dsh --profile <profile> --dump-config
 
 ## 文档
 
-[安装指南](docs/installation.md) · [运行时参考](docs/runtime-reference.md) · [架构](docs/architecture.md) · [全部文档](docs/README.md)
+[安装指南](docs/installation.md) · [运行时参考](docs/runtime-reference.md) · [架构](docs/architecture.md) · [发布](docs/publishing.md) · [全部文档](docs/README.md)
 
 使用 [MIT License](LICENSE)。

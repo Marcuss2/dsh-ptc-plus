@@ -1,16 +1,33 @@
-# dsh-ptc-plus
-
-English | [简体中文](README.zh.md)
-
-[![Node.js ^22.19.0 || >=24.0.0](https://img.shields.io/badge/Node.js-%5E22.19.0%20%7C%7C%20%3E%3D24.0.0-5fa04e?logo=nodedotjs&logoColor=white)](package.json)
-[![npm version](https://img.shields.io/npm/v/dsh-ptc-plus?logo=npm)](https://www.npmjs.com/package/dsh-ptc-plus)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-PTC%20mode-4b6bfb)](https://github.com/deepseek-ai/deepseek-harness)
-[![Status: community plugin](https://img.shields.io/badge/Status-community%20plugin-lightgrey)](docs/publishing.md)
+<p align="center">
+  <img src="assets/dsh-ptc-plus-banner.webp" width="100%" alt="dsh-ptc-plus banner">
+</p>
 
 <p align="center">
-  <img src="assets/dsh-ptc-plus-banner.webp" alt="dsh-ptc-plus banner">
+  <strong>English</strong> ·
+  <a href="README.zh.md">简体中文</a>
 </p>
+
+<p align="center">
+  <a href="#what-default-ptc-mode-gets-wrong">Problems</a> ·
+  <a href="#three-scenes-that-matter-most">Scenes</a> ·
+  <a href="#settings">Settings</a> ·
+  <a href="#scope">Scope</a> ·
+  <a href="#install">Install</a> ·
+  <a href="#documentation">Docs</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DeepSeek Harness PTC mode" src="https://img.shields.io/badge/DeepSeek%20Harness-PTC%20mode-4b6bfb"></a>
+  <a href="package.json"><img alt="Node.js ^22.19.0 || >=24.0.0" src="https://img.shields.io/badge/Node.js-%5E22.19.0%20%7C%7C%20%3E%3D24.0.0-5fa04e?logo=nodedotjs&logoColor=white"></a>
+  <a href="https://www.npmjs.com/package/dsh-ptc-plus"><img alt="npm version" src="https://img.shields.io/npm/v/dsh-ptc-plus?logo=npm"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg"></a>
+</p>
+
+<p align="center">
+  <a href="https://awesome-dsh-plugin.com/"><img alt="Awesome DSH Plugin" src="https://awesome-dsh-plugin.com/badge.svg"></a>
+</p>
+
+---
 
 **PTC Plus gives DSH PTC mode a session-bound persistent TypeScript REPL.** Every `run_code` continues in the same session. Variables, imports, and results from one `run_code` are still available in the next one.
 
@@ -139,6 +156,6 @@ Restart that DSH profile after installation. Version-pinned npm, GitHub, local-c
 
 ## Documentation
 
-[Installation](docs/installation.md) · [Runtime reference](docs/runtime-reference.md) · [Architecture](docs/architecture.md) · [All docs](docs/README.md)
+[Installation](docs/installation.md) · [Runtime reference](docs/runtime-reference.md) · [Architecture](docs/architecture.md) · [Publishing](docs/publishing.md) · [All docs](docs/README.md)
 
 MIT licensed. See [LICENSE](LICENSE).
