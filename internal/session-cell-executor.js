@@ -9,6 +9,7 @@ import { diagnostic, renderDiagnostic } from './diagnostic.js'
 import {
   firstLine,
   limitLogs,
+  LONG_CELL_CODE_UNITS,
   markBindingFailure,
   messageOf,
   oneLineMessage,
@@ -19,7 +20,6 @@ import { PreflightError, prepareProgram } from './cell-analysis.js'
 import { ModuleRewriteError } from './cell-rewriter.js'
 import { mapSourcePosition } from './source-position-map.js'
 import { durabilityState, transitionDurability } from './session-state.js'
-import { LONG_FAILED_CELL_TIP_CODE_UNITS } from './recovery-tips.js'
 
 const OUTPUT_LIMIT_MESSAGE = bytes => `output exceeded ${bytes} bytes; reduce the returned value or keep it in a REPL binding`
 
@@ -66,9 +66,9 @@ function parseDiagnostic(error, source) {
     ...(line !== undefined && line >= 1 && column !== undefined ? {
       source: { cell: 'current', start: { line, column } },
     } : {}),
-    help: [
-      'this cell was not executed; when edit_run_code is declared for the current request, use it for a small syntax correction instead of resending the full source',
-    ],
+    help: source.length >= LONG_CELL_CODE_UNITS
+      ? ['this cell was not executed; when edit_run_code is declared for the current request and the correction is small and localized, use it to avoid resending this long source; otherwise retry only this cell with corrected source in run_code']
+      : ['this cell was not executed; correct the reported syntax and retry only this cell with run_code'],
   })
 }
 
@@ -468,7 +468,7 @@ export class SessionCellExecutor {
               active.prepared.sourceMap,
             ),
         declared: message.moduleLoadFailed === true ? new Set() : active.prepared.declared,
-        longCellFailure: active.request.program.length >= LONG_FAILED_CELL_TIP_CODE_UNITS,
+        longCellFailure: active.request.program.length >= LONG_CELL_CODE_UNITS,
       })
       active.appliedBindingCatalog = message.moduleLoadFailed === true
         ? active.priorBindingCatalog

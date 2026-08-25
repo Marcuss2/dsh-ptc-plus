@@ -2,6 +2,7 @@ import { diagnostic } from './diagnostic.js'
 
 export const MAX_ERROR_LOG_BYTES = 4 * 1024
 export const FAILURE_HINT_THRESHOLD = 3
+export const LONG_CELL_CODE_UNITS = 2_000
 const BINDING_FAILURE = Symbol('binding failure')
 
 export function markBindingFailure(error) {

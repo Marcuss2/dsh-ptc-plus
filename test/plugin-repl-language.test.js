@@ -4,6 +4,7 @@ import { access, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { LONG_CELL_CODE_UNITS } from '../internal/failure-reporting.js'
 import { appendRunCodeEvents, fixture, ptcAgent } from './plugin-fixture.js'
 import { writeRawFilenameFixture } from './raw-filename-fixture.js'
 
@@ -591,14 +592,15 @@ test('renders parse failures with a cell-relative code frame and unchanged state
   assert.equal(diagnostic.phase, 'parse')
   assert.equal(diagnostic.stateEffect, 'unchanged')
   assert.deepEqual(diagnostic.help, [
-    'this cell was not executed; when edit_run_code is declared for the current request, use it for a small syntax correction instead of resending the full source',
+    'this cell was not executed; correct the reported syntax and retry only this cell with run_code',
   ])
   assert.deepEqual(diagnostic.source, { cell: 'current', start: { line: 1, column: 14 } })
   assert.deepEqual(observed.raw.logs, [])
   assert.match(observed.raw.error.message, /^error\[PTC-C001\]: cell could not be parsed:/)
   assert.match(observed.raw.error.message, /> 1 \| const value =\n    \|              \^/)
-  assert.match(observed.raw.error.message, /help: this cell was not executed; when edit_run_code is declared/)
-  assert.match(observed.raw.error.message, /instead of resending the full source/)
+  assert.match(observed.raw.error.message, /help: this cell was not executed; correct the reported syntax/)
+  assert.match(observed.raw.error.message, /retry only this cell with run_code/)
+  assert.doesNotMatch(observed.raw.error.message, /edit_run_code/)
   assert.doesNotMatch(observed.raw.error.message, /reuse (?:it|the existing bindings)/)
   assert.doesNotMatch(observed.raw.error.message, /\x1b\[/)
   assert.deepEqual(await state.run('parse-diagnostic', 'return typeof value'), {
@@ -610,6 +612,16 @@ test('renders parse failures with a cell-relative code frame and unchanged state
   assert.deepEqual(unterminated.result.meta.dshPtcPlus.diagnostics[0].source, {
     cell: 'current', start: { line: 1, column: 18 },
   })
+
+  const longSource = `/*${'x'.repeat(LONG_CELL_CODE_UNITS)}*/\nconst longValue =`
+  const long = await state.executeRun('long-parse-diagnostic', longSource, {}, {})
+  assert.deepEqual(long.result.meta.dshPtcPlus.diagnostics[0].help, [
+    'this cell was not executed; when edit_run_code is declared for the current request and the correction is small and localized, use it to avoid resending this long source; otherwise retry only this cell with corrected source in run_code',
+  ])
+  assert.match(long.raw.error.message, /when edit_run_code is declared for the current request/)
+  assert.match(long.raw.error.message, /correction is small and localized/)
+  assert.match(long.raw.error.message, /otherwise retry only this cell with corrected source in run_code/)
+  assert.doesNotMatch(long.raw.error.message, /reuse (?:it|the existing bindings)/)
 })
 
 test('keeps rewrite-time diagnostics on exact original cell spans', async (t) => {

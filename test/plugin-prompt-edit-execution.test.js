@@ -133,7 +133,8 @@ return longOutput.length`
   assert.equal(rejected.meta.dshPtcPlus.status, 'noop')
   assert.equal(rejected.meta.dshPtcPlus.diagnostics[0].stateEffect, 'unchanged')
   assert.match(rejected.error.message, /when edit_run_code is declared/)
-  assert.match(rejected.error.message, /instead of resending the full source/)
+  assert.match(rejected.error.message, /avoid resending this long source/)
+  assert.match(rejected.error.message, /otherwise retry only this cell with corrected source in run_code/)
   appendRunCodeEvents(events, 'long-parse', rejectedCode, rejected)
 
   const editArgs = {

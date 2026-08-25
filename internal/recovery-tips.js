@@ -1,6 +1,5 @@
 const PLATFORM_CAUSE_CODES = new Set(['EACCES', 'EINVAL', 'ENOTDIR', 'ENOENT', 'UNKNOWN'])
 const TIP_CONTEXT_PREFIX = 'tools:ptc-plus-tip/'
-export const LONG_FAILED_CELL_TIP_CODE_UNITS = 2_000
 const TIP_PREFIXES = Object.freeze({
   'repeated-binding-failure': 'The same binding failure has recurred.',
   'platform-command-failure': 'An executable, shell, or path failed in the current execution world.',
