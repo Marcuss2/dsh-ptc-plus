@@ -87,7 +87,7 @@ journal、diagnostic、source、cause、call、operation、completion 和 comple
 }
 ```
 
-`settle` 必须是从 0 开始的连续序列。重放按源码产生调用，但不重新 dispatch；它校验 global、member、args 和提交数量，再按 recorded settlement order 释放 recorded value/error。这个 `recorded-value` 承诺重建的是 REPL 计算状态，不表示外部 effect 被重做、撤销或验证。completeness、effect、authority 和 source evidence 属于 capability metadata，不伪装成 journal 字段。
+`settle` 必须是从 0 开始的连续序列。重放按源码产生调用，但不重新 dispatch；它校验 global、member、args 和提交数量，再按 recorded settlement order 释放 recorded value/error。这个 `recorded-value` 承诺重建的是 REPL 计算状态，不表示外部 effect 被重做、撤销或验证。对进程内 Cordis 状态，恢复值明确只是历史数据：Cordis 可见时，固定 runtime context 要求在把旧 ID、Run、approval 或 capability observation 当作当前事实前完成一次新的成功 live Inspect。completeness、effect、authority 和 source evidence 属于 capability metadata，不伪装成 journal 字段。
 
 journal 的 capability-call `args`/`value` 与 completion value 保存 `ptc-value-graph/v1` canonical envelope，不保存 decoded rich JS value，也不依赖递归 `JSON.stringify` 或 `structuredClone`。因此深层数组/对象、own `__proto__`、`undefined`、special number、BigInt、hole、shared identity 和 cycle 不会被外层 session JSON 改写。完整支持域和预算见 [PTC Value Graph V1](value-wire.md)。
 

@@ -8,6 +8,63 @@ const CORDIS_PRESET_ID = 'cordis'
 const CORDIS_SKILL_NAME = 'cordis-plugin-development'
 const CORDIS_SKILL_PROVIDER = 'ptc-plus-cordis'
 
+function exactCompanionCandidates(observation) {
+  if (Array.isArray(observation)) {
+    return observation.filter(candidate => candidate?.name === CORDIS_SKILL_NAME)
+  }
+  if (observation === null || typeof observation !== 'object'
+    || !Array.isArray(observation.candidates)) return observation
+  return {
+    ...observation,
+    candidates: observation.candidates.filter(candidate => candidate?.name === CORDIS_SKILL_NAME),
+  }
+}
+
+function exactCompanionProvider(provider) {
+  if (provider === null || typeof provider !== 'object'
+    || typeof provider.name !== 'string'
+    || typeof provider.list !== 'function'
+    || typeof provider.get !== 'function') {
+    throw new Error('ptc-plus: DSH Cordis Skill provider is incompatible')
+  }
+  return {
+    ...provider,
+    async list(options) {
+      return exactCompanionCandidates(await Reflect.apply(provider.list, provider, [options]))
+    },
+    async get(candidate, options) {
+      if (candidate?.name !== CORDIS_SKILL_NAME) return undefined
+      const skill = await Reflect.apply(provider.get, provider, [candidate, options])
+      return skill?.name === CORDIS_SKILL_NAME ? skill : undefined
+    },
+  }
+}
+
+function exactCompanionSkillPlugin(skillFilesystemPlugin) {
+  return {
+    ...skillFilesystemPlugin,
+    apply(pluginCtx, config) {
+      if (typeof pluginCtx?.extend !== 'function') {
+        throw new Error('ptc-plus: cordisToolsEnabled requires the DSH Context.extend API')
+      }
+      const skills = pluginCtx.get?.('skills')
+      if (typeof skills?.registerProvider !== 'function') {
+        throw new Error('ptc-plus: cordisToolsEnabled requires the DSH skills.registerProvider API')
+      }
+      const facade = new Proxy(skills, {
+        get(target, property) {
+          if (property === 'registerProvider') {
+            return create => target.registerProvider(control => exactCompanionProvider(create(control)))
+          }
+          const value = Reflect.get(target, property, target)
+          return typeof value === 'function' ? value.bind(target) : value
+        },
+      })
+      return skillFilesystemPlugin.apply(pluginCtx.extend({ skills: facade }), config)
+    },
+  }
+}
+
 function requireFiberServices(agent, fiber, owner) {
   if (typeof agent?.ctx?.get !== 'function') {
     throw new Error('ptc-plus: cordisToolsEnabled requires the DSH agent Context.get API')
@@ -32,8 +89,9 @@ function requireCompanionServices(agent) {
     throw new Error('ptc-plus: cordisToolsEnabled requires the DSH agentPresets.resolve API')
   }
   const skills = agent.ctx.get('skills')
-  if (typeof skills?.list !== 'function' || typeof skills?.get !== 'function') {
-    throw new Error('ptc-plus: cordisToolsEnabled requires the DSH skills list/get APIs')
+  if (typeof skills?.registerProvider !== 'function'
+    || typeof skills.list !== 'function' || typeof skills.get !== 'function') {
+    throw new Error('ptc-plus: cordisToolsEnabled requires the DSH skills registerProvider/list/get APIs')
   }
   if (agent.ctx.tools?.get?.('skill', agent) === undefined) {
     throw new Error('ptc-plus: cordisToolsEnabled requires the DSH skill tool in the PTC agent scope')
@@ -57,10 +115,11 @@ async function requireCompanionSkill(agent, skills) {
     cwd: agent.session?.header?.cwd,
     scope: agent,
   }
-  const summary = (await skills.list(lookup)).find(skill => skill?.name === CORDIS_SKILL_NAME)
-  if (summary?.provider !== CORDIS_SKILL_PROVIDER
+  const owned = (await skills.list(lookup)).filter(skill => skill?.provider === CORDIS_SKILL_PROVIDER)
+  const summary = owned[0]
+  if (owned.length !== 1 || summary?.name !== CORDIS_SKILL_NAME
     || summary.invocation?.modelInvocable !== true) {
-    throw new Error(`ptc-plus: official Cordis companion Skill ${JSON.stringify(CORDIS_SKILL_NAME)} is not model-invocable`)
+    throw new Error(`ptc-plus: official Cordis Skill provider must publish exactly ${JSON.stringify(CORDIS_SKILL_NAME)} as model-invocable`)
   }
   const skill = await skills.get(CORDIS_SKILL_NAME, lookup)
   if (skill?.provider !== CORDIS_SKILL_PROVIDER
@@ -177,6 +236,7 @@ export function createCordisToolsOwner(
   const pending = new Set()
   const cordisInspectLeases = createCordisInspectLeases(ctx)
   const scopedCordisPlugin = cordisInspectLeases.plugin(cordisPlugin)
+  const scopedSkillPlugin = exactCompanionSkillPlugin(skillFilesystemPlugin)
   let disposed = false
 
   const leafErrors = error => error instanceof AggregateError
@@ -242,7 +302,7 @@ export function createCordisToolsOwner(
       const skillDirectory = await companionSkillDirectory(agentPresets)
       if (mount.disposed) return
 
-      const skillFiber = agent.ctx.plugin(skillFilesystemPlugin, {
+      const skillFiber = agent.ctx.plugin(scopedSkillPlugin, {
         providerName: CORDIS_SKILL_PROVIDER,
         includeDefaultRoots: false,
         customSkillDirs: [skillDirectory],

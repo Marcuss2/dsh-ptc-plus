@@ -23,6 +23,7 @@ const fakeCordisPlugin = {
 }
 
 const CORDIS_SKILL_NAME = 'cordis-plugin-development'
+const EXTRA_CORDIS_SKILL_NAME = 'editing-cordis-compositions'
 const CORDIS_PRESET_PATH = '/dsh/presets/cordis/cordis.yml'
 const CORDIS_SKILL_DIRECTORY = join(dirname(CORDIS_PRESET_PATH), 'skills')
 
@@ -30,20 +31,35 @@ const fakeSkillFilesystemPlugin = {
   name: 'fake-skill-filesystem',
   inject: ['skills'],
   apply(ctx, config) {
+    assert.equal(typeof ctx.skills.list, 'function')
     assert.deepEqual(config, {
       providerName: 'ptc-plus-cordis',
       includeDefaultRoots: false,
       customSkillDirs: [CORDIS_SKILL_DIRECTORY],
     })
-    ctx.effect(() => {
-      ctx.skillCatalog.set(CORDIS_SKILL_NAME, {
-        name: CORDIS_SKILL_NAME,
-        provider: 'ptc-plus-cordis',
-        invocation: { modelInvocable: true, userInvocable: true },
-        content: '# Cordis plugin development',
-      })
-      return () => ctx.skillCatalog.delete(CORDIS_SKILL_NAME)
-    })
+    const definitions = new Map([
+      [CORDIS_SKILL_NAME, '# Cordis plugin development'],
+      [EXTRA_CORDIS_SKILL_NAME, '# Editing Cordis compositions'],
+    ])
+    ctx.effect(() => ctx.skills.registerProvider(() => ({
+      name: config.providerName,
+      async list() {
+        return [...definitions].map(([name, content]) => ({
+          name,
+          description: name,
+          invocation: { modelInvocable: true, userInvocable: true },
+          source: 'custom',
+          provider: config.providerName,
+          rank: 300,
+          locator: name,
+          content,
+        }))
+      },
+      async get(candidate) {
+        const content = definitions.get(candidate.name)
+        return content === undefined ? undefined : { ...candidate, content }
+      },
+    })))
   },
 }
 
@@ -84,6 +100,8 @@ function scopedAgent(id, options = {}) {
   if (options.skillTool !== false) definitions.set('skill', { name: 'skill' })
   for (const name of options.existingTools ?? []) definitions.set(name, { name })
   const skillCatalog = new Map()
+  const skillProviders = new Map()
+  const skillObservations = []
   const agentPresets = {
     async resolve(presetId) {
       if (options.presetError !== undefined) throw options.presetError
@@ -98,15 +116,46 @@ function scopedAgent(id, options = {}) {
     },
   }
   const skills = {
+    registerProvider(create) {
+      const controller = new AbortController()
+      const provider = create({ signal: controller.signal, invalidate() {} })
+      if (skillProviders.has(provider.name)) throw new Error(`duplicate Skill provider ${provider.name}`)
+      skillProviders.set(provider.name, provider)
+      return () => {
+        controller.abort()
+        skillProviders.delete(provider.name)
+        for (const [name, skill] of skillCatalog) {
+          if (skill.provider === provider.name) skillCatalog.delete(name)
+        }
+      }
+    },
     async list({ scope }) {
       assert.equal(scope?.id, id)
-      return [...skillCatalog.values()].map(({ content: _content, ...summary }) => (
-        options.skillSummaryTransform?.(summary) ?? summary
-      ))
+      const summaries = []
+      for (const provider of skillProviders.values()) {
+        const observation = await provider.list({})
+        skillObservations.push(observation)
+        const candidates = Array.isArray(observation) ? observation : observation.candidates
+        for (const candidate of candidates) {
+          const { content: _content, locator: _locator, rank: _rank, ...summary } = candidate
+          summaries.push(options.skillSummaryTransform?.(summary) ?? summary)
+        }
+      }
+      return summaries
     },
     async get(name, { scope }) {
       assert.equal(scope?.id, id)
-      const skill = skillCatalog.get(name)
+      let skill
+      for (const provider of skillProviders.values()) {
+        const observation = await provider.list({})
+        skillObservations.push(observation)
+        const candidates = Array.isArray(observation) ? observation : observation.candidates
+        const candidate = candidates.find(item => item.name === name)
+        if (candidate === undefined) continue
+        skill = await provider.get(candidate, {})
+        if (skill !== undefined) skillCatalog.set(name, skill)
+        break
+      }
       return options.skillDefinitionTransform?.(skill) ?? skill
     },
   }
@@ -167,7 +216,12 @@ function scopedAgent(id, options = {}) {
       }
       const pluginCtx = options.withoutExtend
         ? Object.assign(Object.create(ctx), pluginMeta)
-        : ctx.extend(pluginMeta)
+        : ctx.extend({
+            ...pluginMeta,
+            ...(!skillFiber && options.withoutCordisPluginExtend === true
+              ? { extend: undefined }
+              : {}),
+          })
       let disposed = false
       const activation = Promise.resolve(activationGate).then(() => {
         if (activationError !== undefined) throw activationError
@@ -213,6 +267,8 @@ function scopedAgent(id, options = {}) {
     definitions,
     promptSections,
     skillCatalog,
+    skillProviders,
+    skillObservations,
     get pluginCalls() {
       return pluginCalls
     },
@@ -281,6 +337,8 @@ test('Cordis owner scopes official tools to current and future PTC agents', asyn
   assert.equal(native.skillPluginCalls, 0)
   assert.deepEqual(TEST_CORDIS_TOOL_NAMES.filter(name => current.definitions.has(name)), TEST_CORDIS_TOOL_NAMES)
   assert.equal(current.skillCatalog.has(CORDIS_SKILL_NAME), true)
+  assert.equal(current.skillCatalog.has(EXTRA_CORDIS_SKILL_NAME), false)
+  assert.deepEqual((await current.ctx.get('skills').list({ scope: current })).map(skill => skill.name), [CORDIS_SKILL_NAME])
 
   const future = scopedAgent('future')
   await host.emit('agent/created', { agent: future })
@@ -296,6 +354,87 @@ test('Cordis owner scopes official tools to current and future PTC agents', asyn
   await owner.dispose()
   assert.equal(TEST_CORDIS_TOOL_NAMES.some(name => current.definitions.has(name)), false)
   assert.equal(current.skillCatalog.has(CORDIS_SKILL_NAME), false)
+})
+
+test('Cordis owner preserves incomplete observations while filtering and guarding companion loads', async () => {
+  const upstreamGets = []
+  const incompleteSkillPlugin = {
+    ...fakeSkillFilesystemPlugin,
+    apply(ctx, config) {
+      assert.equal(typeof ctx.skills.list, 'function')
+      ctx.effect(() => ctx.skills.registerProvider(() => ({
+        name: config.providerName,
+        async list() {
+          return {
+            candidates: [CORDIS_SKILL_NAME, EXTRA_CORDIS_SKILL_NAME].map(name => ({
+              name,
+              invocation: { modelInvocable: true, userInvocable: true },
+              provider: config.providerName,
+            })),
+            complete: false,
+          }
+        },
+        async get(candidate) {
+          upstreamGets.push(candidate.name)
+          return { ...candidate, content: `# ${candidate.name}` }
+        },
+      })))
+    },
+  }
+  const agent = scopedAgent('incomplete-observation')
+  const owner = createCordisToolsOwner(
+    ownerContext([agent]).ctx,
+    fakeCordisPlugin,
+    incompleteSkillPlugin,
+  )
+  await owner.ready
+
+  assert.equal(agent.skillObservations.length > 0, true)
+  for (const observation of agent.skillObservations) {
+    assert.equal(observation.complete, false)
+    assert.deepEqual(observation.candidates.map(candidate => candidate.name), [CORDIS_SKILL_NAME])
+  }
+  const [provider] = agent.skillProviders.values()
+  assert.equal(await provider.get({ name: EXTRA_CORDIS_SKILL_NAME }, {}), undefined)
+  assert.deepEqual(upstreamGets, [CORDIS_SKILL_NAME])
+  await owner.dispose()
+})
+
+test('Cordis owner rejects incompatible provider results without leaving a partial mount', async () => {
+  for (const [label, createProvider, expected] of [
+    ['invalid provider', () => null, /Skill provider is incompatible/],
+    ['invalid observation', () => ({
+      name: 'ptc-plus-cordis',
+      async list() { return null },
+      async get() {},
+    }), /Cannot read properties of null/],
+    ['mismatched load', () => ({
+      name: 'ptc-plus-cordis',
+      async list() {
+        return [{
+          name: CORDIS_SKILL_NAME,
+          invocation: { modelInvocable: true, userInvocable: true },
+          provider: 'ptc-plus-cordis',
+        }]
+      },
+      async get(candidate) {
+        return { ...candidate, name: EXTRA_CORDIS_SKILL_NAME, content: '# wrong Skill' }
+      },
+    }), /is not loadable/],
+  ]) {
+    const skillPlugin = {
+      ...fakeSkillFilesystemPlugin,
+      apply(ctx) {
+        ctx.effect(() => ctx.skills.registerProvider(createProvider))
+      },
+    }
+    const agent = scopedAgent(label)
+    const owner = createCordisToolsOwner(ownerContext([agent]).ctx, fakeCordisPlugin, skillPlugin)
+    await assert.rejects(owner.ready, expected)
+    assert.equal(agent.skillProviders.size, 0)
+    assert.equal(TEST_CORDIS_TOOL_NAMES.some(name => agent.definitions.has(name)), false)
+    await owner.dispose()
+  }
 })
 
 test('Cordis owner retries agents once run_code becomes visible', async () => {
@@ -332,7 +471,7 @@ test('Cordis owner rolls back both contributions when the companion Skill cannot
     fakeCordisPlugin,
     missingSkillPlugin,
   )
-  await assert.rejects(missingOwner.ready, /is not model-invocable/)
+  await assert.rejects(missingOwner.ready, /must publish exactly/)
   assert.equal(missingSkill.skillCatalog.has(CORDIS_SKILL_NAME), false)
   assert.equal(TEST_CORDIS_TOOL_NAMES.some(name => missingSkill.definitions.has(name)), false)
   await missingOwner.dispose()
@@ -341,7 +480,7 @@ test('Cordis owner rolls back both contributions when the companion Skill cannot
 test('Cordis owner rejects unavailable companion Skill capabilities before publication', async () => {
   for (const [label, options, expected] of [
     ['preset service', { missingServices: ['agentPresets'] }, /agentPresets\.resolve API/],
-    ['skills service', { missingServices: ['skills'] }, /skills list\/get APIs/],
+    ['skills service', { missingServices: ['skills'] }, /skills registerProvider\/list\/get APIs/],
     ['skill tool', { skillTool: false }, /skill tool in the PTC agent scope/],
     ['broken preset', { preset: { path: CORDIS_PRESET_PATH, broken: 'invalid composition' } }, /preset is unavailable/],
     ['relative preset path', { preset: { path: 'cordis.yml' } }, /absolute composition path/],
@@ -369,13 +508,13 @@ test('Cordis owner verifies the exact scoped companion Skill provider and body',
   for (const [label, options, expected] of [
     ['foreign summary', {
       skillSummaryTransform: summary => ({ ...summary, provider: 'foreign-provider' }),
-    }, /is not model-invocable/],
+    }, /must publish exactly/],
     ['disabled summary', {
       skillSummaryTransform: summary => ({
         ...summary,
         invocation: { ...summary.invocation, modelInvocable: false },
       }),
-    }, /is not model-invocable/],
+    }, /must publish exactly/],
     ['foreign definition', {
       skillDefinitionTransform: skill => ({ ...skill, provider: 'foreign-provider' }),
     }, /is not loadable/],
@@ -551,6 +690,11 @@ test('Cordis owner rejects incompatible host and agent capabilities', async () =
   await assert.rejects(missingExtendOwner.ready, /Context\.extend API/)
   await missingExtendOwner.dispose()
 
+  const lostExtend = scopedAgent('lost-extend', { withoutCordisPluginExtend: true })
+  const lostExtendOwner = createCordisToolsOwner(ownerContext([lostExtend]).ctx, fakeCordisPlugin)
+  await assert.rejects(lostExtendOwner.ready, /Context\.extend API/)
+  await lostExtendOwner.dispose()
+
   const invalidFiber = scopedAgent('invalid-fiber', { invalidFiber: true })
   const invalidFiberOwner = createCordisToolsOwner(ownerContext([invalidFiber]).ctx, fakeCordisPlugin)
   await assert.rejects(
@@ -604,16 +748,10 @@ test('Cordis owner rejects malformed inspect registrations and keeps lease dispo
     cordisInspect: inspectRegistry({ invalidDisposer: true }),
   })
   const invalidDisposer = scopedAgent('invalid-inspect-disposer')
+  const originalGet = invalidDisposer.ctx.get.bind(invalidDisposer.ctx)
   invalidDisposer.ctx.get = name => name === 'cordisInspect'
     ? invalidDisposerHost.cordisInspect
-    : new Map([
-      ['dynamicCordisRunner', {}],
-      ['agentPresets', { resolve: async () => ({ path: CORDIS_PRESET_PATH }) }],
-      ['skills', {
-        list: async () => [...invalidDisposer.skillCatalog.values()],
-        get: async name => invalidDisposer.skillCatalog.get(name),
-      }],
-    ]).get(name)
+    : originalGet(name)
   const registering = {
     ...fakeCordisPlugin,
     apply(ctx) {

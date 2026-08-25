@@ -27,6 +27,20 @@ function isContextStep(event) {
     || (event?.type === 'user/message' && event.data?.source?.kind === 'user')
 }
 
+function cordisTranscriptFacts(timeline) {
+  let calls = 0
+  let inspections = 0
+  for (const result of timeline.results.values()) {
+    for (const call of result?.journal?.calls ?? []) {
+      if (call.global !== 'tools' || typeof call.member !== 'string'
+        || !call.member.startsWith('cordis_')) continue
+      calls += 1
+      if (call.ok === true && call.member.startsWith('cordis_inspect')) inspections += 1
+    }
+  }
+  return Object.freeze({ calls, inspections })
+}
+
 /** Project session events into immutable facts consumed by prompt presentation. */
 export function projectSessionLog(agent, requestedEdit) {
   const events = agent?.session?.events
@@ -39,6 +53,7 @@ export function projectSessionLog(agent, requestedEdit) {
       latestRun: undefined,
       editableRun: undefined,
       repairSource: undefined,
+      cordisTranscript: Object.freeze({ calls: 0, inspections: 0 }),
     })
   }
   let contextStep = 0
@@ -60,6 +75,7 @@ export function projectSessionLog(agent, requestedEdit) {
     : undefined
   const latestRun = timeline.openTurn ? timeline.latestRun : undefined
   const editableRun = timeline.openTurn ? timeline.editableRun : undefined
+  const cordisTranscript = cordisTranscriptFacts(timeline)
   return Object.freeze({
     openTurn: timeline.openTurn,
     contextStep,
@@ -68,6 +84,7 @@ export function projectSessionLog(agent, requestedEdit) {
     latestRun,
     editableRun,
     repairSource: editableRun?.source,
+    cordisTranscript,
     ...(requestedEdit === undefined ? {} : { requestedEditTarget }),
   })
 }

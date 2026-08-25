@@ -29,7 +29,7 @@ DSH 为一个 agent composition 固定选择 `native`、`code` 或 `both`。首�
 `run_code`。无目标或参数不合法时不执行，返回 `{ edited: false, reason }` 并保留原目标。
 进程内 claim 区分 executing 与 settled：抛错、取消或缺少有效 PTC journal 的派生结果立即释放；已由 journal 证明进入 runtime 的派生执行继续占用旧 target，直到外层 result 的私有 metadata 通过最终 policy 并由 session log 投影为新 target。最终 result 丢失 metadata 时由 `tools/result` 释放。session log 投影在 edit call event 处记录 eligible target，只接受 target call sequence 匹配该快照且 journal 有效、非 noop 的派生源码，因此 live 与 cold recovery 从同一持久关系决定可编辑目标。
 
-`internal/session-log-view.js` 单次前向扫描 session events，分别投影最新执行、可编辑目标、rewrite metadata 和恢复 tip
+`internal/session-log-view.js` 单次前向扫描 session events，分别投影最新执行、可编辑目标、rewrite metadata、规范 journal 中的 Cordis transcript 计数和恢复 tip
 所需事实。`edit_run_code` 不产生专用 runtime context：真实 call/result 已完整表达操作身份和结果，额外 contribution
 只会触发 DSH 聚合 runtime-context 全量快照并重复无关 policy 文本。只有失败或完成状态不可信的 rewrite feedback 才保留独立生命周期；成功的透明改写不产生 runtime context。
 
@@ -44,7 +44,7 @@ return 或打印需要展示的值。失败恢复先按状态分类：解析或 
 相同提示受 `tipCooldownMessages` 间隔约束，连续未解决时才升级为详细版本，成功 cell 会重置未解决计数；提示不会改变
 system sections、tool schema 或 tool order，也不假设 Windows、WSL、POSIX、shell 或 package runner。
 
-当前策略位于独立的 `internal/recovery-tips.js` local provider，核心只消费其有界的 named context。未来外部决策插件的接入必须等待稳定的 facts/decision contract；在此之前不猜测跨插件 API，local provider 继续作为 fallback。
+当前策略位于独立的 `internal/recovery-tips.js` local provider，核心只消费其有界的 named context。另一个固定名称 `tools:ptc-plus-cordis-recovery` 只在新 agent 或 Cordis 重新启用代际观察到历史 Cordis transcript 时出现，将 replay value 限定为历史数据，并保持到 session log 出现新的成功 `cordis_inspect*` settlement；它不受疲劳阈值控制、不重放调用，也不推断 live process 是否实际丢失。未来外部决策插件的接入必须等待稳定的 facts/decision contract；在此之前不猜测跨插件 API，local provider 继续作为 fallback。
 
 ## 设置与启用开关
 
@@ -66,7 +66,7 @@ Client half 通过 `settings.plugin.item` 卡片呈现全部配置。`enabled` �
 | Replacement | 只有 DSH 拥有的 compaction 或其他显式 surface replacement 可以替换已保留历史；PTC Plus 不用 replacement 表达瞬时状态。 |
 | Independent request | 新的辅助模型调用必须单独说明 route、prefix 和 token 影响，不能用它的缓存表现证明主会话前缀稳定。当前插件不发起辅助模型请求。 |
 
-一次性或会变化的 session 状态必须作为 `PromptAssembly.contexts` 的命名贡献交给 DSH。DSH 将完整快照记录为带来源的 `user/message` 并追加到历史尾部；值未变时不重复，值变化或全部消失时追加更新或 clearance。完整快照携带当时所有 owner 的命名 context，因此任一贡献变化都会使未变化贡献在新的尾部消息中再次出现；这会增加 append-only history token，但不会改写已有前缀。PTC Plus 不通过绕过 prompt assembly 的私有消息通道规避这项宿主聚合成本。此类状态不得进入 `PromptAssembly.sections`，也不得通过增删 tool、改变 schema 字段或调整 tool order 传递。
+一次性或会变化的 session 状态必须作为 `PromptAssembly.contexts` 的命名贡献交给 DSH。DSH 将完整快照记录为带来源的 `user/message` 并追加到历史尾部；值未变时不重复，值变化或全部消失时追加更新或 clearance。完整快照携带当时所有 owner 的命名 context，因此任一贡献变化都会使未变化贡献在新的尾部消息中再次出现；这会增加 append-only history token，但不会改写已有前缀。PTC Plus 不通过绕过 prompt assembly 的私有消息通道规避这项宿主聚合成本。Cordis 恢复 context 使用规范 journal 的历史 transcript 与当前 agent/enable generation 作为事实源，不能从进程内 Plugin registry 直接生成未记录输入。此类状态不得进入 `PromptAssembly.sections`，也不得通过增删 tool、改变 schema 字段或调整 tool order 传递。
 
 所有模型可见输入都必须能从 session log 重建。静态 system/schema 由 `request/header` 保存，动态 context 由带来源的 `user/message` 保存；进程内临时状态不能直接成为未记录的模型输入。在同一插件版本与配置下，普通执行结果、可编辑目标、诊断和其他插件拥有的运行期变化都不得改变 header；`edit_run_code` 的身份与结果由真实 call/result 表达，不生成 edit feedback context。插件升级、显式配置变化、provider/model route 变化、真实 native capability schema 变化，以及 DSH 拥有的 history replacement 可以使缓存从首个变化 token 起失效。
 
@@ -111,7 +111,7 @@ CodeRuntime request 已携带的 owner-provided program namespace 会被原样�
 }
 ```
 
-`calls` 只保存 global、member、PTC Value Graph 编码的 args/result 或 error，以及 settlement 序号。cold replay 校验调用名称、参数、数量和提交顺序，并按 recorded settlement order 释放 recorded result；不会重新 dispatch program binding 或重做外部 effect。该规则同样适用于 native tools、owner-provided namespace 和 `code.run`，不按名称分支。若基础设施终止时仍有未结算 binding，heap 回滚到 durable frontier，discarded journal 以最先观察到的 `global.member` 保留 possible-effect boundary。effect、completeness 和 source metadata 属于 capability explorer，不伪装成 journal 字段。
+`calls` 只保存 global、member、PTC Value Graph 编码的 args/result 或 error，以及 settlement 序号。cold replay 校验调用名称、参数、数量和提交顺序，并按 recorded settlement order 释放 recorded result；不会重新 dispatch program binding 或重做外部 effect。该规则同样适用于 native tools、owner-provided namespace 和 `code.run`，不按名称分支。Cordis 的进程内对象不会因此被宣称已恢复；presentation 可以从已验证 transcript 派生重新检查要求，但不能改变 replay。若基础设施终止时仍有未结算 binding，heap 回滚到 durable frontier，discarded journal 以最先观察到的 `global.member` 保留 possible-effect boundary。effect、completeness 和 source metadata 属于 capability explorer，不伪装成 journal 字段。
 
 journal 通过 `run_code.output.presentationMeta` 附着到最终 result，再由 `tools/result` 做两阶段确认。缺失、损坏或被替换的 journal 形成 unknown/volatile 边界；未进入 runtime 的 call 由后续 `confirms` 以对应 `tool/call.seq` 证明为 no-op。volatile 源码保留在原 session log，但不参与 cold replay。
 

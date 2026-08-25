@@ -18,7 +18,7 @@ DSH authority/policy -> native dispatch -> canonical result
                                       `-> args/result + settlement transcript
 ```
 
-cold replay 校验相同的调用序列并返回 recorded value，不重新执行工具。这保证 REPL 计算状态可重建，但不声称外部 effect 可逆或仍与历史相同。
+cold replay 校验相同的调用序列并返回 recorded value，不重新执行工具。这保证 REPL 计算状态可重建，但不声称外部 effect 可逆或仍与历史相同。Cordis Plugin、Run 和 Inspect observation 属于进程内实时状态；恢复出的 Cordis value 只作为历史数据保留，后续状态性决策必须先按恢复 context 执行新的 live Inspect。
 
 同一 settlement 规则适用于当前 request 中的全部 program binding，包括 owner-provided namespace 与 `code.run`。已结算的 value/error 可进入 durable transcript；若取消、超时或 worker failure 发生时调用仍未结算，cell heap 回滚，discarded journal 以实际 `global.member` 保留 possible-effect boundary。分类来自可观察生命周期，不来自 capability 名称表。
 

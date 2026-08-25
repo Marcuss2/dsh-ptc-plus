@@ -2,6 +2,8 @@ import { latestRecoveryTip } from './recovery-tips.js'
 import { projectSessionLog } from './session-log-view.js'
 
 const REWRITE_FEEDBACK = 'tools:ptc-plus-rewrite-info'
+const CORDIS_RECOVERY = 'tools:ptc-plus-cordis-recovery'
+const CORDIS_RECOVERY_TEXT = 'Recorded Cordis values in the recovered REPL are historical data, not proof that process-local Plugins, Runs, approvals, or Inspect observations still exist in the current DSH process. Before relying on prior Cordis IDs, state, or capability data, follow the current Cordis owner guidance and call the live read-only Cordis Inspect bindings through `tools.*`; do not rerun mutating Cordis calls merely to reconstruct history.'
 
 function continuationFeedback(view) {
   const run = view.latestRun
@@ -18,13 +20,17 @@ function continuationFeedback(view) {
 }
 
 /** Build all dynamic PTC contexts from one session-log projection. */
-export function sessionRuntimeContexts(agent, tipConfig) {
+export function sessionRuntimeContexts(agent, tipConfig, options = {}) {
   const view = projectSessionLog(agent)
   const rewrite = continuationFeedback(view)
   const tip = latestRecoveryTip(view, tipConfig)
+  const cordisRecovery = options.cordisRecoveryRequired?.(view) === true
+    ? { name: CORDIS_RECOVERY, text: CORDIS_RECOVERY_TEXT }
+    : undefined
   return Object.freeze({
     contexts: Object.freeze([
       ...(rewrite === undefined ? [] : [{ name: REWRITE_FEEDBACK, text: rewrite }]),
+      ...(cordisRecovery === undefined ? [] : [cordisRecovery]),
       ...(tip === undefined ? [] : [tip]),
     ]),
   })

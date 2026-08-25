@@ -59,6 +59,38 @@ function rejection(message) {
   }
 }
 
+export function createCordisRecoveryPolicy(initiallyEnabled) {
+  const states = new WeakMap()
+  let enabled = initiallyEnabled
+  let generation = enabled ? 1 : 0
+  return Object.freeze({
+    reconfigure(nextEnabled) {
+      if (!enabled && nextEnabled) generation += 1
+      enabled = nextEnabled
+    },
+    required(agent, view) {
+      if (!enabled) return false
+      let state = states.get(agent)
+      if (state?.generation !== generation) {
+        state = {
+          generation,
+          baselineInspections: view.cordisTranscript.inspections,
+          required: view.cordisTranscript.calls > 0,
+        }
+        states.set(agent, state)
+      }
+      if (state.required
+        && view.cordisTranscript.inspections > state.baselineInspections) {
+        state.required = false
+      }
+      return state.required
+    },
+    disposeAgent(agent) {
+      states.delete(agent)
+    },
+  })
+}
+
 function presentationState(assembly) {
   const tools = Array.isArray(assembly?.tools) ? assembly.tools : []
   if (!tools.some(tool => tool?.name === RUN_CODE)) {
@@ -110,6 +142,7 @@ export function createDirectSurfaceOwner({
   const compositions = new Map()
   const canonicalRequests = new WeakMap()
   const sessions = new Map()
+  const cordisRecovery = createCordisRecoveryPolicy(runtimeConfig.cordisToolsEnabled)
   let currentCanonicalizeToolCalls = canonicalizeToolCalls
   const tipConfig = {
     enabled: runtimeConfig.tipsEnabled,
@@ -175,6 +208,7 @@ export function createDirectSurfaceOwner({
   return Object.freeze({
     reconfigure(nextConfig) {
       currentCanonicalizeToolCalls = nextConfig.canonicalizeToolCalls
+      cordisRecovery.reconfigure(nextConfig.cordisToolsEnabled)
       tipConfig.enabled = nextConfig.tipsEnabled
       tipConfig.cooldownMessages = nextConfig.tipCooldownMessages
       tipConfig.escalationFailures = nextConfig.tipEscalationFailures
@@ -231,7 +265,11 @@ export function createDirectSurfaceOwner({
         directTools = [adaptRunCodeSchema(runCode), editRunCodeSchema()]
       }
       const runtimeContexts = sessionPtc
-        ? sessionRuntimeContexts(agent, tipConfig)
+        ? sessionRuntimeContexts(agent, tipConfig, {
+          cordisRecoveryRequired(view) {
+            return cordisRecovery.required(agent, view)
+          },
+        })
         : { contexts: [] }
       const contexts = sessionPtc && Array.isArray(assembly.contexts)
         && runtimeContexts.contexts.length > 0
@@ -310,6 +348,7 @@ export function createDirectSurfaceOwner({
     disposeAgent(agent) {
       const id = sessionId(agent)
       compositions.delete(agent)
+      cordisRecovery.disposeAgent(agent)
       if (id !== undefined) clearSession(id)
     },
     disposeSession(session) {

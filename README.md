@@ -110,9 +110,11 @@ Open **Settings → Plugin configuration** to use the card shown above. The `ena
 
 Every setting applies live and keeps existing bindings. A submitted cell uses one configuration for its complete execution; changes made while it runs apply to cells submitted afterward. A failed change rolls back. Node fixes a worker's V8 old-generation limit when the worker starts, so that one setting is rejected while a session worker is active and can be changed after the session is disposed. A failed enable is rolled back and persisted as disabled.
 
-`cordisToolsEnabled` is off by default. Turning it on atomically adds DSH's official Cordis tools, owner guidance, and `cordis-plugin-development` companion Skill to PTC agents; turning it off removes all three. It neither switches presets nor changes the direct `run_code`/`edit_run_code` surface. Cordis runs model-written plugins against the live DSH runtime, so enabling it requires shell-level trust.
+`cordisToolsEnabled` is off by default. Turning it on atomically adds DSH's official Cordis tools, owner guidance, and exactly the `cordis-plugin-development` companion Skill to PTC agents; sibling Skills in the shipped preset are not exposed. Turning it off removes all three. It neither switches presets nor changes the direct `run_code`/`edit_run_code` surface. Cordis runs model-written plugins against the live DSH runtime, so enabling it requires shell-level trust.
 
 When a Cordis call rejects after a cell has assigned a large host or client source string, that top-level binding remains live. Retry only the Cordis call from a short later cell and reuse the binding instead of resending the source.
+
+After cold recovery or re-enabling Cordis, recorded Cordis values remain historical data but do not prove that process-local Plugins, Runs, approvals, or earlier Inspect observations are still live. PTC Plus adds a bounded recovery context until a new successful Cordis Inspect call validates the current process.
 
 See [Client UI](docs/client-ui.md), [ADR 0019](docs/adr/0019-plugin-settings-and-kill-switch.md), and [ADR 0020](docs/adr/0020-optional-cordis-tools-in-ptc-mode.md).
 

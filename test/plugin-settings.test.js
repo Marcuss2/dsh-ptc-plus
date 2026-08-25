@@ -166,6 +166,7 @@ function cordisAgent(disposeGate = undefined, options = {}) {
         }
         if (name === 'skills') {
           return {
+            registerProvider() { return () => {} },
             list: async ({ scope }) => {
               assert.equal(scope, agent)
               return [...skillCatalog.values()].map(({ content: _content, ...summary }) => summary)
