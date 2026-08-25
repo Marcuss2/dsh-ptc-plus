@@ -1,6 +1,9 @@
 # dsh-ptc-plus
 
+[English](README.md) | 简体中文
+
 [![Node.js ^22.19.0 || >=24.0.0](https://img.shields.io/badge/Node.js-%5E22.19.0%20%7C%7C%20%3E%3D24.0.0-5fa04e?logo=nodedotjs&logoColor=white)](package.json)
+[![npm version](https://img.shields.io/npm/v/dsh-ptc-plus?logo=npm)](https://www.npmjs.com/package/dsh-ptc-plus)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-PTC%20mode-4b6bfb)](https://github.com/deepseek-ai/deepseek-harness)
 [![Status: community plugin](https://img.shields.io/badge/Status-community%20plugin-lightgrey)](docs/publishing.md)
@@ -119,14 +122,14 @@ PTC Plus 提供会话绑定的持久 `run_code` 层。原生工具的权限、�
 
 ## 安装
 
-要求 Node.js `^22.19.0 || >=24.0.0`，并已安装带 TypeScript PTC 模式的 DSH：
+要求 Node.js `^22.19.0 || >=24.0.0`，并已安装带 TypeScript PTC 模式的 DSH。把 npm 正式包安装到你实际使用的 profile：
 
 ```sh
-dsh plugin --profile <profile> add github:muyuanjin/dsh-ptc-plus#main
+dsh plugin --profile <profile> add dsh-ptc-plus
 dsh --profile <profile> --dump-config
 ```
 
-其他安装方法和兼容性说明见[安装指南](docs/installation.md)。
+安装后重启对应的 DSH profile。固定 npm 版本、GitHub、本地 checkout 和 tarball 安装方式见[安装指南](docs/installation.md)。
 
 `danger-full-access` 是首要支持方式。worker 只隔离生命周期，不隔离恶意代码。
 

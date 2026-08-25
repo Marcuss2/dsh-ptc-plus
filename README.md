@@ -1,6 +1,9 @@
 # dsh-ptc-plus
 
+English | [简体中文](README.zh.md)
+
 [![Node.js ^22.19.0 || >=24.0.0](https://img.shields.io/badge/Node.js-%5E22.19.0%20%7C%7C%20%3E%3D24.0.0-5fa04e?logo=nodedotjs&logoColor=white)](package.json)
+[![npm version](https://img.shields.io/npm/v/dsh-ptc-plus?logo=npm)](https://www.npmjs.com/package/dsh-ptc-plus)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-PTC%20mode-4b6bfb)](https://github.com/deepseek-ai/deepseek-harness)
 [![Status: community plugin](https://img.shields.io/badge/Status-community%20plugin-lightgrey)](docs/publishing.md)
@@ -119,14 +122,14 @@ PTC Plus provides the session-bound persistent `run_code` layer. DSH and the ope
 
 ## Install
 
-Requires Node.js `^22.19.0 || >=24.0.0` and DSH with TypeScript PTC mode:
+Requires Node.js `^22.19.0 || >=24.0.0` and DSH with TypeScript PTC mode. Install the published package from npm into the profile you use:
 
 ```sh
-dsh plugin --profile <profile> add github:muyuanjin/dsh-ptc-plus#main
+dsh plugin --profile <profile> add dsh-ptc-plus
 dsh --profile <profile> --dump-config
 ```
 
-Other install methods and compatibility details are in the [installation guide](docs/installation.md).
+Restart that DSH profile after installation. Version-pinned npm, GitHub, local-checkout, and tarball installs are covered in the [installation guide](docs/installation.md).
 
 `danger-full-access` is the primary supported experience. The worker isolates lifecycle, not malicious code.
 
