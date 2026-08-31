@@ -40,6 +40,7 @@ test('checked client bundle is loadable through the DSH module loader contract',
     throw new Error(`unexpected client dependency ${name}`)
   })
   assert.equal(Array.from(exported.inject).join(','), 'settingsScope,slots,sessions,locale')
+  assert.ok(packageJson.dsh.client.inject.includes('@deepseek-ai/dsh-client-locale'))
   assert.equal(typeof exported.apply, 'function')
   assert.match(source, /settings\.plugin\.item/)
   assert.match(source, /conversation\.session\.header\.actions/)

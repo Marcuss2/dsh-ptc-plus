@@ -39,7 +39,7 @@ live 配置若因宿主能力缺失或 runtime 安装/重配置失败，会先�
 npm run build
 ```
 
-`package.json` 声明 `dsh.client` 与 `./client` export。`npm run build` 从 `src/client.js` 生成 `client.js`，`npm run build:check` 比较确定性产物；`prepack` 会阻止陈旧 bundle 发布。Client half 只依赖 DSH 注入面提供的 settings、session、slot 与 UI primitive 模块。
+`package.json` 声明 `dsh.client` 与 `./client` export。`npm run build` 从 `src/client.js` 生成 `client.js`，`npm run build:check` 比较确定性产物；`prepack` 会阻止陈旧 bundle 发布。Client half 只依赖 DSH 注入面提供的 settings、locale、session、slot 与 UI primitive 模块。
 
 ## 回退
 
